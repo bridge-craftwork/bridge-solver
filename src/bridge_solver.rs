@@ -483,7 +483,7 @@ fn add_discards(ordered: &mut OrderedCards, mut playable: Cards, trump: usize) {
     }
 
     // Sort discards by suit length (longer suits first) - stable sort to preserve suit order for ties
-    discards[..num_discards].sort_by(|a, b| b.1.cmp(&a.1));
+    discards[..num_discards].sort_by_key(|b| std::cmp::Reverse(b.1));
 
     // Add sorted discards
     for discard in discards.iter().take(num_discards) {
