@@ -4,7 +4,7 @@ version = "0.4.0"
 edition = "2021"
 license = "Unlicense"
 description = "Bridge Double-Dummy Solver - Port of macroxue/bridge-solver"
-repository = "https://github.com/Rick-Wilson/bridge-solver"
+repository = "https://github.com/bridge-craftwork/bridge-solver"
 keywords = ["bridge", "double-dummy", "solver", "cards"]
 categories = ["games", "algorithms"]
 
@@ -31,5 +31,5 @@ path = "src/bin/bridge-solver/main.rs"
 required-features = ["cli"]
 
 [dependencies]
-bridge-types = { git = "https://github.com/Rick-Wilson/bridge-types" }
+bridge-types = { git = "https://github.com/bridge-craftwork/bridge-types" }
 clap = { version = "4", features = ["derive"], optional = true }
