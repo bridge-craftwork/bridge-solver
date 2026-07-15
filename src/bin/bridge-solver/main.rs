@@ -10,8 +10,8 @@
 //! Usage: bridge-solver --input <file.pbn> --output <file.pbn>
 
 use bridge_solver::{
-    CutoffCache, Hands, PatternCache, Solver, CLUB, DIAMOND, EAST, HEART, NORTH, NOTRUMP, SOUTH,
-    SPADE, WEST,
+    par, CutoffCache, DdTricks, Hands, PatternCache, Solver, CLUB, DIAMOND, EAST, HEART, NORTH,
+    NOTRUMP, SOUTH, SPADE, WEST,
 };
 use clap::Parser;
 use std::fs;
@@ -429,7 +429,7 @@ fn solve_deal(hands: &Hands) -> DdResults {
 }
 
 /// Generate all DD tags as a string
-fn generate_dd_tags(results: &DdResults, _vulnerability: Option<Vulnerability>) -> String {
+fn generate_dd_tags(results: &DdResults, vulnerability: Option<Vulnerability>) -> String {
     let mut output = String::new();
 
     // 1. DoubleDummyTricks
@@ -438,11 +438,22 @@ fn generate_dd_tags(results: &DdResults, _vulnerability: Option<Vulnerability>) 
         results.encode_ddt()
     ));
 
-    // Note: OptimumScore and ParContract require proper par calculation which is complex.
-    // Par calculation involves game theory (both sides competing) and is not implemented yet.
-    // These tags are omitted for now.
+    // 2. Par: OptimumScore + ParContract (needs vulnerability to score).
+    if let Some(vul) = vulnerability {
+        let (vul_ns, vul_ew) = match vul {
+            Vulnerability::None => (false, false),
+            Vulnerability::NS => (true, false),
+            Vulnerability::EW => (false, true),
+            Vulnerability::All => (true, true),
+        };
+        let p = par(&to_par_table(results), vul_ns, vul_ew);
+        output.push_str(&format!("[OptimumScore \"{}\"]\n", p.optimum_score()));
+        if let Some(c) = p.contract {
+            output.push_str(&format!("[ParContract \"{}\"]\n", c.describe()));
+        }
+    }
 
-    // 2. OptimumResultTable
+    // 3. OptimumResultTable
     output.push_str("[OptimumResultTable \"Declarer;Denomination\\2R;Result\\2R\"]\n");
 
     let decl_names = ["N", "S", "E", "W"];
@@ -462,10 +473,19 @@ fn generate_dd_tags(results: &DdResults, _vulnerability: Option<Vulnerability>) 
     output
 }
 
-// Note: Par calculation (OptimumScore, ParContract) is not implemented.
-// Proper par calculation requires game theory to handle competitive bidding
-// and is complex to implement correctly. For now, we only generate
-// DoubleDummyTricks and OptimumResultTable.
+/// Convert this bin's `DdResults` (declarer N,S,E,W × denom NT,S,H,D,C) into the
+/// library `DdTricks` (seat N,E,S,W × strain C,D,H,S,NT) expected by `par`.
+fn to_par_table(results: &DdResults) -> DdTricks {
+    const DECL_TO_DIR: [usize; 4] = [0, 2, 1, 3]; // N,S,E,W -> N,S,E,W indices
+    const DENOM_TO_STRAIN: [usize; 5] = [4, 3, 2, 1, 0]; // NT,S,H,D,C -> C..NT
+    let mut tricks = [[0u8; 5]; 4];
+    for d in 0..4 {
+        for n in 0..5 {
+            tricks[DECL_TO_DIR[d]][DENOM_TO_STRAIN[n]] = results.get(d, n);
+        }
+    }
+    DdTricks { tricks }
+}
 
 #[cfg(test)]
 mod tests {
