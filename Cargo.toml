@@ -12,6 +12,11 @@ categories = ["games", "algorithms"]
 default = []
 cli = ["clap"]
 
+# Double-dummy cardplay analysis (src/analyse_play.rs): per-card costs and
+# alternatives. Optional so callers wanting only a DD result do not pull serde
+# and sha2. Enabled by the HTTP service and the WebAssembly build.
+play-analysis = ["serde", "sha2"]
+
 # Debug features
 debug_mtdf = []
 debug_fast = []
@@ -33,3 +38,5 @@ required-features = ["cli"]
 [dependencies]
 bridge-types = { git = "https://github.com/bridge-craftwork/bridge-types" }
 clap = { version = "4", features = ["derive"], optional = true }
+serde = { version = "1", features = ["derive"], optional = true }
+sha2 = { version = "0.10", optional = true }

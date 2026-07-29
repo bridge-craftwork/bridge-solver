@@ -653,7 +653,7 @@ impl<'a> Search<'a> {
 
         // Pattern cache store (matching C++ common_bounds_cache)
         if !NO_TT.load(Ordering::Relaxed) && !pattern_cutoff {
-            let relative_tricks = (result.ns_tricks - ns_tricks_won) as i8;
+            let relative_tricks = result.ns_tricks as i8 - ns_tricks_won as i8;
             let bounds = if (result.ns_tricks as i8) < beta {
                 Bounds::new(0, relative_tricks)
             } else {

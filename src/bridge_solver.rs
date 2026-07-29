@@ -640,7 +640,21 @@ impl Solver {
     ) -> u8 {
         NODE_COUNT.store(0, Ordering::Relaxed);
         XRAY_COUNT.store(0, Ordering::Relaxed);
-        let start = std::time::Instant::now();
+
+        // The clock is only wanted for the optional [PERF] line below, so read
+        // it only when that is switched on. Two reasons this matters:
+        //
+        //  * On wasm32 `Instant::now()` has no implementation and traps, which
+        //    would make every solve in a browser abort. Timing and eprintln are
+        //    both meaningless there anyway, so the whole diagnostic is compiled
+        //    out for that target.
+        //  * Even natively this saved a clock read on every single solve, and
+        //    solves are the hot path.
+        #[cfg(not(target_arch = "wasm32"))]
+        let start = SHOW_PERF
+            .load(Ordering::Relaxed)
+            .then(std::time::Instant::now);
+
         let num_tricks = self.num_tricks;
         let guess = self.guess_tricks();
         let result = self.mtdf_search_with_caches_and_partial(
@@ -650,7 +664,9 @@ impl Solver {
             pattern_cache,
             partial_trick,
         );
-        if SHOW_PERF.load(Ordering::Relaxed) {
+
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(start) = start {
             let elapsed = start.elapsed();
             let iterations = NODE_COUNT.load(Ordering::Relaxed);
             let ns_per_iter = if iterations > 0 {
@@ -665,6 +681,7 @@ impl Solver {
                 ns_per_iter
             );
         }
+
         result
     }
 
