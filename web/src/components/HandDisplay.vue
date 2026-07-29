@@ -122,6 +122,9 @@ function onClick(letter, rank) {
   gap: calc(8px * var(--table-scale));
   font-family: var(--font-cards);
   font-size: calc(24px * var(--table-scale));
+  /* The body's 1.55 spaces 24px glyphs nearly 40px apart, which reads as four
+     separate lines rather than one holding. */
+  line-height: 1.2;
 }
 
 .suit-symbol {

@@ -221,8 +221,21 @@ async function inspect(index) {
   if (result) node.value = result
 }
 
-/** Clicking a card inspects the node at which that card was played. */
+/**
+ * A card click opens that card's moment — or, if one is already open, closes it.
+ *
+ * Closing on any card is the important half. While a node is open the hands are
+ * rewound to that moment, so the cards on screen are the ones still held; looking
+ * one up in the full record finds where it was *eventually* played, which is
+ * usually a later trick. Treating that as navigation means clicking almost
+ * anything jumps somewhere unrelated instead of going back. Moving between
+ * moments is what the play trace is for, where the tricks are laid out in order.
+ */
 function onCardClick({ code }) {
+  if (node.value) {
+    node.value = null
+    return
+  }
   const b = board.value
   if (!b?.plays?.length) return
   const target = normalizeCardCode(code)
@@ -304,7 +317,23 @@ watch(boardIndex, loadBoard)
 
       <NodePanel v-if="node" :node="node" @close="node = null" />
 
+      <!--
+        Three columns on a wide screen: the play record, the table, and the
+        summaries. The trace belongs beside the hands rather than under them —
+        finding where a hand went wrong means reading tricks in order while
+        looking at what each seat held, and putting it below the fold makes that
+        two glances instead of one.
+      -->
       <div class="layout">
+        <section v-if="trace" class="trace-col" aria-label="Play record">
+          <PlayTrace
+            :trace="trace.trace"
+            :tricks="replayed?.tricks || []"
+            :selected-index="node?.index ?? -1"
+            @select="inspect"
+          />
+        </section>
+
         <div class="table-col">
           <BridgeTable
             :hands="shownHands"
@@ -323,6 +352,16 @@ watch(boardIndex, loadBoard)
             Cards that gave a trick away are tinted and badged with the trick
             number. Click any card to see what every alternative was worth.
           </p>
+
+          <p v-if="board.plays?.length && !request" class="note">
+            This board has a play record but no contract, so there is nothing to
+            cost the cards against. The double-dummy table still applies.
+          </p>
+          <p v-else-if="!board.plays?.length" class="note">
+            No play record in this board — the double-dummy table is all there is
+            to show. A LIN record or a BBO handviewer URL carries the cards
+            played.
+          </p>
         </div>
 
         <aside class="side-col">
@@ -340,24 +379,6 @@ watch(boardIndex, loadBoard)
           <AuctionTable :bids="board.auction" :dealer="board.dealer" />
         </aside>
       </div>
-
-      <section v-if="trace" class="trace-section" aria-label="Play record">
-        <PlayTrace
-          :trace="trace.trace"
-          :tricks="replayed?.tricks || []"
-          :selected-index="node?.index ?? -1"
-          @select="inspect"
-        />
-      </section>
-
-      <p v-else-if="board.plays?.length && !request" class="note">
-        This board has a play record but no contract, so there is nothing to cost
-        the cards against. The double-dummy table above still applies.
-      </p>
-      <p v-else-if="!board.plays?.length" class="note">
-        No play record in this board — the double-dummy table is all there is to
-        show. A LIN record or a BBO handviewer URL carries the cards played.
-      </p>
     </template>
 
     <VerifySection />
@@ -481,23 +502,57 @@ main > * {
   border-color: #b9dfc6;
 }
 
+/*
+ * Trace | table | summaries. The outer columns size to their content and the
+ * table takes the rest, so the compass stays centred in whatever is left rather
+ * than drifting against one edge.
+ */
 .layout {
-  display: flex;
-  gap: 22px;
-  align-items: flex-start;
-  flex-wrap: wrap;
+  display: grid;
+  grid-template-columns: minmax(210px, 250px) minmax(0, 1fr) auto;
+  gap: 26px;
+  align-items: start;
+}
+
+.trace-col {
+  position: sticky;
+  /* Keeps the tricks in view while the eye is on the hands. */
+  top: 12px;
+  max-height: calc(100vh - 24px);
+  overflow-y: auto;
 }
 
 .table-col {
-  flex: 1 1 460px;
   min-width: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
 }
 
 .side-col {
-  flex: 0 0 auto;
   display: flex;
   flex-direction: column;
   gap: 16px;
+}
+
+/* Two columns: the trace moves under the table, the summaries stay beside it. */
+@media (max-width: 1180px) {
+  .layout {
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+
+  .trace-col {
+    grid-row: 2;
+    grid-column: 1 / -1;
+    position: static;
+    max-height: none;
+  }
+}
+
+@media (max-width: 720px) {
+  .layout {
+    grid-template-columns: minmax(0, 1fr);
+  }
 }
 
 .table-hint,
