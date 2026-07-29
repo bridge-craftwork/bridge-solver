@@ -1,0 +1,97 @@
+name: Pages
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'src/**'
+      - 'wasm/**'
+      - 'web/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - '.github/workflows/pages.yml'
+  # Lets the site be redeployed without a code change.
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Latest wins: a superseded deploy has nothing worth finishing.
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: wasm
+
+      - uses: actions/setup-node@v4
+        with:
+          # Vite 7 wants 20.19+ or 22.12+; 22 resolves to the latest 22.x.
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Install wasm-pack
+        uses: jetli/wasm-pack-action@v0.4.0
+        with:
+          version: latest
+
+      - name: Install dependencies
+        working-directory: web
+        run: npm ci
+
+      # Before the site build: Vite bundles the generated module as an asset, so
+      # it has to exist on disk first.
+      - name: Build the WebAssembly bundle
+        working-directory: web
+        run: npm run wasm
+
+      - name: Run the site tests
+        working-directory: web
+        run: npm test
+
+      - name: Build the site
+        working-directory: web
+        run: npm run build
+
+      # A missing wasm asset produces a page that loads and then quietly fails to
+      # analyse anything, so fail here instead.
+      - name: Check the bundle landed
+        working-directory: web
+        run: |
+          test -f dist/index.html
+          ls dist/assets/*.wasm
+          ls dist/assets/*.js
+          du -sh dist
+
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: web/dist
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      # `deploy-pages` caps its own timeout at the 600000 ms default; a larger
+      # `with: timeout` is silently clamped rather than honoured.
+      - id: deployment
+        uses: actions/deploy-pages@v4

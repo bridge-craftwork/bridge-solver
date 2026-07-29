@@ -63,7 +63,43 @@ through a hand and each new position costs one solve, the rest are hits.
 
 ---
 
-## Workstream A — LIN input (blocks B and C)
+## Done — workstream A: LIN input
+
+`wasm/src/lin_input.rs`. `parse_lin(input)` takes a LIN string *or* a handviewer
+URL and returns the `PlayRequest` plus contract, seat names (reordered to
+N,E,S,W), dealer, vulnerability, board, claim and auction.
+`parse_lin_file(content)` does a board per line, reporting an unanalysable board
+in place rather than dropping it. 16 tests.
+
+It was not pure wiring. Three things the plan below did not anticipate:
+
+- **`Auction::final_contract()` gets declarer wrong** — it credits whoever made
+  the *last* bid, but declarer is the first of that side to name the strain. Over
+  `1S - P - 4S` it says South. That inverts declarer on most ordinary auctions,
+  which swaps the opening leader and invalidates every trick count downstream.
+  `resolve_contract` in `lin_input.rs` does it correctly; **`bridge-types` still
+  needs the upstream fix**, and anything else calling `final_contract` is
+  suspect.
+- **LIN spells doubles `d`/`r`**, which `Call::from_pbn` rejects — it wants PBN's
+  `X`/`XX`. Both spellings occur in real files (BBO writes the first, tools that
+  generate LIN from PBN write the second), so both are accepted.
+- **`BidWithAnnotation` is `bridge-encodings`' own type**, not `AnnotatedCall`,
+  so the auction has to be rebuilt call by call rather than handed over.
+
+Declarer attribution is checked against three boards whose contract and declarer
+were recorded independently by `bridge-bots`, in the spirit of the external
+reference the DD table got.
+
+The deal string is anchored on North whatever the dealer, because the position
+cache keys on it with only case and whitespace normalised — a deal written from
+another seat would key differently and re-solve from scratch.
+
+CI gained a `WebAssembly` job. `wasm/` is a separate workspace, so the existing
+`--workspace` jobs never touched it: its tests did not run and a wasm32-only
+regression could ship unnoticed.
+
+<details>
+<summary>The original plan, for reference</summary>
 
 Both remaining deliverables need to turn a LIN string or a BBO handviewer URL
 into a `PlayRequest`. Put it in `wasm/` so the site and the extension share it.
@@ -90,7 +126,72 @@ Roughly 50 lines plus tests. Add `bridge-encodings` to `wasm/Cargo.toml`.
 **Watch out:** a claimed hand has fewer than 52 cards in `pc|`, and the sample
 board claimed after 41. Trailing partial tricks are normal — don't assume 52.
 
+</details>
+
+Confirmed while implementing, so don't re-derive: `parse_md` fills in the fourth
+hand itself when `md|` carries only three; `Suit::from_char` and
+`Rank::from_char` both uppercase, so vugraph LIN's lowercase `pc|dA|` parses;
+`Direction::next` is clockwise, so `declarer.next()` is the correct leader; and
+`Vulnerability::to_pbn()` yields exactly `None|NS|EW|All`, which is worth using
+over matching the variants because those were renamed between the pinned and
+local revisions.
+
+Real fixtures live in `EDGAR-Defense-Toolkit/tests/fixtures/input/` (12 boards,
+with per-player DD error counts alongside) and
+`bridge-bots/bridgebots/tests/resources/` (vugraph, multi-line records).
+
 ---
+
+## Done — deliverable 2: the Pages site
+
+`web/`. Vite 7 + Vue 3, deploying via `.github/workflows/pages.yml`. Paste a PBN
+board or file, a LIN record or file, or a BBO handviewer URL; get the DD table,
+the auction, a play trace with every error tagged by trick, a per-player summary,
+and click-any-card alternatives. 70 JS tests.
+
+Verified working in a real browser under the real CSP, not just built: the wasm
+loads in its worker, the trace renders, and clicking a card returns all 13 legal
+alternatives with their costs.
+
+Departures from the plan below, all deliberate:
+
+- **The solver runs in a Web Worker.** The roadmap wanted this for a tourney;
+  it turned out to be needed anyway, and it also gives the position cache a
+  natural home for the page's lifetime.
+- **`--table-scale` is the one thing worth keeping from the classroom's CSS.**
+  Its table components hard-code their colours and consume only that variable, so
+  copying `design-tokens.css` alone would not reproduce the look. The literals are
+  tokens here and used as tokens.
+- **`HandDisplay`'s measured-fit machinery is gone** — the probe row, the
+  `ResizeObserver`, the double-rAF settle, `--suit-scale`, the `+N` popup. All of
+  it existed to fit a live table into an arbitrary viewport; this site picks its
+  own width. That was ~40% of the file and every moving part in it. The marks
+  contract is kept exactly, because that is what the overlay renders through.
+- **The 877-line grid arranger is not vendored.** `BridgeTable`'s legacy compass
+  branch does the same job with the same `marksFor` merge and no config.
+- **No Google Fonts.** A third-party font CDN in the waterfall of a page whose
+  claim is that nothing leaves your browser is a bad look. System fonts, and the
+  card glyphs were always going to be `'Segoe UI'`/`system-ui` anyway.
+- **Dummy's errors are credited to declarer**, who chose them, with dummy scored
+  as not applicable. That is BBO's own BSOL convention — see the verification
+  below — and attributing by card holder instead reads as though dummy had made
+  mistakes of its own.
+
+**Two traps worth knowing.** `postMessage` cannot clone a `Proxy`, and Vue
+reactive state *is* proxies — passing a reactive `plays` array to the worker
+fails with `DataCloneError`, not a wrong answer, so the analysis silently
+vanishes. `playRequest` copies to plain data and a test pins it. Relatedly, the
+classroom client's null-on-any-failure discipline is right for the UI but
+discards the reason; `optional()` keeps the `null` and logs why, which is the only
+reason that bug was findable.
+
+Vite 8 is not usable here: it builds on rolldown, whose `darwin-arm64` native
+binding would not install. Vite 7 is rollup-based and outside the advisory range
+(`<=6.4.2`), and `vitest` is pinned past its own (`<=3.2.5`) — `npm audit` is
+clean, and should stay that way.
+
+<details>
+<summary>The original plan, for reference</summary>
 
 ## Workstream B — deliverable 2: the Pages site
 
@@ -119,6 +220,18 @@ Carry over from `pdf-handouts`, where it is all proven:
 **Watch out:** `input.files` and `dataTransfer.files` are live collections the
 browser empties underneath an async handler. Snapshot with `Array.from` before
 any `await` or you silently keep only the first file.
+
+</details>
+
+**Verified against BBO's own analysis.** A bridgewebs BSOL payload for a real
+board — 3NT claimed after 41 cards — carries both a DD table and a per-player
+error count, and this engine reproduces all of it: the `ddtricks` string
+`45544465449789987899` byte for byte, 5 costed errors, and per-player counts of
+North 1, South 1, declarer 3 once dummy's two are folded in. It is also the
+auction that most needs checking, `1NT - Pass - 2C - Pass - 2H - Pass - 3NT`:
+East bid the final 3NT but West named notrump first, so **West declares** — the
+exact case `final_contract` gets wrong. Pinned as
+`matches_bsol_on_a_real_board`. Keep using references like this.
 
 ---
 
@@ -167,14 +280,6 @@ disagree about a player's mistakes is a bad thing to discover from a student.
 
 ## Known issues
 
-**`tests::test_replaces_existing_dd_tags` is stale** (`src/bin/bridge-solver/main.rs`).
-It asserts `[OptimumScore` and `[ParContract` are absent, commented "we don't
-generate them" — but `a14e712` added par calculation and now generates both. CI
-never caught it because the test job ran with default features (`default = []`),
-so the `cli` binaries and their tests were never built. The test job currently
-uses `--features play-analysis` and deliberately omits `cli`; add `cli` once the
-assertions are updated to the intended behaviour.
-
 **The Lint job was red on `main` from 2026-07-15 to 2026-07-29** on a `cargo fmt`
 diff, and nobody was notified, because a failing job on the default branch sends
 no signal. Worth a branch protection rule or a notification if this matters.
@@ -200,10 +305,15 @@ cargo test --workspace
 ```
 
 with two additions here: the test and second clippy passes name
-`--features play-analysis`, because the 13 `analyse_play` tests do not compile
-without it. **Not `--all-features`** — that switches on the behaviour-altering
+`--features cli,play-analysis`, because the 13 `analyse_play` tests do not
+compile without `play-analysis`, and the CLI binaries' tests do not build
+without `cli`. **Not `--all-features`** — that switches on the behaviour-altering
 debug features (`no_tricks_pruning`, `no_fast_tricks`, ...) together, which
 changes solver results and fails the suite.
+
+The committed `Cargo.lock` must cover the optional features' dependencies
+(`serde`, `sha2`), or every `play-analysis` build re-resolves and the CI cache
+never hits.
 
 The toolchain is deliberately **not pinned**. Drift gets fixed as it appears
 rather than saved up for one large repin.

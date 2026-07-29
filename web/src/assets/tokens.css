@@ -1,0 +1,138 @@
+/*
+ * Design tokens, taken from Bridge-Classroom so the two sites read as one
+ * family.
+ *
+ * Its table components mostly hard-code their colours rather than using tokens,
+ * so the literals that actually matter are here as tokens and used as tokens:
+ * #d32f2f / #1a1a1a for the suits, #1D9E75 as the brand green, #6a1b9a as the
+ * badge channel. Same rendered result, one place to change it.
+ *
+ * No web fonts. The classroom app pulls DM Sans and Source Serif from Google
+ * Fonts, which would put a third-party host in the network waterfall of a page
+ * whose whole claim is that nothing leaves your browser. System fonts instead —
+ * and the card glyphs were never going to be either of those anyway, since the
+ * classroom deliberately renders them in 'Segoe UI'/system-ui for its suit
+ * symbols and digits.
+ */
+
+:root {
+  /* Type */
+  --font-body: system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+  --font-heading: Georgia, 'Times New Roman', serif;
+  /* Cards and bids: chosen for suit-symbol and digit rendering, not for brand. */
+  --font-cards: 'Segoe UI', system-ui, sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+
+  /*
+   * Every table component sizes itself as calc(<px> * var(--table-scale)).
+   * At 1.0 the values equal the classroom's literals exactly; raise it on a
+   * wrapper and the whole table grows coherently.
+   */
+  --table-scale: 1;
+
+  /* Suits — the two colours used everywhere */
+  --suit-red: #d32f2f;
+  --suit-black: #1a1a1a;
+
+  /* Brand */
+  --green: #1d9e75;
+  --green-hover: #167a5a;
+  --green-pale: #d4edda;
+  --green-ink: #155724;
+
+  /* The badge/annotation channel. Reserved: nothing else uses purple. */
+  --badge: #6a1b9a;
+
+  /* Double-dummy cost tinting. Alpha-blended so the glyph stays legible. */
+  --cost-mild: rgba(216, 72, 72, 0.28);
+  --cost-severe: rgba(198, 40, 40, 0.4);
+  --alt-good: rgba(46, 160, 67, 0.34);
+  --alt-bad: rgba(216, 72, 72, 0.34);
+
+  /* Neutrals */
+  --bg-warm: #f5f3ef;
+  --bg-white: #ffffff;
+  --surface: #f5f5f5;
+  --surface-alt: #f3f3f0;
+  --border: #e0ddd7;
+  --border-strong: #333;
+  --rule: #ddd;
+  --text: #1a1a1a;
+  --text-secondary: #6b7280;
+  --text-muted: #9ca3af;
+
+  /* Highlights */
+  --focus-blue: #bbdefb;
+  --focus-blue-strong: #90caf9;
+
+  /* Layout */
+  --radius-card: 10px;
+  --radius-button: 6px;
+  --max-width: 1180px;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  background: var(--bg-warm);
+  color: var(--text);
+  font-family: var(--font-body);
+  line-height: 1.55;
+  -webkit-text-size-adjust: 100%;
+}
+
+h1,
+h2,
+h3 {
+  font-family: var(--font-heading);
+  line-height: 1.25;
+  margin: 0 0 0.4em;
+}
+
+a {
+  color: var(--green-hover);
+}
+
+code,
+pre {
+  font-family: var(--font-mono);
+  font-size: 0.9em;
+}
+
+pre {
+  overflow-x: auto;
+  background: #1f2420;
+  color: #e8f0ea;
+  padding: 12px 14px;
+  border-radius: var(--radius-button);
+}
+
+.suit-red {
+  color: var(--suit-red);
+}
+
+.suit-black {
+  color: var(--suit-black);
+}
+
+/* Visible only to screen readers — used for the seat/trick context a sighted
+   reader gets from position. */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
