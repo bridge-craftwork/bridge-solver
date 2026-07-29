@@ -112,10 +112,59 @@ jobs:
       working-directory: wasm
       run: cargo build --target wasm32-unknown-unknown --release
 
+  # The Pages site. Its own build runs only on main, so this is what catches a
+  # broken site on a pull request.
+  web:
+    name: Web
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Install Rust toolchain
+      uses: dtolnay/rust-toolchain@stable
+      with:
+        targets: wasm32-unknown-unknown
+
+    - name: Cache Rust dependencies
+      uses: Swatinem/rust-cache@v2
+      with:
+        workspaces: wasm
+
+    - name: Install Node
+      uses: actions/setup-node@v4
+      with:
+        # Vite 7 wants 20.19+ or 22.12+; 22 resolves to the latest 22.x.
+        node-version: 22
+        cache: npm
+        cache-dependency-path: web/package-lock.json
+
+    - name: Install wasm-pack
+      uses: jetli/wasm-pack-action@v0.4.0
+      with:
+        version: latest
+
+    - name: Install dependencies
+      working-directory: web
+      run: npm ci
+
+    - name: Build the WebAssembly bundle
+      working-directory: web
+      run: npm run wasm
+
+    - name: Run tests
+      working-directory: web
+      run: npm test
+
+    - name: Build the site
+      working-directory: web
+      run: npm run build
+
   build-summary:
     name: Build Summary
     runs-on: ubuntu-latest
-    needs: [test, lint, wasm]
+    needs: [test, lint, wasm, web]
 
     steps:
     - name: Summary
@@ -123,4 +172,5 @@ jobs:
         echo "All tests passed"
         echo "All platforms (Linux, Windows, macOS) built successfully"
         echo "WebAssembly target built and its tests passed"
+        echo "The Pages site built and its tests passed"
         echo "Code formatting and linting passed"

@@ -585,6 +585,150 @@ mod tests {
         assert_eq!(got.dealer, "E");
     }
 
+    /// End to end: a parsed LIN record must actually drive the engine.
+    ///
+    /// Every other test here checks the parse in isolation, which cannot catch a
+    /// request that is well-formed but that `running_trace` rejects — and that
+    /// is exactly the failure a caller sees as "no analysis" with no reason
+    /// given.
+    #[test]
+    fn a_parsed_board_feeds_the_engine() {
+        use bridge_solver::analyse_play::{self, PlayInput};
+        use bridge_solver::Hands;
+        use bridge_types::Deal;
+        use std::collections::HashMap;
+
+        let got = parse(REDOUBLED_CLAIMED).expect("should parse");
+        let req = &got.request;
+
+        let deal = Deal::from_pbn(&req.dealstr).expect("the deal string should parse back");
+        let input = PlayInput {
+            hands: Hands::from_deal(&deal),
+            trump: analyse_play::parse_trump(&req.trump).expect("trump"),
+            declarer: analyse_play::parse_seat(&req.declarer).expect("declarer"),
+            leader: analyse_play::parse_seat(&req.leader).expect("leader"),
+            plays: req
+                .plays
+                .iter()
+                .map(|p| analyse_play::parse_card(p).expect("card"))
+                .collect(),
+        };
+
+        let keys = analyse_play::prefix_keys(&req.dealstr, input.trump, input.leader, &input.plays);
+        let output = analyse_play::running_trace(&input, &keys, &HashMap::new())
+            .expect("the engine should accept a request built from real LIN");
+
+        assert_eq!(output.trace.len(), 28, "one trace entry per card played");
+        // South declares 6C and the double-dummy table gives South 12 tricks in
+        // clubs, which is what was claimed.
+        assert_eq!(output.contract_tricks, 12);
+    }
+
+    /// Checked against Bridge Base's own BSOL analysis of a real board.
+    ///
+    /// The reference is a bridgewebs BSOL payload carrying both the
+    /// double-dummy table and a per-player error count, for a hand claimed after
+    /// 41 cards. It pins three separate things at once: the table, the trace
+    /// length, and the error attribution.
+    ///
+    /// It is also the auction that matters most. `1NT - Pass - 2C - Pass -
+    /// 2H - Pass - 3NT`: East bid the final 3NT, but West named notrump first,
+    /// so **West declares**. `Auction::final_contract` would say East, put the
+    /// opening lead in the wrong hand, and produce a confidently wrong answer —
+    /// which is why [`resolve_contract`] exists.
+    #[test]
+    fn matches_bsol_on_a_real_board() {
+        use bridge_solver::analyse_play::{self, PlayInput};
+        use bridge_solver::Hands;
+        use bridge_types::{Deal, Direction, Strain};
+        use std::collections::{BTreeMap, HashMap};
+
+        // BSOL's `Deal`, which is in N,E,S,W order — West holds 16 HCP and
+        // opened 1NT, which is what identifies the ordering.
+        let dealstr = "N:J98.QT83.K6.J853 Q762.J4.QJT5.AT6 KT43.652.A984.94 A5.AK97.732.KQ72";
+        let plays = [
+            "C3", "CT", "C4", "C2", "DQ", "D4", "D2", "DK", "SJ", "S2", "S3", "SA", "D3", "D6",
+            "DJ", "DA", "C9", "C7", "C5", "CA", "DT", "D8", "D7", "S8", "HJ", "H6", "H7", "HQ",
+            "S9", "SQ", "SK", "S5", "ST", "H9", "C8", "S6", "D9", "CQ", "CJ", "D5", "H5",
+        ];
+        assert_eq!(plays.len(), 41, "a claim ended this board early");
+
+        let deal = Deal::from_pbn(dealstr).expect("deal should parse");
+
+        // 1. The table, encoded the way BSOL sends it: seat-major over N,S,E,W
+        //    with strains NT,S,H,D,C. Both orders differ from this engine's, so
+        //    getting the string out is itself part of the check.
+        let table = bridge_solver::par::solve_dd_table(&deal);
+        let mut ddtricks = String::new();
+        for seat in [
+            Direction::North,
+            Direction::South,
+            Direction::East,
+            Direction::West,
+        ] {
+            for strain in [
+                Strain::NoTrump,
+                Strain::Spades,
+                Strain::Hearts,
+                Strain::Diamonds,
+                Strain::Clubs,
+            ] {
+                let n = table.get(seat, strain);
+                ddtricks.push(if n < 10 {
+                    (b'0' + n) as char
+                } else {
+                    (b'a' + n - 10) as char
+                });
+            }
+        }
+        assert_eq!(ddtricks, "45544465449789987899");
+
+        // 2. The trace.
+        let input = PlayInput {
+            hands: Hands::from_deal(&deal),
+            trump: analyse_play::parse_trump("NT").expect("NT"),
+            declarer: analyse_play::parse_seat("W").expect("W declares"),
+            leader: analyse_play::parse_seat("N").expect("North leads"),
+            plays: plays
+                .iter()
+                .map(|p| analyse_play::parse_card(p).expect("card"))
+                .collect(),
+        };
+        let keys = analyse_play::prefix_keys(dealstr, input.trump, input.leader, &input.plays);
+        let output = analyse_play::running_trace(&input, &keys, &HashMap::new())
+            .expect("trace should solve");
+
+        // West takes 8 in notrump but bid 3NT, so double-dummy is already one
+        // short — and the table above agrees, giving W's NT cell as 8. They
+        // claimed 7, one fewer still.
+        assert_eq!(output.contract_tricks, 8);
+
+        let costed: Vec<_> = output.trace.iter().filter(|e| e.cost > 0).collect();
+        assert_eq!(
+            costed.len(),
+            5,
+            "BSOL reports 5 costed errors on this board"
+        );
+
+        let mut by_seat: BTreeMap<&str, u32> = BTreeMap::new();
+        for e in &costed {
+            *by_seat.entry(e.seat.as_str()).or_default() += e.cost as u32;
+        }
+
+        // 3. Attribution. This engine credits a card to the seat that holds it;
+        //    BSOL credits dummy's cards to declarer, who actually chooses them,
+        //    and scores dummy itself as not applicable. West declares, so East is
+        //    dummy — and folding East into West reproduces BSOL's per-player
+        //    counts exactly: North 1, South 1, West 3.
+        assert_eq!(by_seat.get("N").copied().unwrap_or(0), 1);
+        assert_eq!(by_seat.get("S").copied().unwrap_or(0), 1);
+        assert_eq!(by_seat.get("W").copied().unwrap_or(0), 1);
+        assert_eq!(by_seat.get("E").copied().unwrap_or(0), 2);
+
+        let declarer_side = by_seat.get("W").copied().unwrap_or(0) + by_seat["E"];
+        assert_eq!(declarer_side, 3, "BSOL scores the declaring side as 3");
+    }
+
     #[test]
     fn parses_a_multi_board_file() {
         let content = format!(

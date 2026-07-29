@@ -142,6 +142,57 @@ with per-player DD error counts alongside) and
 
 ---
 
+## Done — deliverable 2: the Pages site
+
+`web/`. Vite 7 + Vue 3, deploying via `.github/workflows/pages.yml`. Paste a PBN
+board or file, a LIN record or file, or a BBO handviewer URL; get the DD table,
+the auction, a play trace with every error tagged by trick, a per-player summary,
+and click-any-card alternatives. 70 JS tests.
+
+Verified working in a real browser under the real CSP, not just built: the wasm
+loads in its worker, the trace renders, and clicking a card returns all 13 legal
+alternatives with their costs.
+
+Departures from the plan below, all deliberate:
+
+- **The solver runs in a Web Worker.** The roadmap wanted this for a tourney;
+  it turned out to be needed anyway, and it also gives the position cache a
+  natural home for the page's lifetime.
+- **`--table-scale` is the one thing worth keeping from the classroom's CSS.**
+  Its table components hard-code their colours and consume only that variable, so
+  copying `design-tokens.css` alone would not reproduce the look. The literals are
+  tokens here and used as tokens.
+- **`HandDisplay`'s measured-fit machinery is gone** — the probe row, the
+  `ResizeObserver`, the double-rAF settle, `--suit-scale`, the `+N` popup. All of
+  it existed to fit a live table into an arbitrary viewport; this site picks its
+  own width. That was ~40% of the file and every moving part in it. The marks
+  contract is kept exactly, because that is what the overlay renders through.
+- **The 877-line grid arranger is not vendored.** `BridgeTable`'s legacy compass
+  branch does the same job with the same `marksFor` merge and no config.
+- **No Google Fonts.** A third-party font CDN in the waterfall of a page whose
+  claim is that nothing leaves your browser is a bad look. System fonts, and the
+  card glyphs were always going to be `'Segoe UI'`/`system-ui` anyway.
+- **Dummy's errors are credited to declarer**, who chose them, with dummy scored
+  as not applicable. That is BBO's own BSOL convention — see the verification
+  below — and attributing by card holder instead reads as though dummy had made
+  mistakes of its own.
+
+**Two traps worth knowing.** `postMessage` cannot clone a `Proxy`, and Vue
+reactive state *is* proxies — passing a reactive `plays` array to the worker
+fails with `DataCloneError`, not a wrong answer, so the analysis silently
+vanishes. `playRequest` copies to plain data and a test pins it. Relatedly, the
+classroom client's null-on-any-failure discipline is right for the UI but
+discards the reason; `optional()` keeps the `null` and logs why, which is the only
+reason that bug was findable.
+
+Vite 8 is not usable here: it builds on rolldown, whose `darwin-arm64` native
+binding would not install. Vite 7 is rollup-based and outside the advisory range
+(`<=6.4.2`), and `vitest` is pinned past its own (`<=3.2.5`) — `npm audit` is
+clean, and should stay that way.
+
+<details>
+<summary>The original plan, for reference</summary>
+
 ## Workstream B — deliverable 2: the Pages site
 
 A Vite + Vue 3 app in `web/`, deploying to this repo's GitHub Pages, following
@@ -169,6 +220,18 @@ Carry over from `pdf-handouts`, where it is all proven:
 **Watch out:** `input.files` and `dataTransfer.files` are live collections the
 browser empties underneath an async handler. Snapshot with `Array.from` before
 any `await` or you silently keep only the first file.
+
+</details>
+
+**Verified against BBO's own analysis.** A bridgewebs BSOL payload for a real
+board — 3NT claimed after 41 cards — carries both a DD table and a per-player
+error count, and this engine reproduces all of it: the `ddtricks` string
+`45544465449789987899` byte for byte, 5 costed errors, and per-player counts of
+North 1, South 1, declarer 3 once dummy's two are folded in. It is also the
+auction that most needs checking, `1NT - Pass - 2C - Pass - 2H - Pass - 3NT`:
+East bid the final 3NT but West named notrump first, so **West declares** — the
+exact case `final_contract` gets wrong. Pinned as
+`matches_bsol_on_a_real_board`. Keep using references like this.
 
 ---
 
