@@ -63,7 +63,43 @@ through a hand and each new position costs one solve, the rest are hits.
 
 ---
 
-## Workstream A — LIN input (blocks B and C)
+## Done — workstream A: LIN input
+
+`wasm/src/lin_input.rs`. `parse_lin(input)` takes a LIN string *or* a handviewer
+URL and returns the `PlayRequest` plus contract, seat names (reordered to
+N,E,S,W), dealer, vulnerability, board, claim and auction.
+`parse_lin_file(content)` does a board per line, reporting an unanalysable board
+in place rather than dropping it. 16 tests.
+
+It was not pure wiring. Three things the plan below did not anticipate:
+
+- **`Auction::final_contract()` gets declarer wrong** — it credits whoever made
+  the *last* bid, but declarer is the first of that side to name the strain. Over
+  `1S - P - 4S` it says South. That inverts declarer on most ordinary auctions,
+  which swaps the opening leader and invalidates every trick count downstream.
+  `resolve_contract` in `lin_input.rs` does it correctly; **`bridge-types` still
+  needs the upstream fix**, and anything else calling `final_contract` is
+  suspect.
+- **LIN spells doubles `d`/`r`**, which `Call::from_pbn` rejects — it wants PBN's
+  `X`/`XX`. Both spellings occur in real files (BBO writes the first, tools that
+  generate LIN from PBN write the second), so both are accepted.
+- **`BidWithAnnotation` is `bridge-encodings`' own type**, not `AnnotatedCall`,
+  so the auction has to be rebuilt call by call rather than handed over.
+
+Declarer attribution is checked against three boards whose contract and declarer
+were recorded independently by `bridge-bots`, in the spirit of the external
+reference the DD table got.
+
+The deal string is anchored on North whatever the dealer, because the position
+cache keys on it with only case and whitespace normalised — a deal written from
+another seat would key differently and re-solve from scratch.
+
+CI gained a `WebAssembly` job. `wasm/` is a separate workspace, so the existing
+`--workspace` jobs never touched it: its tests did not run and a wasm32-only
+regression could ship unnoticed.
+
+<details>
+<summary>The original plan, for reference</summary>
 
 Both remaining deliverables need to turn a LIN string or a BBO handviewer URL
 into a `PlayRequest`. Put it in `wasm/` so the site and the extension share it.
@@ -89,6 +125,20 @@ Roughly 50 lines plus tests. Add `bridge-encodings` to `wasm/Cargo.toml`.
 
 **Watch out:** a claimed hand has fewer than 52 cards in `pc|`, and the sample
 board claimed after 41. Trailing partial tricks are normal — don't assume 52.
+
+</details>
+
+Confirmed while implementing, so don't re-derive: `parse_md` fills in the fourth
+hand itself when `md|` carries only three; `Suit::from_char` and
+`Rank::from_char` both uppercase, so vugraph LIN's lowercase `pc|dA|` parses;
+`Direction::next` is clockwise, so `declarer.next()` is the correct leader; and
+`Vulnerability::to_pbn()` yields exactly `None|NS|EW|All`, which is worth using
+over matching the variants because those were renamed between the pinned and
+local revisions.
+
+Real fixtures live in `EDGAR-Defense-Toolkit/tests/fixtures/input/` (12 boards,
+with per-player DD error counts alongside) and
+`bridge-bots/bridgebots/tests/resources/` (vugraph, multi-line records).
 
 ---
 

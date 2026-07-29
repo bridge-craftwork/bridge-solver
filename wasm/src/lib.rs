@@ -28,6 +28,8 @@ use bridge_types::Deal;
 use serde::{Deserialize, Serialize};
 use wasm_bindgen::prelude::*;
 
+pub mod lin_input;
+
 /// Turn Rust panics into readable console messages rather than `unreachable`.
 #[wasm_bindgen(start)]
 pub fn start() {
@@ -35,17 +37,21 @@ pub fn start() {
 }
 
 /// A play-analysis request, matching the service's `PlayRequest`.
-#[derive(Debug, Deserialize)]
-struct PlayRequest {
-    dealstr: String,
+///
+/// Serialisable as well as deserialisable so [`lin_input`] can hand a caller a
+/// request it can feed straight back to [`Analyzer::dd_play`].
+#[derive(Debug, Serialize, Deserialize)]
+pub struct PlayRequest {
+    /// The deal in PBN, e.g. `"N:J98.QT83.K6.J853 ..."`.
+    pub dealstr: String,
     /// Trump/strain: `S|H|D|C|N|NT`.
-    trump: String,
+    pub trump: String,
     /// Declaring seat: `N|E|S|W`.
-    declarer: String,
+    pub declarer: String,
     /// Opening leader (declarer's LHO): `N|E|S|W`.
-    leader: String,
+    pub leader: String,
     /// Play trace, e.g. `["HK","H3",...]`; may be partial.
-    plays: Vec<String>,
+    pub plays: Vec<String>,
 }
 
 /// Response for `dd_play`, matching the service's `DdPlayResponse` minus the
@@ -205,6 +211,55 @@ impl Analyzer {
         serde_json::to_string(&analysis)
             .map_err(|e| JsError::new(&format!("could not serialise the analysis: {}", e)))
     }
+}
+
+/// Turn a LIN string or a BBO handviewer URL into an analysable request.
+///
+/// Accepts either form — a URL is recognised by its `lin=` parameter — and
+/// returns JSON carrying a `request` ready for [`Analyzer::dd_play`] alongside
+/// the contract, seat names, auction and claim a UI wants to display. Nothing
+/// is fetched: a URL is decoded locally, so a shortened link must be expanded
+/// before it gets here.
+#[wasm_bindgen]
+pub fn parse_lin(input: &str) -> Result<String, JsError> {
+    let parsed = lin_input::parse(input).map_err(|e| JsError::new(&e))?;
+    serde_json::to_string(&parsed)
+        .map_err(|e| JsError::new(&format!("could not serialise the parsed LIN: {}", e)))
+}
+
+/// Parse a multi-board LIN file, one board per line.
+///
+/// Returns a JSON array with one entry per board, each either
+/// `{ "ok": <parsed board> }` or `{ "error": "<why>" }`, so one unanalysable
+/// board — a passed-out auction, say — does not cost the caller the rest of the
+/// file.
+#[wasm_bindgen]
+pub fn parse_lin_file(content: &str) -> Result<String, JsError> {
+    #[derive(Serialize)]
+    struct Entry {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        ok: Option<lin_input::LinInput>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
+    }
+
+    let boards = lin_input::parse_file(content).map_err(|e| JsError::new(&e))?;
+    let entries: Vec<Entry> = boards
+        .into_iter()
+        .map(|b| match b {
+            Ok(parsed) => Entry {
+                ok: Some(parsed),
+                error: None,
+            },
+            Err(e) => Entry {
+                ok: None,
+                error: Some(e),
+            },
+        })
+        .collect();
+
+    serde_json::to_string(&entries)
+        .map_err(|e| JsError::new(&format!("could not serialise the parsed LIN file: {}", e)))
 }
 
 /// Solve one position: how many tricks the declaring side takes from the lead.

@@ -15,6 +15,10 @@ crate-type = ["cdylib", "rlib"]
 # published or pinned copy.
 bridge-solver = { path = "..", features = ["play-analysis"] }
 bridge-types = { git = "https://github.com/bridge-craftwork/bridge-types" }
+# LIN parsing. Deliberately not `bridge-parsers`, which cannot build for wasm32
+# (it reaches for `reqwest::blocking`); this crate needs only bridge-types and
+# thiserror.
+bridge-encodings = { git = "https://github.com/bridge-craftwork/bridge-encodings" }
 
 wasm-bindgen = "0.2"
 serde = { version = "1", features = ["derive"] }
