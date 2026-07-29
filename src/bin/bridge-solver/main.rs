@@ -611,13 +611,33 @@ W  C  0
 [Dealer "N"]
 "#;
         let result = process_pbn(pbn, false);
-        // Should have exactly one of each DD tag we generate
+        // Each tag we generate must appear exactly once: the stale copy is
+        // stripped and replaced, not duplicated. `Vulnerable` is present, so
+        // the par tags are generated too.
         assert_eq!(result.matches("[DoubleDummyTricks").count(), 1);
         assert_eq!(result.matches("[OptimumResultTable").count(), 1);
-        // Old OptimumScore and ParContract should be removed (we don't generate them)
+        assert_eq!(result.matches("[OptimumScore").count(), 1);
+        assert_eq!(result.matches("[ParContract").count(), 1);
+        // ...and carry recomputed values, not the placeholders from the input.
+        assert!(!result.contains("\"00000000000000000000\""));
+        assert!(result.contains(r#"[DoubleDummyTricks "9a8789a8784346543465"]"#));
+        assert!(result.contains(r#"[OptimumScore "NS 420"]"#));
+        assert!(result.contains(r#"[ParContract "NS 4S="]"#));
+    }
+
+    /// Without a `Vulnerable` tag par cannot be scored, so the par tags are
+    /// omitted — and a stale copy in the input is still stripped.
+    #[test]
+    fn test_strips_par_tags_when_vulnerability_unknown() {
+        let pbn = r#"[Event "Test"]
+[Deal "N:AKQT3.J6.KJ42.95 652.AK42.AQ87.T4 J74.QT95.T.AK863 98.873.9653.QJ72"]
+[OptimumScore "NS 0"]
+[ParContract "NS Pass"]
+[Dealer "N"]
+"#;
+        let result = process_pbn(pbn, false);
+        assert_eq!(result.matches("[DoubleDummyTricks").count(), 1);
         assert_eq!(result.matches("[OptimumScore").count(), 0);
         assert_eq!(result.matches("[ParContract").count(), 0);
-        // Should have correct values, not zeros
-        assert!(!result.contains("\"00000000000000000000\""));
     }
 }

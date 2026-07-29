@@ -39,11 +39,9 @@ jobs:
       run: cargo build --features cli --verbose
 
     - name: Run tests
-      # `cli` is deliberately absent: it enables the CLI binaries, whose test
-      # tests::test_replaces_existing_dd_tags has been stale since a14e712 added
-      # par calculation (it still asserts OptimumScore/ParContract are absent).
-      # Add `cli` here once that test is updated.
-      run: cargo test --workspace --features play-analysis
+      # Not `--all-features`: that switches on the debug features
+      # (no_tricks_pruning, no_fast_tricks, ...) which alter solver results.
+      run: cargo test --workspace --features cli,play-analysis
 
     - name: Build release
       run: cargo build --features cli --release --verbose

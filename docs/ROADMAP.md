@@ -167,14 +167,6 @@ disagree about a player's mistakes is a bad thing to discover from a student.
 
 ## Known issues
 
-**`tests::test_replaces_existing_dd_tags` is stale** (`src/bin/bridge-solver/main.rs`).
-It asserts `[OptimumScore` and `[ParContract` are absent, commented "we don't
-generate them" — but `a14e712` added par calculation and now generates both. CI
-never caught it because the test job ran with default features (`default = []`),
-so the `cli` binaries and their tests were never built. The test job currently
-uses `--features play-analysis` and deliberately omits `cli`; add `cli` once the
-assertions are updated to the intended behaviour.
-
 **The Lint job was red on `main` from 2026-07-15 to 2026-07-29** on a `cargo fmt`
 diff, and nobody was notified, because a failing job on the default branch sends
 no signal. Worth a branch protection rule or a notification if this matters.
@@ -200,10 +192,15 @@ cargo test --workspace
 ```
 
 with two additions here: the test and second clippy passes name
-`--features play-analysis`, because the 13 `analyse_play` tests do not compile
-without it. **Not `--all-features`** — that switches on the behaviour-altering
+`--features cli,play-analysis`, because the 13 `analyse_play` tests do not
+compile without `play-analysis`, and the CLI binaries' tests do not build
+without `cli`. **Not `--all-features`** — that switches on the behaviour-altering
 debug features (`no_tricks_pruning`, `no_fast_tricks`, ...) together, which
 changes solver results and fails the suite.
+
+The committed `Cargo.lock` must cover the optional features' dependencies
+(`serde`, `sha2`), or every `play-analysis` build re-resolves and the CI cache
+never hits.
 
 The toolchain is deliberately **not pinned**. Drift gets fixed as it appears
 rather than saved up for one large repin.
