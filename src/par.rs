@@ -239,7 +239,7 @@ pub fn par(dd: &DdTricks, vul_ns: bool, vul_ew: bool) -> ParResult {
                     } else {
                         s_ns < cur_ns
                     };
-                    if improves && best.map_or(true, |(br, _, _)| r < br) {
+                    if improves && best.is_none_or(|(br, _, _)| r < br) {
                         best = Some((
                             r,
                             s_ns,
@@ -291,20 +291,90 @@ mod tests {
     fn par_matches_bridge_composer_optimum_score() {
         // (deal, vulnerable, expected OptimumScore, their ParContract)
         let cases = [
-            ("N:AQT94.T53.KQ8.T9 63.J98.J53.K8654 K72.6.AT9762.AJ7 J85.AKQ742.4.Q32", "None", "NS 980", "NS 6S="),
-            ("E:7.AKJ6543.3.AK93 642.8.KQT9.T8752 AKQJ5.Q97.52.QJ6 T983.T2.AJ8764.4", "NS", "EW 980", "EW 6H=; EW 6S="),
-            ("S:AJ83.7.T9653.A62 Q4.QJT984.4.T853 T762.K3.KQ2.KQJ4 K95.A652.AJ87.97", "EW", "NS -100", "NS 4SX-1"),
-            ("W:87.9.T9642.AK942 AQJ53.QJ873.QJ5. 94.A652.K83.QJ75 KT62.KT4.A7.T863", "All", "NS 650", "NS 4S+1"),
-            ("N:932.962.A.AJ8643 AJ87.QJ43.Q9.KT2 KQ5.8.JT6543.Q97 T64.AKT75.K872.5", "NS", "EW 140", "EW 3H="),
-            ("E:QT7.Q8.QJT84.K83 986543.5.K5.AT94 K.AKJ9743.7.Q765 AJ2.T62.A9632.J2", "EW", "NS 140", "NS 3S="),
-            ("S:AT.A5.AJ842.J984 Q7654.QJ9874.95. 2.K32.QT763.KT75 KJ983.T6.K.AQ632", "All", "EW -500", "EW 5SX-2"),
-            ("W:QJ76.KJ9.AT92.Q8 A843.A2.QJ75.T52 K5.T873.K863.AKJ T92.Q654.4.97643", "None", "EW 430", "EW 3N+1"),
-            ("N:K643.J65.T5.Q654 AJ72.83.AJ6.AK93 QT98.QT9.Q987.T2 5.AK742.K432.J87", "EW", "EW 660", "E 3N+2"),
-            ("E:Q85.AJ62.AJ984.K 93.9.Q7653.J8752 AKT742.8.K2.QT43 J6.KQT7543.T.A96", "All", "EW 1430", "EW 6S="),
-            ("S:J8.KT93.QJ95.T96 K63.AJ86.A43.A74 AT7542.72.762.K3 Q9.Q54.KT8.QJ852", "None", "EW 400", "EW 3N="),
-            ("W:QJ832.Q76.QT63.9 T74.82.AK982.QJ2 A96.KJT43.4.AKT5 K5.A95.J75.87643", "NS", "EW 420", "EW 4H="),
-            ("W:AQ86.86.AQT943.6 T54.QJ2.J82.KQ42 3.AKT9.K5.JT8753 KJ972.7543.76.A9", "EW", "EW 1370", "EW 6D="),
-            ("E:KQJT.KQ6.94.KJ54 A64.7.AKJ6532.T6 752.JT84.Q7.A932 983.A9532.T8.Q87", "None", "EW -300", "EW 4CX-2; EW 4HX-2"),
+            (
+                "N:AQT94.T53.KQ8.T9 63.J98.J53.K8654 K72.6.AT9762.AJ7 J85.AKQ742.4.Q32",
+                "None",
+                "NS 980",
+                "NS 6S=",
+            ),
+            (
+                "E:7.AKJ6543.3.AK93 642.8.KQT9.T8752 AKQJ5.Q97.52.QJ6 T983.T2.AJ8764.4",
+                "NS",
+                "EW 980",
+                "EW 6H=; EW 6S=",
+            ),
+            (
+                "S:AJ83.7.T9653.A62 Q4.QJT984.4.T853 T762.K3.KQ2.KQJ4 K95.A652.AJ87.97",
+                "EW",
+                "NS -100",
+                "NS 4SX-1",
+            ),
+            (
+                "W:87.9.T9642.AK942 AQJ53.QJ873.QJ5. 94.A652.K83.QJ75 KT62.KT4.A7.T863",
+                "All",
+                "NS 650",
+                "NS 4S+1",
+            ),
+            (
+                "N:932.962.A.AJ8643 AJ87.QJ43.Q9.KT2 KQ5.8.JT6543.Q97 T64.AKT75.K872.5",
+                "NS",
+                "EW 140",
+                "EW 3H=",
+            ),
+            (
+                "E:QT7.Q8.QJT84.K83 986543.5.K5.AT94 K.AKJ9743.7.Q765 AJ2.T62.A9632.J2",
+                "EW",
+                "NS 140",
+                "NS 3S=",
+            ),
+            (
+                "S:AT.A5.AJ842.J984 Q7654.QJ9874.95. 2.K32.QT763.KT75 KJ983.T6.K.AQ632",
+                "All",
+                "EW -500",
+                "EW 5SX-2",
+            ),
+            (
+                "W:QJ76.KJ9.AT92.Q8 A843.A2.QJ75.T52 K5.T873.K863.AKJ T92.Q654.4.97643",
+                "None",
+                "EW 430",
+                "EW 3N+1",
+            ),
+            (
+                "N:K643.J65.T5.Q654 AJ72.83.AJ6.AK93 QT98.QT9.Q987.T2 5.AK742.K432.J87",
+                "EW",
+                "EW 660",
+                "E 3N+2",
+            ),
+            (
+                "E:Q85.AJ62.AJ984.K 93.9.Q7653.J8752 AKT742.8.K2.QT43 J6.KQT7543.T.A96",
+                "All",
+                "EW 1430",
+                "EW 6S=",
+            ),
+            (
+                "S:J8.KT93.QJ95.T96 K63.AJ86.A43.A74 AT7542.72.762.K3 Q9.Q54.KT8.QJ852",
+                "None",
+                "EW 400",
+                "EW 3N=",
+            ),
+            (
+                "W:QJ832.Q76.QT63.9 T74.82.AK982.QJ2 A96.KJT43.4.AKT5 K5.A95.J75.87643",
+                "NS",
+                "EW 420",
+                "EW 4H=",
+            ),
+            (
+                "W:AQ86.86.AQT943.6 T54.QJ2.J82.KQ42 3.AKT9.K5.JT8753 KJ972.7543.76.A9",
+                "EW",
+                "EW 1370",
+                "EW 6D=",
+            ),
+            (
+                "E:KQJT.KQ6.94.KJ54 A64.7.AKJ6532.T6 752.JT84.Q7.A932 983.A9532.T8.Q87",
+                "None",
+                "EW -300",
+                "EW 4CX-2; EW 4HX-2",
+            ),
         ];
 
         for (deal_str, v, expected, their_contract) in cases {
@@ -322,7 +392,9 @@ mod tests {
 
     #[test]
     fn passed_out_is_par_zero() {
-        let dd = DdTricks { tricks: [[6; 5]; 4] }; // nobody can take 7 tricks anywhere
+        let dd = DdTricks {
+            tricks: [[6; 5]; 4],
+        }; // nobody can take 7 tricks anywhere
         let r = par(&dd, false, false);
         assert_eq!(r.optimum_score(), "0");
         assert!(r.contract.is_none());
