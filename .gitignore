@@ -2,3 +2,8 @@
 .DS_Store
 activity-log.json
 .cargo/
+
+# Workspace member build output. The existing `/target` rule is root-anchored.
+wasm/target/
+# wasm-pack output (rebuilt by CI and by the web app's build)
+wasm/pkg/

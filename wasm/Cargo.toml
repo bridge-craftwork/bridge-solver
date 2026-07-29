@@ -1,0 +1,22 @@
+[package]
+name = "bridge-solver-wasm"
+version = "0.4.0"
+edition = "2021"
+license = "Unlicense"
+description = "WebAssembly bindings for bridge-solver: double-dummy tables and cardplay analysis in the browser"
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+# The engine, with the cardplay analysis feature. Path dep: this crate lives in
+# the same repo and must always build against the adjacent source, never a
+# published or pinned copy.
+bridge-solver = { path = "..", features = ["play-analysis"] }
+bridge-types = { git = "https://github.com/bridge-craftwork/bridge-types" }
+
+wasm-bindgen = "0.2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+console_error_panic_hook = "0.1"

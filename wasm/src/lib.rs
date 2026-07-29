@@ -1,0 +1,228 @@
+//! WebAssembly bindings for the double-dummy engine.
+//!
+//! Exposes the same three operations the HTTP service does, so a browser can do
+//! its own analysis instead of round-tripping every hand to a server:
+//!
+//! | here | service route | engine |
+//! |---|---|---|
+//! | [`Analyzer::dd_table`] | `POST /dd` | [`bridge_solver::par::solve_dd_table`] |
+//! | [`Analyzer::dd_play`] | `POST /dd/play` | [`bridge_solver::analyse_play::running_trace`] |
+//! | [`Analyzer::dd_play_node`] | `POST /dd/play/node` | [`bridge_solver::analyse_play::node_alternatives`] |
+//!
+//! Request and response JSON match the service's, so a client can swap
+//! transports without reshaping its data.
+//!
+//! # Caching
+//!
+//! The service persists position values in SQLite; there is no database here, so
+//! [`Analyzer`] keeps the same prefix-keyed map in memory for its lifetime. Hold
+//! one instance while stepping through a hand and each new position costs one
+//! solve, with everything before it a hit — the same incremental behaviour, just
+//! scoped to the page instead of shared between users.
+
+use std::collections::HashMap;
+
+use bridge_solver::analyse_play::{self, PlayInput};
+use bridge_solver::{CutoffCache, Hands, PatternCache, Solver};
+use bridge_types::Deal;
+use serde::{Deserialize, Serialize};
+use wasm_bindgen::prelude::*;
+
+/// Turn Rust panics into readable console messages rather than `unreachable`.
+#[wasm_bindgen(start)]
+pub fn start() {
+    console_error_panic_hook::set_once();
+}
+
+/// A play-analysis request, matching the service's `PlayRequest`.
+#[derive(Debug, Deserialize)]
+struct PlayRequest {
+    dealstr: String,
+    /// Trump/strain: `S|H|D|C|N|NT`.
+    trump: String,
+    /// Declaring seat: `N|E|S|W`.
+    declarer: String,
+    /// Opening leader (declarer's LHO): `N|E|S|W`.
+    leader: String,
+    /// Play trace, e.g. `["HK","H3",...]`; may be partial.
+    plays: Vec<String>,
+}
+
+/// Response for `dd_play`, matching the service's `DdPlayResponse` minus the
+/// server-only timing field.
+#[derive(Debug, Serialize)]
+struct DdPlayResponse {
+    /// `V_0` — the contract's double-dummy result from the opening lead.
+    contract_tricks: u8,
+    trace: Vec<analyse_play::TraceEntry>,
+    /// Whether every position was already known, so nothing had to be solved.
+    cached: bool,
+}
+
+/// The 20-cell double-dummy table, as `tricks[seat][strain]`.
+#[derive(Debug, Serialize)]
+struct DdTableResponse {
+    /// Rows in `N, E, S, W` order; columns in `C, D, H, S, NT` order.
+    tricks: Vec<Vec<u8>>,
+    /// Total tricks in the deal (13 for a full deal).
+    total: u8,
+}
+
+/// Parse a request into the engine's validated input form.
+fn parse_input(req: &PlayRequest) -> Result<PlayInput, String> {
+    let trump = analyse_play::parse_trump(&req.trump)
+        .ok_or_else(|| format!("unknown trump/strain \"{}\"", req.trump))?;
+    let declarer = analyse_play::parse_seat(&req.declarer)
+        .ok_or_else(|| format!("unknown declarer seat \"{}\"", req.declarer))?;
+    let leader = analyse_play::parse_seat(&req.leader)
+        .ok_or_else(|| format!("unknown leader seat \"{}\"", req.leader))?;
+
+    let deal = Deal::from_pbn(&req.dealstr)
+        .ok_or_else(|| format!("could not parse deal \"{}\"", req.dealstr))?;
+
+    let mut plays = Vec::with_capacity(req.plays.len());
+    for p in &req.plays {
+        plays.push(analyse_play::parse_card(p).ok_or_else(|| format!("unknown card \"{}\"", p))?);
+    }
+
+    Ok(PlayInput {
+        hands: Hands::from_deal(&deal),
+        trump,
+        declarer,
+        leader,
+        plays,
+    })
+}
+
+/// Double-dummy analysis with a session-lived position cache.
+#[wasm_bindgen]
+#[derive(Default)]
+pub struct Analyzer {
+    /// Prefix hash -> NS tricks, mirroring the service's persisted cache.
+    positions: HashMap<String, u8>,
+}
+
+#[wasm_bindgen]
+impl Analyzer {
+    /// Create an analyzer with an empty cache.
+    #[wasm_bindgen(constructor)]
+    pub fn new() -> Analyzer {
+        Analyzer {
+            positions: HashMap::new(),
+        }
+    }
+
+    /// How many positions are currently cached.
+    #[wasm_bindgen(getter)]
+    pub fn cached_positions(&self) -> usize {
+        self.positions.len()
+    }
+
+    /// Forget every cached position.
+    pub fn clear_cache(&mut self) {
+        self.positions.clear();
+    }
+
+    /// Solve the full 20-cell double-dummy table for a deal.
+    ///
+    /// `dealstr` is PBN, e.g. `"N:J98.QT83.K6.J853 Q762..."`. Returns
+    /// `{ tricks, total }` as JSON, rows `N,E,S,W` and columns `C,D,H,S,NT`.
+    pub fn dd_table(&self, dealstr: &str) -> Result<String, JsError> {
+        let deal = Deal::from_pbn(dealstr)
+            .ok_or_else(|| JsError::new(&format!("could not parse deal \"{}\"", dealstr)))?;
+
+        let table = bridge_solver::par::solve_dd_table(&deal);
+        let total = Hands::from_deal(&deal).num_tricks() as u8;
+
+        // Flatten in the order the client expects rather than exposing the
+        // engine's internal indexing.
+        use bridge_types::{Direction, Strain};
+        let seats = [
+            Direction::North,
+            Direction::East,
+            Direction::South,
+            Direction::West,
+        ];
+        let strains = [
+            Strain::Clubs,
+            Strain::Diamonds,
+            Strain::Hearts,
+            Strain::Spades,
+            Strain::NoTrump,
+        ];
+        let tricks = seats
+            .iter()
+            .map(|&seat| strains.iter().map(|&st| table.get(seat, st)).collect())
+            .collect();
+
+        serde_json::to_string(&DdTableResponse { tricks, total })
+            .map_err(|e| JsError::new(&format!("could not serialise the table: {}", e)))
+    }
+
+    /// Tier 1: the running trace — every played card with its double-dummy cost.
+    ///
+    /// This is what tags each error card. `request_json` matches the service's
+    /// `POST /dd/play` body. Positions solved here are remembered, so stepping
+    /// forward through a hand only pays for the newly reached position.
+    pub fn dd_play(&mut self, request_json: &str) -> Result<String, JsError> {
+        let req: PlayRequest = serde_json::from_str(request_json)
+            .map_err(|e| JsError::new(&format!("could not read the request: {}", e)))?;
+
+        let input = parse_input(&req).map_err(|e| JsError::new(&e))?;
+
+        let keys = analyse_play::prefix_keys(&req.dealstr, input.trump, input.leader, &input.plays);
+        let all_known = keys.iter().all(|k| self.positions.contains_key(k));
+
+        let output = analyse_play::running_trace(&input, &keys, &self.positions)
+            .map_err(|e| JsError::new(&format!("{:?}", e)))?;
+
+        // Fold newly solved positions back in so the next call is cheaper.
+        for (key, value) in &output.new_entries {
+            self.positions.insert(key.clone(), *value);
+        }
+
+        serde_json::to_string(&DdPlayResponse {
+            contract_tricks: output.contract_tricks,
+            trace: output.trace,
+            cached: all_known,
+        })
+        .map_err(|e| JsError::new(&format!("could not serialise the trace: {}", e)))
+    }
+
+    /// Tier 2: the alternatives at one decision node, with each card's cost.
+    ///
+    /// This is what a click on a tagged card shows. `node` is a 0-based index
+    /// into `plays`.
+    pub fn dd_play_node(&self, request_json: &str, node: usize) -> Result<String, JsError> {
+        let req: PlayRequest = serde_json::from_str(request_json)
+            .map_err(|e| JsError::new(&format!("could not read the request: {}", e)))?;
+
+        let input = parse_input(&req).map_err(|e| JsError::new(&e))?;
+
+        let analysis = analyse_play::node_alternatives(&input, node)
+            .map_err(|e| JsError::new(&format!("{:?}", e)))?;
+
+        serde_json::to_string(&analysis)
+            .map_err(|e| JsError::new(&format!("could not serialise the analysis: {}", e)))
+    }
+}
+
+/// Solve one position: how many tricks the declaring side takes from the lead.
+///
+/// A convenience for callers that want a single number and no play trace.
+#[wasm_bindgen]
+pub fn solve_contract(dealstr: &str, trump: &str, leader: &str) -> Result<u8, JsError> {
+    let deal = Deal::from_pbn(dealstr)
+        .ok_or_else(|| JsError::new(&format!("could not parse deal \"{}\"", dealstr)))?;
+    let trump_idx = analyse_play::parse_trump(trump)
+        .ok_or_else(|| JsError::new(&format!("unknown trump/strain \"{}\"", trump)))?;
+    let leader_idx = analyse_play::parse_seat(leader)
+        .ok_or_else(|| JsError::new(&format!("unknown leader seat \"{}\"", leader)))?;
+
+    let hands = Hands::from_deal(&deal);
+    let mut cutoff = CutoffCache::new(16);
+    let mut pattern = PatternCache::new(16);
+    let solver = Solver::new(hands, trump_idx, leader_idx);
+
+    Ok(solver.solve_with_caches(&mut cutoff, &mut pattern))
+}

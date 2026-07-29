@@ -24,6 +24,8 @@
 //! let ns_tricks = solver.solve_with_caches(&mut cutoff, &mut pattern);
 //! ```
 
+#[cfg(feature = "play-analysis")]
+pub mod analyse_play;
 mod bridge_solver;
 mod cache;
 pub mod cards;
