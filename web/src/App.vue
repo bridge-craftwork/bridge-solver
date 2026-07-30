@@ -18,6 +18,7 @@ import { computed, ref, watch } from 'vue'
 import AuctionTable from './components/AuctionTable.vue'
 import BridgeTable from './components/BridgeTable.vue'
 import DoubleDummyTable from './components/DoubleDummyTable.vue'
+import ErrorSummary from './components/ErrorSummary.vue'
 import InputPanel from './components/InputPanel.vue'
 import NodePanel from './components/NodePanel.vue'
 import PlayerErrors from './components/PlayerErrors.vue'
@@ -110,6 +111,10 @@ const nodeBadges = computed(() => {
  * Normally the deal as dealt, so the error overlay has every card to land on.
  * While inspecting a node, rewound to that moment — the cards already gone are
  * gone, which is the only way the alternatives make sense.
+ *
+ * Because the rewind removes them outright, there is nothing left to strike
+ * through: `HandDisplay` still supports a `played` mark, but this page never
+ * needs to send one.
  */
 const shownHands = computed(() => {
   const b = board.value
@@ -125,17 +130,6 @@ const shownTrick = computed(() => {
   const t = replayed.value.tricks[trickNumberOf(n.index) - 1]
   if (!t) return null
   return { leader: t.leader, plays: t.plays.filter((p) => p.index < n.index) }
-})
-
-/** Cards already played, so they can be struck through when a node is open. */
-const playedCards = computed(() => {
-  const n = node.value
-  if (!n || !replayed.value) return null
-  const out = { N: [], E: [], S: [], W: [] }
-  for (let i = 0; i < n.index; i += 1) {
-    out[replayed.value.seatOf[i]].push(normalizeCardCode(board.value.plays[i]))
-  }
-  return out
 })
 
 const request = computed(() => {
@@ -315,6 +309,21 @@ watch(boardIndex, loadBoard)
         </span>
       </section>
 
+      <!--
+        Errors first, before the table: the question this page exists to answer
+        is where the hand went wrong, and this answers it without reading
+        anything else.
+      -->
+      <ErrorSummary
+        v-if="trace"
+        :trace="trace.trace"
+        :tricks="replayed?.tricks || []"
+        :selected-index="node?.index ?? -1"
+        :names="board.names"
+        :declarer="board.declarer"
+        @select="inspect"
+      />
+
       <NodePanel v-if="node" :node="node" @close="node = null" />
 
       <!--
@@ -339,7 +348,6 @@ watch(boardIndex, loadBoard)
             :hands="shownHands"
             :names="board.names"
             :card-badges="node ? nodeBadges : errorBadges"
-            :played-cards="playedCards"
             :trick="shownTrick"
             :tricks-taken="taken"
             :active-seat="node?.seat || null"
