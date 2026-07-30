@@ -68,7 +68,10 @@
   /* Layout */
   --radius-card: 10px;
   --radius-button: 6px;
-  --max-width: 1180px;
+  /* Wide enough for trace | table | summaries side by side. The classroom app
+     caps at 1200px because it shares the viewport with a lesson rail; this page
+     has the screen to itself. */
+  --max-width: 1500px;
 }
 
 * {

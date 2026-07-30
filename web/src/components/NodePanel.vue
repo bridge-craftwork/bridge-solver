@@ -72,7 +72,7 @@ function glyph(code) {
 
     <p class="node-note">
       Tricks are what the declaring side takes from here with both sides playing
-      perfectly. Click another card to move the analysis.
+      perfectly. Click any card to go back, or another trick below to move on.
     </p>
   </div>
 </template>
