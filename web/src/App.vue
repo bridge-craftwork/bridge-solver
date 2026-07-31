@@ -1004,9 +1004,13 @@ main > * {
   align-items: center;
 }
 
-/* The table with its corners needs about 900px; below that the trace moves under
-   it rather than squeezing both. */
-@media (max-width: 1240px) {
+/*
+ * The table with its corners measures 665px and the trace column 350px, so the two
+ * fit side by side from about 1060px. The previous 1240px breakpoint collapsed them
+ * on an iPad in landscape (1180px) — the one case the corner layout exists for —
+ * which pushed the trace below the fold and made the page over two screens tall.
+ */
+@media (max-width: 1060px) {
   .layout {
     grid-template-columns: minmax(0, 1fr);
   }

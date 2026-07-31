@@ -195,10 +195,17 @@ const slots = computed(() =>
   overflow: auto;
 }
 
-/* Below the table's natural width the compass has to give: everything stacks in
-   reading order and the centre trick goes, having no meaning without positions
-   around it. */
-@media (max-width: 900px) {
+/*
+ * Below the table's natural width the compass has to give: everything stacks in
+ * reading order and the centre trick goes, having no meaning without positions
+ * around it.
+ *
+ * The threshold is the width the compass actually needs — three 215px columns plus
+ * gaps is 665px, so ~700px with the page's padding. It was set at 900px, which
+ * stacked the table on a 720px half-screen that had room for it and made the page
+ * 2667px tall instead of about half that. Measure the layout, don't guess it.
+ */
+@media (max-width: 700px) {
   .bridge-table {
     grid-template-areas:
       'n'
