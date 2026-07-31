@@ -37,6 +37,7 @@ import {
   timed,
 } from './lib/solver.js'
 import { slowMessage } from './lib/benchmark.js'
+import { reportLoad, reportSolve } from './lib/telemetry.js'
 import { suitVerdict, summariseCosts, trickTotalFrom } from './lib/errors.js'
 import { resolveInitial, save as saveSession } from './lib/session.js'
 import { TRICK_SIZE, nextToPlay, trickStartOf } from './lib/cardplay.js'
@@ -485,6 +486,16 @@ onMounted(() => {
     benchOk.value = result.ok
   })
 
+  /*
+   * One record that the page opened, carrying the cold-start segments. Fired
+   * after a tick so the wasm fetch and compile have had a chance to land —
+   * beaconing immediately would report two empty timings every time.
+   *
+   * Deliberately not awaited and its result ignored: telemetry must never
+   * affect what the reader sees.
+   */
+  setTimeout(reportLoad, 2000)
+
   // A hand from the URL, or the one open last time.
   if (initial.hand) analyse(initial.hand)
 })
@@ -608,7 +619,27 @@ watch(trace, async (current) => {
   progress.value = null
   verdictMs.value = performance.now() - started
   reportTiming()
+
+  /*
+   * One record that an analysis completed, sent from here because this is the
+   * point at which all of it is done — the trace, the table and the verdicts.
+   *
+   * A count of cards, never the cards. Nothing derived from the deal leaves the
+   * browser, which is the claim the whole site rests on; `telemetry.js` takes an
+   * explicit allowlist rather than a spread so a careless argument here cannot
+   * widen it.
+   */
+  solvesReported += 1
+  reportSolve({
+    ms: solveMs.value + verdictMs.value,
+    cards: current.trace.length,
+    cold: solvesReported === 1,
+    bench: benchScore.value,
+  })
 })
+
+/** How many solves this page load has reported, so the first can be marked cold. */
+let solvesReported = 0
 
 /**
  * Open the analysis at one play index.
