@@ -32,6 +32,9 @@ const handlers = {
   ddPlayNode: ({ request, node }) =>
     JSON.parse(analyzer.dd_play_node(JSON.stringify(request), node)),
 
+  ddOptimalLine: ({ request, from }) =>
+    JSON.parse(analyzer.dd_optimal_line(JSON.stringify(request), from)),
+
   parseLin: ({ input }) => JSON.parse(parse_lin(input)),
 
   parseLinFile: ({ content }) => JSON.parse(parse_lin_file(content)),

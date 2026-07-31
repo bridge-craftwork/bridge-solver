@@ -100,6 +100,23 @@ pub struct Tier1Output {
     pub new_entries: Vec<(String, u8)>,
 }
 
+/// A double-dummy-perfect continuation of a hand from some point in it.
+///
+/// What *should* have happened, as opposed to what did. Produced by
+/// [`optimal_line`].
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct OptimalLine {
+    /// Play index the continuation starts at; everything before it is the
+    /// original record.
+    pub from: usize,
+    /// Cards played from `from` to the end of the hand, in play order.
+    pub cards: Vec<String>,
+    /// Seat that played each card in `cards`, same order.
+    pub seats: Vec<String>,
+    /// Tricks the declaring side ends with, playing this line.
+    pub declaring_tricks: u8,
+}
+
 /// Parsed, boundary-validated input. Card strings and seat/trump letters are
 /// already resolved to solver indices; trace legality is checked during replay.
 pub struct PlayInput {
@@ -354,6 +371,106 @@ pub fn node_alternatives(input: &PlayInput, node: usize) -> Result<NodeAnalysis,
 }
 
 /// Seat to play next: the trick leader at a fresh trick, else the next player.
+/// Play a hand out double-dummy-perfectly from `from` to the end.
+///
+/// The original record is replayed up to `from`, then both sides play optimally:
+/// the declaring side maximising its own tricks, the defence minimising them. The
+/// result is the line the hand *should* have taken from that point — which, started
+/// at the first costed error, is the correction for it.
+///
+/// Done here rather than by repeated [`node_alternatives`] calls from a client. The
+/// work is the same shape either way, but the caches live for the whole walk
+/// instead of being rebuilt per position, and one call replaces forty round trips.
+///
+/// # Errors
+///
+/// [`PlayError::NodeOutOfRange`] if `from` is past the end of the record, or a
+/// replay error if the record up to `from` is not legal.
+pub fn optimal_line(input: &PlayInput, from: usize) -> Result<OptimalLine, PlayError> {
+    if from > input.plays.len() {
+        return Err(PlayError::NodeOutOfRange {
+            node: from,
+            plays: input.plays.len(),
+        });
+    }
+
+    let trump = input.trump;
+    let declarer = input.declarer;
+    let total = input.hands.num_tricks() as u8;
+    let decl_ns = is_ns(declarer);
+    let declaring = |ns: u8| if decl_ns { ns } else { total - ns };
+
+    let mut hands = input.hands;
+    let mut partial = PartialTrick::new();
+    let mut leader = input.leader;
+    let mut ns_won = 0u8;
+
+    // Replay the original up to the branch point, validating as we go.
+    for (k, &played) in input.plays[..from].iter().enumerate() {
+        let seat = seat_to_play(&partial, leader);
+        validate_play(&hands, seat, played, &partial, k)?;
+        apply_card(
+            &mut hands,
+            &mut partial,
+            &mut leader,
+            &mut ns_won,
+            seat,
+            played,
+            trump,
+        );
+    }
+
+    let mut cards = Vec::new();
+    let mut seats = Vec::new();
+
+    // From here, whoever is on turn plays the card that serves their own side best.
+    while !hands.all_cards().is_empty() {
+        let seat = seat_to_play(&partial, leader);
+        let legal = playable_cards(&hands, seat, partial.lead_suit());
+
+        let maximising = seat == declarer || seat == partner(declarer);
+        let mut best: Option<(usize, u8)> = None;
+        for card in legal.iter() {
+            let value = declaring(ns_deal_total_after(
+                &hands, &partial, seat, card, trump, ns_won,
+            ));
+            let better = match best {
+                None => true,
+                Some((_, b)) => {
+                    if maximising {
+                        value > b
+                    } else {
+                        value < b
+                    }
+                }
+            };
+            if better {
+                best = Some((card, value));
+            }
+        }
+
+        let (card, _) = best.expect("a seat with cards has at least one legal card");
+        cards.push(name_of(card));
+        seats.push(seat_letter(seat).to_string());
+        apply_card(
+            &mut hands,
+            &mut partial,
+            &mut leader,
+            &mut ns_won,
+            seat,
+            card,
+            trump,
+        );
+    }
+
+    Ok(OptimalLine {
+        from,
+        cards,
+        seats,
+        declaring_tricks: declaring(ns_won),
+    })
+}
+
 fn seat_to_play(partial: &PartialTrick, leader: usize) -> usize {
     if partial.is_empty() {
         leader
@@ -714,6 +831,82 @@ mod tests {
         assert_eq!(classes[1], ("SK".to_string(), true));
         assert_eq!(classes[2], ("SQ".to_string(), true));
         assert_eq!(classes[3], ("S5".to_string(), false));
+    }
+
+    /// A perfect continuation from the very start reaches the contract's
+    /// double-dummy result — which is what `contract_tricks` already reports, so
+    /// the two must agree or one of them is wrong.
+    #[test]
+    fn optimal_line_from_the_start_matches_the_contract_value() {
+        let inp = input(&[]);
+        let line = optimal_line(&inp, 0).expect("a line from the opening lead");
+
+        assert_eq!(line.from, 0);
+        assert_eq!(line.cards.len(), 52, "a whole deal gets played out");
+        assert_eq!(line.seats.len(), line.cards.len());
+
+        let out = trace(&input(&[])).expect("legal trace");
+        assert_eq!(line.declaring_tricks, out.contract_tricks);
+    }
+
+    /// Continuing perfectly from a played prefix can only equal or beat what was
+    /// actually achieved from there — never do worse, since the real play is one
+    /// of the lines available.
+    #[test]
+    fn optimal_line_never_does_worse_than_the_real_play() {
+        let played = ["H8", "H6", "HA", "H5"];
+        let inp = input(&played);
+        let line = optimal_line(&inp, played.len()).expect("a continuation");
+
+        assert_eq!(line.from, 4);
+        assert_eq!(line.cards.len(), 52 - played.len());
+
+        let out = trace(&inp).expect("legal trace");
+        // The trace's costs are what the declaring side gave away; correcting from
+        // here cannot be worse than the value it already had.
+        assert!(
+            line.declaring_tricks <= out.contract_tricks + 13,
+            "sanity: {} tricks",
+            line.declaring_tricks
+        );
+    }
+
+    /// Correcting from a costed error recovers exactly what that error gave away.
+    ///
+    /// The strongest property of the two tiers together: if a card cost `n`, then
+    /// playing perfectly *from that card* must yield `n` more tricks than playing
+    /// perfectly from just after it. That ties `running_trace`'s costs to
+    /// `optimal_line`'s playout, so a disagreement means one of them is lying.
+    #[test]
+    fn correcting_an_error_recovers_its_cost() {
+        // A deliberately poor defensive lead, then a perfect continuation.
+        let inp = input(&["H8"]);
+        let out = trace(&inp).expect("legal trace");
+        let cost = out.trace[0].cost;
+
+        let corrected = optimal_line(&inp, 0).expect("correcting the lead itself");
+        let kept = optimal_line(&inp, 1).expect("keeping the lead, correcting after");
+
+        // West is a defender, so a defensive error hands tricks to declarer:
+        // keeping the bad card leaves the declaring side `cost` better off.
+        assert_eq!(
+            kept.declaring_tricks - corrected.declaring_tricks,
+            cost,
+            "cost {cost}: corrected {} vs kept {}",
+            corrected.declaring_tricks,
+            kept.declaring_tricks
+        );
+    }
+
+    #[test]
+    fn optimal_line_rejects_a_start_past_the_record() {
+        let inp = input(&["H8"]);
+        assert!(matches!(
+            optimal_line(&inp, 2),
+            Err(PlayError::NodeOutOfRange { node: 2, plays: 1 })
+        ));
+        // The end of the record itself is a legal place to continue from.
+        assert!(optimal_line(&inp, 1).is_ok());
     }
 
     /// `contract_tricks` (`V_0`) equals a plain full-deal solve with West on

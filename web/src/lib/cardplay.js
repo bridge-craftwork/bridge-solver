@@ -133,3 +133,48 @@ export function handToCodes(hand) {
     return hand[suitName].map((r) => letter + r)
   })
 }
+
+/**
+ * Who is on turn after a given record, and what they may legally play.
+ *
+ * Needed to let someone take a hand over and play it on: the seat to act is
+ * whoever follows the last card, or the winner of the last trick if that trick
+ * finished.
+ *
+ * Returns `{ seat, leadSuit, legal, remaining }` where `legal` is the set of card
+ * codes that seat may play — the lead suit if they hold any of it, otherwise
+ * everything left. `null` once the hand is over.
+ */
+export function nextToPlay(hands, plays, leader, trump) {
+  if (!leader) return null
+
+  const { tricks, seatOf } = replay(plays, leader, trump)
+  const remaining = remainingHands(hands, plays, seatOf, plays.length)
+
+  let seat
+  let leadSuit = null
+
+  if (!plays.length) {
+    seat = leader
+  } else {
+    const last = tricks[tricks.length - 1]
+    if (last.complete) {
+      // Trick finished: its winner leads the next one.
+      seat = last.winner
+    } else {
+      seat = seatAtIndex(last.leader, last.plays.length)
+      leadSuit = last.plays[0].suit
+    }
+  }
+
+  const held = handToCodes(remaining[seat])
+  if (!held.length) return null
+
+  const inSuit = held.filter((code) => code[0] === leadSuit)
+  return {
+    seat,
+    leadSuit,
+    legal: new Set(leadSuit && inSuit.length ? inSuit : held),
+    remaining,
+  }
+}

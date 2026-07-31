@@ -162,6 +162,22 @@ export function fetchDdPlayNode(request, node) {
 }
 
 /**
+ * A double-dummy-perfect continuation from one point in the hand.
+ *
+ * Resolves to `{ from, cards, seats, declaring_tricks }` or `null`. Started at the
+ * first costed error, this is the correction for it: what should have happened.
+ */
+export function fetchOptimalLine(request, from) {
+  return optional(
+    'optimal line',
+    call('ddOptimalLine', { request, from }).then((result) => {
+      if (!Array.isArray(result?.cards)) throw new Error('response carried no line')
+      return result
+    })
+  )
+}
+
+/**
  * Parse a LIN string or a BBO handviewer URL.
  *
  * Resolves to the parsed board, or rejects with the engine's message — unlike
