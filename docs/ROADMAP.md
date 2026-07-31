@@ -1,10 +1,19 @@
 # Roadmap: double-dummy analysis in the browser
 
 Goal: run cardplay analysis where the hand is being looked at, instead of sending
-every hand to a server. Three deliverables, of which the first is done.
+every hand to a server. Three deliverables; the first two are done and deployed,
+the third (the BBO extension) is not started.
+
+- App: https://bridge-craftwork.github.io/bridge-solver/
+- Gallery: https://bridge-craftwork.github.io/bridge-solver/gallery.html
+
+PRs #1–#5 merged. Tests: **43 engine, 18 wasm, 125 web** (all verified green on
+`main`, 2026-07-31). CI runs 7 jobs — Lint, WebAssembly, Web, Test on three
+platforms, Build Summary — plus a separate Pages deploy.
 
 The workstreams below are **independent unless a dependency is stated**, so they
-can be picked up in parallel.
+can be picked up in parallel. Current priority order is under
+[Open work](#open-work).
 
 ---
 
@@ -25,6 +34,21 @@ own server-computed table for a real board — all 20 cells match, and
 attribution, including declarer's, consistent with the contract making one fewer
 trick than double-dummy allowed. Keep using an external reference like this; the
 service and the wasm build now share code, so comparing them proves nothing.
+
+**Release-build baseline, measured on the live gallery.** Per frame, from a cold
+start with an empty position cache: **solve** (DD table + running trace) ~0.42 s,
+**verdicts** (the per-error node analysis) ~0.37 s. Five frames total 3.96 s of
+work in 1.36 s of wall clock, because the frames mount lazily and then run
+concurrently in separate workers.
+
+**The verdict pass costs about as much as everything else put together**, because
+it needs a solve per legal card at every mistake. That is the number that will
+hurt if the gallery grows, and the argument for an "accept a precomputed
+analysis" path rather than N independent solvers.
+
+**Costs reconcile, and that is the check to keep applying.** On the verified
+board: double-dummy 8 from the opening lead, declarer −3, defence +2, so 7 taken
+— which is what was claimed. If those three ever disagree, something is wrong.
 
 **`std::time::Instant` traps on wasm32.** It has no implementation there and
 aborts at runtime while compiling perfectly happily. Fixed in
@@ -73,13 +97,22 @@ in place rather than dropping it. 16 tests.
 
 It was not pure wiring. Three things the plan below did not anticipate:
 
-- **`Auction::final_contract()` gets declarer wrong** — it credits whoever made
+- **`Auction::final_contract()` got declarer wrong** — it credited whoever made
   the *last* bid, but declarer is the first of that side to name the strain. Over
-  `1S - P - 4S` it says South. That inverts declarer on most ordinary auctions,
+  `1S - P - 4S` it said South. That inverted declarer on most ordinary auctions,
   which swaps the opening leader and invalidates every trick count downstream.
-  `resolve_contract` in `lin_input.rs` does it correctly; **`bridge-types` still
-  needs the upstream fix**, and anything else calling `final_contract` is
-  suspect.
+  **Fixed upstream** in `bridge-types` `3b26da0`, which both lockfiles here now
+  pin. `resolve_contract` in `lin_input.rs` still resolves the contract itself
+  and should stay that way: it also accepts LIN's `d`/`r` doubles, which
+  `Call::from_pbn` rejects, so it is not a workaround that the upstream fix
+  retires.
+
+  Four sibling checkouts still pin a pre-fix `bridge-types` and will keep
+  mis-attributing declarer until repinned: `bridge-wrangler` (`436a84e`),
+  `Bridge-Event-Parser-Service`, `EDGAR-Defense-Toolkit` and `bridge-rulebot`
+  (all `6159bd7`). The first three also pull `Bridge-Parsers`, whose
+  `src/lin/mod.rs` calls `final_contract`, so they are exposed transitively
+  rather than only through their own code.
 - **LIN spells doubles `d`/`r`**, which `Call::from_pbn` rejects — it wants PBN's
   `X`/`XX`. Both spellings occur in real files (BBO writes the first, tools that
   generate LIN from PBN write the second), so both are accepted.
@@ -235,6 +268,57 @@ exact case `final_contract` gets wrong. Pinned as
 
 ---
 
+## Done — the review page, embedding, the gallery, and two play modes
+
+PRs #3–#5, all on `web/` plus one new engine primitive. Their commit messages
+carry the reasoning; the short version:
+
+- **The page is built around the corners of the table.** Auction north-west,
+  card inspector north-east, per-player tally south-west, double-dummy table
+  south-east. The layout is pinned so opening the inspector cannot move the
+  hands — geometry is *fixed*, not minimum, and badge headroom is reserved
+  unconditionally. Relax either and the hands slide.
+- **It is embeddable.** `hand`/`lin`/`pbn`/`url`/`board` for the board, `embed`
+  to strip the chrome, `width`/`height` for a known box, `declarerSouth` for the
+  orientation, and now `debug` for the cold-start readout. Options ride in the
+  hash as well as the query.
+- **A gallery** at `/gallery.html` renders the example at five viewports through
+  the documented embed URL, and doubles as a performance baseline.
+- **Two ways to leave the record.** `analyse_play::optimal_line` (engine, four
+  tests) replays to a point then plays both sides double-dummy-perfectly, which
+  is the correction for a mistake; and free play, where you play the cards
+  yourself. Both are one mechanism — a draft line branching at an index — so
+  everything downstream reads the active record without knowing which made it.
+- **Two colours, one meaning.** Amber where another card in the same suit would
+  have cost nothing; red where the suit itself was the error.
+
+| wasm | engine |
+|---|---|
+| `Analyzer::dd_optimal_line` | `analyse_play::optimal_line` |
+
+**Verdicts are keyed by play index**, so they must be cleared when the analysed
+line changes — a stale one otherwise mis-colours a different card, which is a
+confidently wrong answer rather than a missing one.
+
+---
+
+## Done — Phase 0 of the performance plan
+
+`docs/performance-baseline.md`, `examples/bench_fixtures.rs`,
+`web/src/lib/perf.js`, `web/src/components/DebugPanel.vue` and
+`web/src/lib/fixtures/bench-v1.json`.
+
+Cold start is **~24 ms**; the analysis after it is **377 ms**. Compute
+dominates, delivery does not. The largest available win turned out to be
+ordering rather than parallelism, and is applied: solving the trace before the
+double-dummy table took time-to-answer from ~377 ms to **138 ms**.
+
+Read the baseline before doing any of the performance work — it answers all four
+of the plan's open questions with measurements, and two of the answers change
+what is worth building.
+
+---
+
 ## Workstream C — deliverable 3: the BBO extension
 
 Tag DD errors directly on BBO's handviewer, replacing BBOHelper's server
@@ -275,6 +359,41 @@ point takes `bridge_parsers::lin::LinData`, this engine's takes a parsed
 
 Worth doing before either implementation gains users: two analysers that
 disagree about a player's mistakes is a bad thing to discover from a student.
+
+---
+
+## Open work
+
+In the order worth taking it.
+
+1. **The performance plan, phases 3–7** (`~/Desktop/bridge-solver-plan.md`),
+   re-prioritised by `docs/performance-baseline.md`. Deferring the double-dummy
+   table off the critical path is the next cheap win; the worker pool is a 1.3x
+   ceiling, not the headline the plan assumed. The Cloudflare and telemetry
+   phases need Rick's account and are sequenced on telemetry's merits, not
+   speed's.
+2. **Gallery as a scene grid.** It currently renders one state at five
+   viewports. Wants URL params for the selected trick and mode (`?trick=7`,
+   `?mode=free`) plus a scene list — and an "accept a precomputed analysis" path
+   rather than 30 independent solvers. The baseline is the argument for that
+   path, and embedding wants it anyway.
+3. **Repin the four stale siblings** onto the fixed `bridge-types` (see
+   workstream A above).
+4. **Workstream D** — fold EDGAR's second implementation onto this engine.
+   Unexplained before trusting either: its `test_bbo_dd.csv` `DD_Analysis`
+   column reads `T1:0,0,2,2` for a board where this engine finds no trick-1
+   error, and the column's meaning is undocumented.
+5. **PBN `[Auction]` and `[Play]` are not parsed**, so a PBN file with a play
+   record shows only the DD table. Less pressing now that contract-only boards
+   work fully.
+
+### An open design question, not settled
+
+"Correct it from trick N" plays **both** sides double-dummy from that trick. If
+the first mistake is a defender's, the correction therefore *helps* declarer — on
+the example, 8 tricks against the 7 actually taken. That is accurate, but
+"corrected" may be intended to mean "declarer plays it properly". Worth settling
+before anyone builds on it.
 
 ---
 

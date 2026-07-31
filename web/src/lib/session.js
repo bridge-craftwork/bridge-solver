@@ -18,6 +18,8 @@ export const DEFAULTS = {
   /** Constrain the app to a fixed pixel box, e.g. to preview a viewport. */
   width: null,
   height: null,
+  /** Show the cold-start and device readout. Diagnostic, never persisted. */
+  debug: false,
 }
 
 /**
@@ -64,6 +66,7 @@ export function readUrl(search, hash) {
   const options = {}
   if (params.has('declarerSouth')) options.declarerSouth = readBool(params, 'declarerSouth')
   if (params.has('embed')) options.embed = readBool(params, 'embed')
+  if (params.has('debug')) options.debug = readBool(params, 'debug')
   const width = readInt(params, ['width', 'vw', 'w'])
   if (width !== null) options.width = width
   const height = readInt(params, ['height', 'vh', 'h'])
@@ -155,10 +158,10 @@ function pickOptions(stored) {
 /**
  * Resolve what to open with: the URL if it says anything, else what was stored.
  *
- * The viewport box and embed flag are deliberately *not* restored from storage —
- * they describe the frame the page is in, not the hand you were looking at, and
- * carrying them over would leave someone stuck in a 390px box they cannot get out
- * of.
+ * The viewport box, embed flag and debug flag are deliberately *not* restored
+ * from storage — they describe the frame the page is in, not the hand you were
+ * looking at, and carrying them over would leave someone stuck in a 390px box
+ * they cannot get out of, or reading a diagnostic panel they asked for once.
  */
 export function resolveInitial(url = readUrl(), stored = load()) {
   const options = { ...DEFAULTS, ...url.options }
@@ -166,7 +169,7 @@ export function resolveInitial(url = readUrl(), stored = load()) {
   if (url.hand) return { hand: url.hand, options, source: 'url' }
 
   if (stored?.hand) {
-    const { width, height, embed, ...carried } = stored.options || {}
+    const { width, height, embed, debug, ...carried } = stored.options || {}
     return {
       hand: stored.hand,
       // A URL option still beats a stored one.

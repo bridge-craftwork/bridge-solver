@@ -17,6 +17,7 @@
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import AuctionTable from './components/AuctionTable.vue'
 import BridgeTable from './components/BridgeTable.vue'
+import DebugPanel from './components/DebugPanel.vue'
 import DoubleDummyTable from './components/DoubleDummyTable.vue'
 import ErrorSummary from './components/ErrorSummary.vue'
 import InputPanel from './components/InputPanel.vue'
@@ -70,6 +71,16 @@ const originalTrace = ref(null)
 const solveMs = ref(0)
 
 /**
+ * Wall clock to the trace alone — time to the answer, rather than to all of it.
+ *
+ * The distinction is the point: the trace is what the reader came for and costs
+ * about a third of the full solve, so quoting only the total describes a wait
+ * nobody actually has. Zero when the board carries no cardplay and there is no
+ * trace to wait for.
+ */
+const traceMs = ref(0)
+
+/**
  * Wall clock for the per-error node solves that follow it.
  *
  * Separate from `solveMs` because they are separate work with very different
@@ -105,6 +116,9 @@ const currentInput = ref('')
  * Strip the page to the analysis, for embedding in another site. Set by `?embed`.
  */
 const embed = ref(initial.options.embed)
+
+/** Show the cold-start readout. Set from `?debug=1`, never from storage. */
+const debug = ref(initial.options.debug)
 
 /**
  * A fixed pixel box, set by `?width` / `?height`. Used by the gallery to preview a
@@ -402,6 +416,10 @@ function reportTiming(extra = {}) {
       {
         type: 'bridge-solver:analysis',
         solveMs: Math.round(solveMs.value),
+        // Time to the trace, which is what the reader waits for. Reported
+        // alongside rather than instead of `solveMs`, so the gallery can show
+        // both the wait that matters and the total work.
+        traceMs: Math.round(traceMs.value),
         verdictMs: Math.round(verdictMs.value),
         totalMs: Math.round(solveMs.value + verdictMs.value),
         errors: summariseCosts(trace.value?.trace, board.value?.declarer).errors,
@@ -436,21 +454,46 @@ async function loadBoard() {
   ddTable.value = null
   verdicts.value = {}
   solveMs.value = 0
+  traceMs.value = 0
   draft.value = null
   freePlay.value = false
 
+  // Taken here rather than from `elapsedMs()`, which only updates once `timed`
+  // has finished and would report the previous board while this one is in
+  // flight.
+  const started = performance.now()
+
   await timed(async () => {
-    const table = await fetchDoubleDummy(b.hands)
-    // Guard against a slow solve landing after the user moved on.
+    if (!request.value) {
+      const table = await fetchDoubleDummy(b.hands)
+      // Guard against a slow solve landing after the user moved on.
+      if (board.value !== b) return
+      ddTable.value = table
+      return
+    }
+
+    // The trace goes first. It is the answer to the question this page exists
+    // to ask — where did the hand go wrong — and it is measured at about a
+    // third of what the table costs. Solving the table first held it back by
+    // the table's own duration for nothing: the table is a reference you
+    // consult afterwards, not the thing you came for.
+    const result = await fetchDdPlay(request.value)
+    if (board.value !== b) return
+    traceMs.value = performance.now() - started
+
+    // Post the table before publishing the trace, not after. Both go to the
+    // same single-threaded worker, so this is queue order rather than
+    // concurrency — and publishing the trace is what starts the verdict pass,
+    // the most expensive stage of the three. A table requested after that
+    // would sit behind all of it and arrive seconds late.
+    const tablePending = fetchDoubleDummy(b.hands)
+
+    trace.value = result
+    originalTrace.value = result
+
+    const table = await tablePending
     if (board.value !== b) return
     ddTable.value = table
-
-    if (request.value) {
-      const result = await fetchDdPlay(request.value)
-      if (board.value !== b) return
-      trace.value = result
-      originalTrace.value = result
-    }
   })
   if (board.value !== b) return
   solveMs.value = elapsedMs()
@@ -884,6 +927,13 @@ watch(boardIndex, loadBoard)
         </div>
       </div>
     </template>
+
+    <DebugPanel
+      v-if="debug"
+      :trace-ms="traceMs"
+      :solve-ms="solveMs"
+      :verdict-ms="verdictMs"
+    />
 
     <VerifySection v-if="!embed" :elapsed-ms="solveMs" />
   </main>

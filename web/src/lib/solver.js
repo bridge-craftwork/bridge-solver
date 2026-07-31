@@ -13,6 +13,7 @@
 // annotation and nothing else.
 
 import { dealStringFrom } from './deal.js'
+import { record, recordSolve, timeSegment } from './perf.js'
 
 /** Column order of a decoded DD table row. */
 export const DD_STRAINS = ['C', 'D', 'H', 'S', 'NT']
@@ -24,32 +25,101 @@ let worker = null
 let nextId = 1
 const pending = new Map()
 
-function getWorker() {
-  if (worker) return worker
-  worker = new Worker(new URL('./solver.worker.js', import.meta.url), { type: 'module' })
-  worker.onmessage = (event) => {
+/**
+ * Where the engine binary lives.
+ *
+ * `new URL(..., import.meta.url)` is the form Vite rewrites to the hashed asset
+ * URL, which is also what makes the immutable far-future cache header safe to
+ * set on it.
+ */
+function wasmUrl() {
+  return new URL('../wasm/bridge_solver_wasm_bg.wasm', import.meta.url)
+}
+
+let modulePromise = null
+
+/**
+ * Fetch and compile the engine once, on the main thread.
+ *
+ * Deliberately not `compileStreaming`, which would fuse the two segments this
+ * exists to separate: they have different fixes — fetch wants compression and
+ * caching, compile wants a smaller binary — and a single number cannot say
+ * which one to chase. Compiling from a buffer costs a little against streaming
+ * and buys both the breakdown and a `WebAssembly.Module` that can be handed to
+ * more than one worker without any of them re-fetching or re-compiling.
+ *
+ * Resolves to `null` if the module cannot be produced, which leaves the worker
+ * to load it the ordinary way rather than failing the page.
+ */
+export function preloadEngine() {
+  if (modulePromise) return modulePromise
+  modulePromise = (async () => {
+    const bytes = await timeSegment('wasmFetch', async () => {
+      const response = await fetch(wasmUrl())
+      if (!response.ok) throw new Error(`fetching the engine failed: ${response.status}`)
+      return response.arrayBuffer()
+    })
+    return timeSegment('wasmCompile', () => WebAssembly.compile(bytes))
+  })().catch((error) => {
+    console.warn(`[solver] preload fell back to in-worker load: ${error?.message || error}`)
+    return null
+  })
+  return modulePromise
+}
+
+function rawCall(target, op, payload) {
+  const id = nextId++
+  return new Promise((resolve, reject) => {
+    pending.set(id, { resolve, reject })
+    target.postMessage({ id, op, payload })
+  })
+}
+
+function spawnWorker() {
+  const w = new Worker(new URL('./solver.worker.js', import.meta.url), { type: 'module' })
+  w.onmessage = (event) => {
     const { id, ok, result, error } = event.data || {}
     const entry = pending.get(id)
     if (!entry) return
     pending.delete(id)
     ok ? entry.resolve(result) : entry.reject(new Error(error))
   }
-  worker.onerror = (event) => {
+  w.onerror = (event) => {
     // A worker-level failure (the module failing to load, say) never resolves
     // the in-flight calls otherwise.
     const message = event.message || 'the solver worker failed to start'
     for (const [, entry] of pending) entry.reject(new Error(message))
     pending.clear()
   }
-  return worker
+  return w
+}
+
+let workerReady = null
+
+/**
+ * The worker, instantiated and ready for work.
+ *
+ * The compiled module is handed over before any operation is sent, so the
+ * worker never races the main thread to fetch the same bytes. Instantiation is
+ * timed inside the worker, because that is where it happens and because it is
+ * the one cold-start segment a worker pool would pay more than once.
+ */
+function ensureWorker() {
+  if (workerReady) return workerReady
+  worker = spawnWorker()
+  workerReady = preloadEngine()
+    .then((module) => rawCall(worker, 'init', { module }))
+    .then((result) => {
+      if (result && typeof result.instantiateMs === 'number') {
+        record('wasmInstantiate', result.instantiateMs)
+      }
+      return worker
+    })
+  return workerReady
 }
 
 function call(op, payload) {
-  const id = nextId++
-  return new Promise((resolve, reject) => {
-    pending.set(id, { resolve, reject })
-    getWorker().postMessage({ id, op, payload })
-  })
+  return ensureWorker().then((target) => rawCall(target, op, payload))
 }
 
 /**
@@ -73,6 +143,9 @@ export async function timed(work) {
     return await work()
   } finally {
     lastElapsedMs = performance.now() - started
+    // Recorded in call order, so the first solve — which also pays for the
+    // engine tiering up — can be told apart from the steady state.
+    recordSolve(lastElapsedMs)
   }
 }
 

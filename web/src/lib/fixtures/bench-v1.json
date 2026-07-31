@@ -1,0 +1,17 @@
+{
+  "version": "bench-v1",
+  "generator": "examples/bench_fixtures.rs, seed 0x5EED1234ABCD0001",
+  "note": "ddtricks is seat-major N,S,E,W over strains NT,S,H,D,C.",
+  "deals": [
+    { "id": "p0", "referenceMs": 9.0, "deal": "N:AK2.87.AKQ75.865 Q9.A.J986.AQT942 J.KQT96542.T2.KJ T876543.J3.43.73", "ddtricks": "76b9776b962723627236" },
+    { "id": "p11", "referenceMs": 28.8, "deal": "N:AQ875.8642.5.A73 T.J93.Q943.KQ982 K6432.KQT75.A62. J9.A.KJT87.JT654", "ddtricks": "8cb448cb442119821188" },
+    { "id": "p22", "referenceMs": 42.9, "deal": "N:8743.KQ7.AT93.K6 K65.J985.62.AQJ8 QT92.42.K875.943 AJ.AT63.QJ4.T752", "ddtricks": "46464464649797997979" },
+    { "id": "p33", "referenceMs": 65.0, "deal": "N:A9.T852.Q72.AQ94 J642.J9.K65.K853 8753.Q76.AJT.JT7 KQT.AK43.9843.62", "ddtricks": "76878768786656566565" },
+    { "id": "p44", "referenceMs": 82.6, "deal": "N:AQJT.K.KQ8.JT964 64.AJT752.J543.8 75.83.A96.AKQ532 K9832.Q964.T72.7", "ddtricks": "7868c7868c1574115741" },
+    { "id": "p56", "referenceMs": 112.5, "deal": "N:AK86..AJT76.9872 975.AKT9876.3.Q5 T42.J32.KQ54.JT6 QJ3.Q54.982.AK43", "ddtricks": "373963739665a3665a36" },
+    { "id": "p67", "referenceMs": 133.4, "deal": "N:932.T6.QT973.J64 Q4.QJ9.A864.AKQ7 J75.K8742.J5.853 AKT86.A53.K2.T92", "ddtricks": "0022000220ddbbdddbbd" },
+    { "id": "p78", "referenceMs": 201.2, "deal": "N:KJT72.Q93.T54.K7 654.KT8.KQ6.AJ53 Q8.J7.9872.T9864 A93.A6542.AJ3.Q2", "ddtricks": "3434534345a9a98a9a98" },
+    { "id": "p89", "referenceMs": 277.2, "deal": "N:.53.AJ765.AKT865 AJT9842.AQ94.83. KQ76.KT82.Q4.743 53.J76.KT92.QJ92", "ddtricks": "7578a7578a5855368653" },
+    { "id": "p100", "referenceMs": 545.7, "deal": "N:KQ9532.T82.8.KQ2 AJT64.A.AT964.86 .KJ7643.Q52.T753 87.Q95.KJ73.AJ94", "ddtricks": "2582524825a85b8a85a8" }
+  ]
+}
