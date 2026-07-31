@@ -24,7 +24,7 @@ import InputPanel from './components/InputPanel.vue'
 import NodePanel from './components/NodePanel.vue'
 import PlayerErrors from './components/PlayerErrors.vue'
 import PlayTrace from './components/PlayTrace.vue'
-import VerifySection from './components/VerifySection.vue'
+import SolveNote from './components/SolveNote.vue'
 import { parseInput } from './lib/input.js'
 import {
   elapsedMs,
@@ -70,7 +70,7 @@ const node = ref(null)
  */
 const originalTrace = ref(null)
 
-/** Wall clock for the last solve, shown so the claim is checkable. */
+/** Wall clock for the last solve, shown at the foot of the page. */
 const solveMs = ref(0)
 
 /**
@@ -1091,7 +1091,7 @@ watch(boardIndex, loadBoard)
       :bench-score="benchScore"
     />
 
-    <VerifySection v-if="!embed" :elapsed-ms="solveMs" />
+    <SolveNote v-if="!embed" :elapsed-ms="solveMs" />
   </main>
 
   <footer v-if="!embed" class="wrap">
