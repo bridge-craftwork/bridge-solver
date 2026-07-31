@@ -142,7 +142,11 @@ fn main() {
 
             // Dummy's cards were chosen by declarer, so they are charged there.
             // That is BBO's own BSOL convention and what the web app shows.
-            let credited = if seat_idx == dummy { declarer } else { seat_idx };
+            let credited = if seat_idx == dummy {
+                declarer
+            } else {
+                seat_idx
+            };
             let name = match SEATS[credited] {
                 'N' => &lin.player_names.north,
                 'E' => &lin.player_names.east,
@@ -211,7 +215,10 @@ fn main() {
     let all = t + tr + v;
     println!("\n=== totals over {} boards ===", rows.len());
     println!("  dd_table       {t:>8.1} ms  ({:>4.1}%)", 100.0 * t / all);
-    println!("  running_trace  {tr:>8.1} ms  ({:>4.1}%)", 100.0 * tr / all);
+    println!(
+        "  running_trace  {tr:>8.1} ms  ({:>4.1}%)",
+        100.0 * tr / all
+    );
     println!("  verdicts       {v:>8.1} ms  ({:>4.1}%)", 100.0 * v / all);
     println!("  total          {all:>8.1} ms");
 
