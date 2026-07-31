@@ -1,0 +1,131 @@
+// Telemetry ingest.
+//
+// One row per page load and per completed solve, carrying **no identifier of
+// any kind** — no account, no cookie, no random ID, no hash of the IP. That is
+// ADR-001, and it is the constraint the rest of this file exists to respect:
+// two records from the same person cannot be linked, by us or by anyone else.
+// The consequence is that we cannot count unique users, only events. That is a
+// deliberate trade.
+//
+// Nothing derived from the deal is accepted or stored. Not the PBN or LIN, not
+// the contract, not the trick counts, not a hash of any of them. The client
+// never sends it; this endpoint would ignore it if it did. That exclusion is
+// the load-bearing privacy claim of the whole site, so the field allowlist
+// below is deliberately explicit rather than a spread of whatever arrived.
+
+interface Env {
+  SOLVER: AnalyticsEngineDataset
+}
+
+/** Largest body we will read. A beacon is a few hundred bytes; this is slack. */
+const MAX_BODY_BYTES = 1024
+
+/** Event kinds we accept. Anything else is dropped rather than recorded. */
+const EVENTS = new Set(['load', 'solve', 'bench'])
+
+/**
+ * Clamp a number into a sane range, or return 0.
+ *
+ * Everything numeric here arrives from a browser we do not control, so each
+ * field is bounded before it is written rather than trusted. `NaN`, `Infinity`,
+ * a string, or a missing value all become 0.
+ */
+function num(value: unknown, min: number, max: number): number {
+  const n = typeof value === 'number' ? value : Number(value)
+  if (!Number.isFinite(n)) return 0
+  return Math.min(max, Math.max(min, n))
+}
+
+/**
+ * A coarse browser/OS family, e.g. `Safari 18` / `iOS`.
+ *
+ * Deliberately a small lookup rather than a UA-parsing dependency: the point is
+ * to know roughly which engines are slow, and a full UA string is a
+ * fingerprinting surface we have no use for. Anything unrecognised is `other`,
+ * which is a perfectly good answer.
+ */
+function family(ua: string): { browser: string; os: string } {
+  const major = (re: RegExp) => ua.match(re)?.[1] ?? ''
+
+  let browser = 'other'
+  if (/Edg\//.test(ua)) browser = `Edge ${major(/Edg\/(\d+)/)}`
+  else if (/OPR\//.test(ua)) browser = `Opera ${major(/OPR\/(\d+)/)}`
+  else if (/Firefox\//.test(ua)) browser = `Firefox ${major(/Firefox\/(\d+)/)}`
+  else if (/Chrome\//.test(ua)) browser = `Chrome ${major(/Chrome\/(\d+)/)}`
+  else if (/Safari\//.test(ua) && /Version\//.test(ua)) {
+    browser = `Safari ${major(/Version\/(\d+)/)}`
+  }
+
+  let os = 'other'
+  if (/iPhone|iPad|iPod/.test(ua)) os = 'iOS'
+  else if (/Android/.test(ua)) os = 'Android'
+  else if (/Mac OS X/.test(ua)) os = 'macOS'
+  else if (/Windows/.test(ua)) os = 'Windows'
+  else if (/Linux/.test(ua)) os = 'Linux'
+
+  return { browser: browser.trim(), os }
+}
+
+export const onRequestPost: PagesFunction<Env> = async ({ request, env }) => {
+  // Cap the read rather than trusting Content-Length, which is client-supplied.
+  const raw = (await request.text()).slice(0, MAX_BODY_BYTES)
+
+  let body: Record<string, unknown>
+  try {
+    body = JSON.parse(raw)
+  } catch {
+    // A malformed beacon is not worth an error page — the client fires this
+    // with `sendBeacon` and cannot act on a response anyway.
+    return new Response(null, { status: 204 })
+  }
+
+  const ev = String(body.ev ?? '')
+  if (!EVENTS.has(ev)) return new Response(null, { status: 204 })
+
+  const ua = request.headers.get('user-agent') ?? ''
+  const { browser, os } = family(ua)
+
+  // `request.cf` is added at the edge. We read the country from it and let the
+  // IP itself fall on the floor: it is never written to the dataset, never
+  // logged, and never hashed into anything durable.
+  const country = (request.cf?.country as string) ?? 'XX'
+
+  // `Sec-Fetch-Dest` tells us `iframe` vs `document` server-side, which works
+  // even where the client's `ancestorOrigins` check does not.
+  const dest = request.headers.get('sec-fetch-dest') ?? ''
+
+  env.SOLVER.writeDataPoint({
+    // Low cardinality, which is what Analytics Engine wants for its sampling
+    // equalization — so the event kind rather than anything finer.
+    indexes: [ev],
+    blobs: [
+      browser,
+      os,
+      country,
+      String(body.embed ?? '').slice(0, 128), // '' when top-level
+      dest,
+      String(body.v ?? '').slice(0, 32), // app version
+      body.simd ? '1' : '0',
+    ],
+    doubles: [
+      num(body.ms, 0, 600_000), // elapsed, already bucketed client-side
+      body.cold ? 1 : 0,
+      num(body.tz, -840, 840), // UTC offset in minutes
+      num(body.cards, 0, 52),
+      num(body.bench, 0, 100_000),
+      num(body.fetchMs, 0, 600_000),
+      num(body.compileMs, 0, 600_000),
+      body.cancelled ? 1 : 0,
+    ],
+  })
+
+  // No body, and nothing for the client to key off. A beacon that fails should
+  // never affect the solve, so there is deliberately nothing here to check.
+  return new Response(null, { status: 204 })
+}
+
+/** Anything other than POST is not an error worth describing, just not allowed. */
+export const onRequest: PagesFunction<Env> = async ({ request, next }) => {
+  if (request.method !== 'POST') return new Response(null, { status: 405 })
+  return next()
+}
