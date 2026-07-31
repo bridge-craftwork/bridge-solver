@@ -411,28 +411,35 @@ async function loadBoard() {
   })
   if (board.value !== b) return
   solveMs.value = elapsedMs()
-
-  loadVerdicts(b)
 }
 
 /**
  * Work out, for each costed card, whether the suit or only the card was wrong.
  *
  * One node analysis per error, and each of those solves every legal card from that
- * position — far more work than the trace itself. Deliberately not awaited: the
- * page is already complete and correct without it, and each answer colours its own
- * row as it arrives.
+ * position — far more work than the trace itself. Deliberately not awaited: the page
+ * is already complete and correct without it, and each answer colours its own row as
+ * it arrives.
+ *
+ * Driven by the trace rather than by loading a board, because an explored line has
+ * costed cards of its own that deserve the same explanation. It also has to be:
+ * verdicts are keyed by play index, so a stale one from the original record would
+ * otherwise be applied to whatever card a draft happens to have at that index.
  */
-async function loadVerdicts(b) {
-  const errors = (trace.value?.trace || []).filter((e) => e.cost > 0)
-  for (const e of errors) {
+watch(trace, async (current) => {
+  verdicts.value = {}
+  if (!current || !request.value) return
+
+  const b = board.value
+  const forTrace = current
+  for (const e of current.trace.filter((x) => x.cost > 0)) {
     const result = await fetchDdPlayNode(request.value, e.index)
-    // The user may have moved to another board while these were queued.
-    if (board.value !== b) return
+    // Abandon quietly if the board or the line moved on while these were queued.
+    if (board.value !== b || trace.value !== forTrace) return
     const verdict = suitVerdict(result)
     if (verdict) verdicts.value = { ...verdicts.value, [e.index]: verdict }
   }
-}
+})
 
 /**
  * Open the analysis at one play index.
@@ -714,6 +721,7 @@ watch(boardIndex, loadBoard)
             :trace="trace.trace"
             :tricks="replayed?.tricks || []"
             :selected-index="node?.index ?? -1"
+            :declarer="board.declarer"
             @select="inspect"
           />
         </section>

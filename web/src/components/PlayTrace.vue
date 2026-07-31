@@ -11,6 +11,7 @@
 import { computed } from 'vue'
 import { SUIT_SYMBOLS, formatCard, getSuitClass, parseCardCode } from '../lib/cards.js'
 import { TRICK_SIZE } from '../lib/cardplay.js'
+import { signedEffect } from '../lib/errors.js'
 
 const props = defineProps({
   /** `[{ index, seat, card, cost }]` from the running trace. */
@@ -19,6 +20,14 @@ const props = defineProps({
   selectedIndex: { type: Number, default: -1 },
   /** Per-trick winners from the replay, indexed by trick number - 1. */
   tricks: { type: Array, default: () => [] },
+  /**
+   * Needed to sign a cost against declarer.
+   *
+   * Without it this panel showed every error as a bare `−n` while the error table
+   * showed the same card signed — so a defender's mistake read as `−1` here and
+   * `+1` there. One card, two numbers.
+   */
+  declarer: { type: String, default: null },
 })
 
 defineEmits(['select'])
@@ -41,6 +50,12 @@ const grouped = computed(() => {
 
 const totalErrors = computed(() => props.trace.filter((e) => e.cost > 0).length)
 const totalCost = computed(() => props.trace.reduce((n, e) => n + e.cost, 0))
+
+/** The card's effect on declarer's total, matching the error table exactly. */
+function signed(entry) {
+  const n = signedEffect(entry, props.declarer)
+  return n > 0 ? `+${n}` : String(n)
+}
 
 function glyph(code) {
   const { suit, rank } = parseCardCode(code)
@@ -94,7 +109,7 @@ function glyph(code) {
             <span class="play-card" :class="glyph(e.card).cls">
               {{ glyph(e.card).symbol }}{{ glyph(e.card).rank }}
             </span>
-            <span v-if="e.cost > 0" class="play-cost">−{{ e.cost }}</span>
+            <span v-if="e.cost > 0" class="play-cost">{{ signed(e) }}</span>
           </button>
         </span>
         <span class="trick-won">{{ t.winner || '' }}</span>
