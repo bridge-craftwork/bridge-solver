@@ -10,6 +10,11 @@ on:
       - 'Cargo.toml'
       - 'Cargo.lock'
       - '.github/workflows/pages.yml'
+      # The Cloudflare half of the deploy: a change to the ingest Function or to
+      # the bindings has to redeploy too, and without these it silently would
+      # not — the site would keep serving while the Function went stale.
+      - 'functions/**'
+      - 'wrangler.jsonc'
   # Lets the site be redeployed without a code change.
   workflow_dispatch:
 
@@ -25,6 +30,11 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
+  # Read here rather than inside the step so the step's `if` can test them: a
+  # fork, or this repo before the secrets are set, should still build and deploy
+  # to GitHub Pages rather than failing on a credential it was never given.
+  CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+  CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
 
 jobs:
   build:
@@ -81,6 +91,18 @@ jobs:
           ls dist/assets/*.wasm
           ls dist/assets/*.js
           du -sh dist
+
+      # Cloudflare, from the same build that GitHub Pages is about to get, so the
+      # two hosts cannot drift. Only Cloudflare has the `/t` ingest Function and
+      # the KV and Analytics Engine bindings; GitHub Pages serves the same static
+      # site with the beacon inert against it.
+      #
+      # Skipped when the token is absent so a fork still builds. `--commit-dirty`
+      # because the checkout carries the generated wasm module, which wrangler
+      # would otherwise refuse to deploy from as an unclean tree.
+      - name: Deploy to Cloudflare Pages
+        if: env.CLOUDFLARE_API_TOKEN != ''
+        run: npx --yes wrangler@4 pages deploy --commit-dirty=true
 
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3
