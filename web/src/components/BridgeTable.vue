@@ -2,20 +2,20 @@
 /**
  * The four hands in compass positions with the trick in the middle.
  *
- * This owns `marksFor`, which is the load-bearing part of the double-dummy
- * overlay: it merges played state, current-trick state and the DD badges into
- * the single `marks` object `HandDisplay` renders from. The merge order matters
- * and is the same as Bridge-Classroom's.
+ * This owns `marksFor`, the load-bearing part of the double-dummy overlay: it
+ * merges played state, current-trick state and the DD badges into the single
+ * `marks` object `HandDisplay` renders from. The merge order matters and is the
+ * same as Bridge-Classroom's.
  *
- * The classroom's grid arranger — 877 lines of per-region scale clamps and
- * layout ledgers for fitting a live table into arbitrary viewports — is
- * deliberately not vendored. Its legacy compass branch, which is what this is,
- * renders the same thing with the same merge and no configuration.
+ * The classroom's grid arranger — 877 lines of per-region scale clamps and layout
+ * ledgers for fitting a live table into arbitrary viewports — is deliberately not
+ * vendored. Its legacy compass branch, which is what this is, renders the same
+ * thing with the same merge and no configuration.
  */
 import { computed } from 'vue'
 import SeatPanel from './SeatPanel.vue'
 import TrickArea from './TrickArea.vue'
-import { normalizeCardCode } from '../lib/cards.js'
+import { normalizeCardCode, seatAtPosition } from '../lib/cards.js'
 
 const props = defineProps({
   hands: { type: Object, default: () => ({}) },
@@ -35,7 +35,11 @@ const props = defineProps({
   tricksTaken: { type: Object, default: () => ({ NS: 0, EW: 0 }) },
   trickWinner: { type: String, default: null },
   declarer: { type: String, default: null },
-  hidePlayedCards: { type: Boolean, default: false },
+  /**
+   * Turn the table so this seat sits at the bottom. The badges keep naming real
+   * compass seats, so what changes is the viewpoint, not the geography.
+   */
+  southSeat: { type: String, default: null },
 })
 
 defineEmits(['card-click'])
@@ -46,8 +50,8 @@ defineEmits(['card-click'])
  * Order is deliberate: played first, then current-trick cards overwrite it
  * (dummy's led card should highlight rather than strike through), then the DD
  * badges merge *onto* whatever is there without setting `played` — so an error
- * badge can sit on a card that is not struck through. Keeping the strike and
- * the overlay separate is the whole reason the overlay is readable.
+ * badge can sit on a card that is not struck through. Keeping the strike and the
+ * overlay separate is the whole reason the overlay is readable.
  */
 function marksFor(seat) {
   const cards = {}
@@ -68,13 +72,6 @@ function marksFor(seat) {
   return { cards }
 }
 
-const marks = computed(() => ({
-  N: marksFor('N'),
-  E: marksFor('E'),
-  S: marksFor('S'),
-  W: marksFor('W'),
-}))
-
 /** Declarer and dummy are worth labelling; the defenders need no note. */
 function roleOf(seat) {
   if (!props.declarer) return ''
@@ -87,33 +84,36 @@ function nameOf(seat) {
   const key = { N: 'north', E: 'east', S: 'south', W: 'west' }[seat]
   return props.names?.[key] || ''
 }
+
+/** Each screen position, resolved to the seat it shows. */
+const slots = computed(() =>
+  ['N', 'E', 'S', 'W'].map((position) => {
+    const seat = seatAtPosition(position, props.southSeat)
+    return {
+      position,
+      seat,
+      hand: props.hands[seat],
+      name: nameOf(seat),
+      marks: marksFor(seat),
+      role: roleOf(seat),
+      active: props.activeSeat === seat,
+    }
+  })
+)
 </script>
 
 <template>
   <div class="bridge-table">
-    <div class="cell-n">
+    <div v-for="slot in slots" :key="slot.position" :class="`cell-${slot.position.toLowerCase()}`">
       <SeatPanel
-        seat="N"
-        :hand="hands.N"
-        :name="nameOf('N')"
-        :marks="marks.N"
-        :role="roleOf('N')"
-        :active="activeSeat === 'N'"
+        :seat="slot.seat"
+        :hand="slot.hand"
+        :name="slot.name"
+        :marks="slot.marks"
+        :role="slot.role"
+        :active="slot.active"
         :inspectable="inspectable"
-        @card-click="$emit('card-click', { seat: 'N', ...$event })"
-      />
-    </div>
-
-    <div class="cell-w">
-      <SeatPanel
-        seat="W"
-        :hand="hands.W"
-        :name="nameOf('W')"
-        :marks="marks.W"
-        :role="roleOf('W')"
-        :active="activeSeat === 'W'"
-        :inspectable="inspectable"
-        @card-click="$emit('card-click', { seat: 'W', ...$event })"
+        @card-click="$emit('card-click', { seat: slot.seat, ...$event })"
       />
     </div>
 
@@ -123,32 +123,7 @@ function nameOf(seat) {
         :tricks-taken="tricksTaken"
         :winner="trickWinner"
         :next-seat="activeSeat"
-      />
-    </div>
-
-    <div class="cell-e">
-      <SeatPanel
-        seat="E"
-        :hand="hands.E"
-        :name="nameOf('E')"
-        :marks="marks.E"
-        :role="roleOf('E')"
-        :active="activeSeat === 'E'"
-        :inspectable="inspectable"
-        @card-click="$emit('card-click', { seat: 'E', ...$event })"
-      />
-    </div>
-
-    <div class="cell-s">
-      <SeatPanel
-        seat="S"
-        :hand="hands.S"
-        :name="nameOf('S')"
-        :marks="marks.S"
-        :role="roleOf('S')"
-        :active="activeSeat === 'S'"
-        :inspectable="inspectable"
-        @card-click="$emit('card-click', { seat: 'S', ...$event })"
+        :south-seat="southSeat"
       />
     </div>
   </div>
@@ -185,8 +160,8 @@ function nameOf(seat) {
 
 /*
  * Below the table's natural width the compass has to give: stack the seats in
- * N, W, E, S reading order and drop the centre trick, which has no meaning
- * without positions around it.
+ * reading order and drop the centre trick, which has no meaning without positions
+ * around it.
  */
 @media (max-width: 720px) {
   .bridge-table {

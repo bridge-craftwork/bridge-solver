@@ -25,7 +25,15 @@ import PlayerErrors from './components/PlayerErrors.vue'
 import PlayTrace from './components/PlayTrace.vue'
 import VerifySection from './components/VerifySection.vue'
 import { parseInput } from './lib/input.js'
-import { fetchDdPlay, fetchDdPlayNode, fetchDoubleDummy, playRequest } from './lib/solver.js'
+import {
+  elapsedMs,
+  fetchDdPlay,
+  fetchDdPlayNode,
+  fetchDoubleDummy,
+  playRequest,
+  timed,
+} from './lib/solver.js'
+import { suitVerdict } from './lib/errors.js'
 import {
   remainingHands,
   replay,
@@ -45,6 +53,29 @@ const busy = ref(false)
 const ddTable = ref(null)
 const trace = ref(null)
 const node = ref(null)
+
+/** Wall clock for the last solve, shown so the claim is checkable. */
+const solveMs = ref(0)
+
+/**
+ * Turn the table so declarer sits at the bottom.
+ *
+ * On by default: a hand under review is conventionally read from declarer's side,
+ * and the alternative — a fixed compass — makes you re-orient on every board as
+ * declarer moves around. Turning it only relabels which slot each hand occupies,
+ * so the badges keep naming real seats and the geography is unchanged.
+ */
+const declarerSouth = ref(true)
+
+/**
+ * `'card'` or `'suit'` per costed play index: whether a playable card existed in
+ * the suit, or the suit itself was the mistake.
+ *
+ * Filled in after the trace, one `dd_play_node` per error. Each of those costs a
+ * solve per legal card, so they are deliberately not part of the headline timing
+ * and the rows colour in as they land.
+ */
+const verdicts = ref({})
 
 const board = computed(() => boards.value[boardIndex.value] || null)
 
@@ -144,6 +175,11 @@ const request = computed(() => {
   })
 })
 
+/** Which seat the table is turned to put at the bottom, if any. */
+const southSeat = computed(() =>
+  declarerSouth.value && board.value?.declarer ? board.value.declarer : null
+)
+
 const contractSummary = computed(() => {
   const b = board.value
   if (!b?.contract) return null
@@ -191,16 +227,43 @@ async function loadBoard() {
   node.value = null
   trace.value = null
   ddTable.value = null
+  verdicts.value = {}
+  solveMs.value = 0
 
-  const table = await fetchDoubleDummy(b.hands)
-  // Guard against a slow solve landing after the user moved on.
-  if (board.value !== b) return
-  ddTable.value = table
-
-  if (request.value) {
-    const result = await fetchDdPlay(request.value)
+  await timed(async () => {
+    const table = await fetchDoubleDummy(b.hands)
+    // Guard against a slow solve landing after the user moved on.
     if (board.value !== b) return
-    trace.value = result
+    ddTable.value = table
+
+    if (request.value) {
+      const result = await fetchDdPlay(request.value)
+      if (board.value !== b) return
+      trace.value = result
+    }
+  })
+  if (board.value !== b) return
+  solveMs.value = elapsedMs()
+
+  loadVerdicts(b)
+}
+
+/**
+ * Work out, for each costed card, whether the suit or only the card was wrong.
+ *
+ * One node analysis per error, and each of those solves every legal card from that
+ * position — far more work than the trace itself. Deliberately not awaited: the
+ * page is already complete and correct without it, and each answer colours its own
+ * row as it arrives.
+ */
+async function loadVerdicts(b) {
+  const errors = (trace.value?.trace || []).filter((e) => e.cost > 0)
+  for (const e of errors) {
+    const result = await fetchDdPlayNode(request.value, e.index)
+    // The user may have moved to another board while these were queued.
+    if (board.value !== b) return
+    const verdict = suitVerdict(result)
+    if (verdict) verdicts.value = { ...verdicts.value, [e.index]: verdict }
   }
 }
 
@@ -253,11 +316,6 @@ watch(boardIndex, loadBoard)
         Paste a hand and see the double-dummy table, then every card that gave a
         trick away and what should have been played instead.
       </p>
-      <p class="privacy" role="note">
-        <strong>The hand never leaves this page.</strong> The solver is compiled
-        into the page and runs in your browser — nothing is sent to a server.
-        <a href="#verify">Don't take our word for it →</a>
-      </p>
     </div>
   </header>
 
@@ -307,6 +365,11 @@ watch(boardIndex, loadBoard)
         <span v-if="contractSummary?.claim != null" class="chip">
           Claimed {{ contractSummary.claim }}
         </span>
+
+        <label v-if="board.declarer" class="chip chip-toggle">
+          <input v-model="declarerSouth" type="checkbox" />
+          Declarer at the bottom
+        </label>
       </section>
 
       <!--
@@ -317,10 +380,11 @@ watch(boardIndex, loadBoard)
       <ErrorSummary
         v-if="trace"
         :trace="trace.trace"
-        :tricks="replayed?.tricks || []"
         :selected-index="node?.index ?? -1"
         :names="board.names"
         :declarer="board.declarer"
+        :contract-tricks="trace.contract_tricks"
+        :verdicts="verdicts"
         @select="inspect"
       />
 
@@ -352,6 +416,7 @@ watch(boardIndex, loadBoard)
             :tricks-taken="taken"
             :active-seat="node?.seat || null"
             :declarer="board.declarer"
+            :south-seat="southSeat"
             :inspectable="!!request"
             @card-click="onCardClick"
           />
@@ -389,7 +454,7 @@ watch(boardIndex, loadBoard)
       </div>
     </template>
 
-    <VerifySection />
+    <VerifySection :elapsed-ms="solveMs" />
   </main>
 
   <footer class="wrap">
@@ -420,19 +485,8 @@ h1 {
 }
 
 .tagline {
-  margin: 0 0 10px;
-  color: var(--text-secondary);
-  max-width: 62ch;
-}
-
-.privacy {
   margin: 0;
-  font-size: 14px;
-  background: #f0faf5;
-  border: 1px solid #c9e9d8;
-  border-radius: var(--radius-button);
-  padding: 8px 12px;
-  display: inline-block;
+  color: var(--text-secondary);
 }
 
 main > * {
@@ -503,6 +557,19 @@ main > * {
   color: var(--text-secondary);
 }
 
+.chip-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  cursor: pointer;
+  user-select: none;
+}
+
+.chip-toggle input {
+  margin: 0;
+  cursor: pointer;
+}
+
 .chip-contract {
   font-weight: 700;
   color: var(--green-ink);
@@ -517,7 +584,7 @@ main > * {
  */
 .layout {
   display: grid;
-  grid-template-columns: minmax(210px, 250px) minmax(0, 1fr) auto;
+  grid-template-columns: minmax(320px, 350px) minmax(0, 1fr) auto;
   gap: 26px;
   align-items: start;
 }
@@ -544,7 +611,7 @@ main > * {
 }
 
 /* Two columns: the trace moves under the table, the summaries stay beside it. */
-@media (max-width: 1180px) {
+@media (max-width: 1280px) {
   .layout {
     grid-template-columns: minmax(0, 1fr) auto;
   }
