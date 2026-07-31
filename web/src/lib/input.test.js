@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { INPUT_KINDS, detectKind } from './input.js'
+import { INPUT_KINDS, detectKind, parseInput } from './input.js'
 
 const DEAL = 'N:AKQT3.J6.KJ42.95 652.AK42.AQ87.T4 J74.QT95.T.AK863 98.873.9653.QJ72'
 
@@ -43,5 +43,48 @@ describe('detectKind', () => {
     expect(detectKind('')).toBe(INPUT_KINDS.UNKNOWN)
     expect(detectKind('   ')).toBe(INPUT_KINDS.UNKNOWN)
     expect(detectKind('hello')).toBe(INPUT_KINDS.UNKNOWN)
+  })
+})
+
+describe('parseInput, PBN', () => {
+  const board = (extra = '') => `[Board "7"]\n[Dealer "E"]\n[Vulnerable "NS"]\n[Deal "${DEAL}"]\n${extra}`
+
+  it('reads a board with no contract at all', async () => {
+    const { kind, boards } = await parseInput(board())
+    expect(kind).toBe(INPUT_KINDS.PBN)
+    expect(boards).toHaveLength(1)
+    expect(boards[0].contract).toBeNull()
+    expect(boards[0].leader).toBeNull()
+    expect(boards[0].plays).toEqual([])
+  })
+
+  /*
+   * A board with a contract but no cards played is analysable, and PBN never states
+   * an opening leader — so it has to be derived, or the whole analysis is withheld
+   * over a field nobody wrote down.
+   */
+  it('derives the opening leader from the declarer', async () => {
+    const { boards } = await parseInput(board('[Declarer "N"]\n[Contract "4S"]'))
+    expect(boards[0]).toMatchObject({ contract: '4S', declarer: 'N', leader: 'E', plays: [] })
+  })
+
+  it('derives it correctly for every declarer', async () => {
+    for (const [declarer, leader] of [['N', 'E'], ['E', 'S'], ['S', 'W'], ['W', 'N']]) {
+      const { boards } = await parseInput(board(`[Declarer "${declarer}"]\n[Contract "3NT"]`))
+      expect(boards[0].leader, declarer).toBe(leader)
+    }
+  })
+
+  it('reads a multi-board file', async () => {
+    const { boards } = await parseInput(`${board('[Contract "4S"]\n[Declarer "N"]')}\n\n${board()}`)
+    expect(boards).toHaveLength(2)
+  })
+
+  it('refuses something that is not a hand at all', async () => {
+    await expect(parseInput('hello there')).rejects.toThrow(/does not look like/)
+  })
+
+  it('says what is wrong with a PBN carrying no deal', async () => {
+    await expect(parseInput('[Event "Nothing here"]\n[Dealer "N"]')).rejects.toThrow(/No \[Deal/)
   })
 })

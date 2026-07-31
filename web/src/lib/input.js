@@ -4,6 +4,7 @@
 // handviewer URL. They are distinguishable without asking, so the input is one
 // box rather than three tabs.
 
+import { seatAtIndex } from './cards.js'
 import { parseDealString, splitPbnBoards } from './deal.js'
 import { parseLin, parseLinFile } from './solver.js'
 
@@ -59,7 +60,14 @@ function board({
     vulnerable,
     contract,
     declarer,
-    leader,
+    /*
+     * The opening lead is declarer's LHO, so a board that names a declarer implies
+     * one even when it does not state it. PBN carries a contract without ever
+     * carrying a leader, and without this the whole analysis was unavailable for
+     * such a board — there was nothing wrong with it except a field nobody wrote
+     * down.
+     */
+    leader: leader || (declarer ? seatAtIndex(declarer, 1) : null),
     plays,
     auction,
     names,

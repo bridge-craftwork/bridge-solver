@@ -236,7 +236,10 @@ const shownTrick = computed(() => {
 
 const request = computed(() => {
   const b = board.value
-  if (!b?.contract || !b.declarer || !b.leader || !activePlays.value.length) return null
+  // Deliberately not requiring a play record. A deal with a contract and no cards
+  // played is a perfectly good thing to analyse: the contract's double-dummy value
+  // is available, and both explore modes work from the opening lead.
+  if (!b?.contract || !b.declarer || !b.leader) return null
   return playRequest({
     hands: b.hands,
     trump: trumpFromContract(b.contract) || 'NT',
@@ -252,7 +255,7 @@ const request = computed(() => {
  */
 const originalRequest = computed(() => {
   const b = board.value
-  if (!b?.contract || !b.declarer || !b.leader || !b.plays?.length) return null
+  if (!b?.contract || !b.declarer || !b.leader) return null
   return playRequest({
     hands: b.hands,
     trump: trumpFromContract(b.contract) || 'NT',
@@ -485,10 +488,13 @@ function onCardClick({ code }) {
   if (index >= 0) inspect(index)
 }
 
+/** Whether this board came with any cards played. */
+const hasPlayRecord = computed(() => (board.value?.plays?.length ?? 0) > 0)
+
 /** The trick a correction would start at, given what is selected. */
 const correctFromTrick = computed(() => {
-  const anchor = node.value ? node.value.index : firstErrorIndex.value
-  return anchor < 0 ? 1 : trickNumberOf(anchor)
+  const anchor = node.value ? node.value.index : Math.max(firstErrorIndex.value, 0)
+  return trickNumberOf(anchor)
 })
 
 /** The first card that gave a trick away — the default place to correct from. */
@@ -516,8 +522,9 @@ async function showCorrectedLine() {
   const b = board.value
   if (!originalRequest.value) return
 
-  const anchor = node.value ? node.value.index : firstErrorIndex.value
-  if (anchor < 0) return
+  // No selection and no mistakes to find — with an empty record that is the normal
+  // case — means correcting the whole hand from the opening lead.
+  const anchor = node.value ? node.value.index : Math.max(firstErrorIndex.value, 0)
   const from = trickStartOf(anchor)
 
   const line = await fetchOptimalLine(originalRequest.value, from)
@@ -533,13 +540,19 @@ async function showCorrectedLine() {
   }
 }
 
-/** Take the hand over from a point and play it on yourself. */
+/**
+ * Take the hand over from a point and play it on yourself.
+ *
+ * Guarded on the contract rather than on a play record: a deal with a contract and
+ * no cards played is the case most worth playing yourself, and requiring a record
+ * refused it outright.
+ */
 function startFreePlay(from = node.value?.index ?? 0) {
   const b = board.value
-  if (!b?.plays?.length) return
+  if (!b?.contract || !b.leader) return
   node.value = null
   freePlay.value = true
-  draft.value = { from, plays: b.plays.slice(0, from), source: 'free', result: null }
+  draft.value = { from, plays: (b.plays || []).slice(0, from), source: 'free', result: null }
 }
 
 /** Add a card to the line being composed. */
@@ -659,16 +672,21 @@ watch(boardIndex, loadBoard)
       -->
       <section v-if="originalRequest" class="modes" aria-label="Explore the hand">
         <button
-          v-if="firstErrorIndex >= 0 || node"
           type="button"
           class="mode-btn"
           :class="{ active: draft?.source === 'corrected' }"
           :title="
-            `Keep every trick before ${correctFromTrick}, then play it out perfectly from there`
+            hasPlayRecord
+              ? `Keep every trick before ${correctFromTrick}, then play it out perfectly from there`
+              : 'Play the whole hand out double-dummy from the opening lead'
           "
           @click="showCorrectedLine"
         >
-          Correct it from trick {{ correctFromTrick }}
+          {{
+            hasPlayRecord
+              ? `Correct it from trick ${correctFromTrick}`
+              : 'Show the double-dummy line'
+          }}
         </button>
         <button
           type="button"
@@ -677,7 +695,7 @@ watch(boardIndex, loadBoard)
           :title="
             node
               ? `Take over from trick ${trickNumberOf(node.index)} and play it yourself`
-              : 'Take the hand over from the start and play it yourself'
+              : 'Play the hand yourself from the opening lead'
           "
           @click="startFreePlay()"
         >
@@ -700,10 +718,14 @@ watch(boardIndex, loadBoard)
         </template>
 
         <span v-if="draft" class="mode-status">
-          <template v-if="draft.source === 'corrected'">
+          <template v-if="draft.source === 'corrected' && hasPlayRecord">
             Corrected from trick {{ trickNumberOf(draft.from) }} —
             <strong>{{ draft.result }} tricks</strong> instead of
             {{ trickTotalFrom(contractSummary?.ddTricks, originalSummary) }}
+          </template>
+          <template v-else-if="draft.source === 'corrected'">
+            <!-- Nothing was played, so there is no "instead of" to give. -->
+            Double-dummy line — <strong>{{ draft.result }} tricks</strong>
           </template>
           <template v-else-if="turn">
             Your line · {{ turn.seat }} to play ·
@@ -807,10 +829,10 @@ watch(boardIndex, loadBoard)
             This board has a play record but no contract, so there is nothing to
             cost the cards against. The double-dummy table still applies.
           </p>
-          <p v-else-if="!board.plays?.length" class="note">
-            No play record in this board — the double-dummy table is all there is
-            to show. A LIN record or a BBO handviewer URL carries the cards
-            played.
+          <p v-else-if="!hasPlayRecord" class="note">
+            No cards were played in this board. The double-dummy table applies, and
+            you can still play the hand out yourself or watch the double-dummy line
+            — there is just nothing to compare them against.
           </p>
         </div>
       </div>
