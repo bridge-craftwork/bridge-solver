@@ -22,6 +22,8 @@ const props = defineProps({
   solveMs: { type: Number, default: 0 },
   /** Wall clock for the verdict pass, in ms. */
   verdictMs: { type: Number, default: 0 },
+  /** Device speed score from the probe, reference machine = 100. */
+  benchScore: { type: Number, default: null },
 })
 
 const caps = ref(capabilities())
@@ -61,6 +63,7 @@ function copy() {
     `verdicts          ${ms(props.verdictMs)}`,
     `solves            ${solves.value.map((n) => Math.round(n)).join(', ') || '—'}`,
     `warmup 1st/3rd    ${warmup.value ? `${warmup.value.toFixed(2)}x` : '—'}`,
+    `bench score       ${props.benchScore ?? '—'}`,
     `cores             ${caps.value.cores ?? '—'} (pool ${poolSize(caps.value)})`,
     `deviceMemory      ${caps.value.memoryGb ? `${caps.value.memoryGb} GB` : '—'}`,
     `simd              ${caps.value.simd ? 'yes' : 'no'}`,
@@ -107,6 +110,8 @@ function copy() {
           <dd>{{ ms(verdictMs) }}</dd>
           <dt title="First solve divided by the third, on this page load">warm-up 1st/3rd</dt>
           <dd>{{ warmup ? `${warmup.toFixed(2)}x` : '—' }}</dd>
+          <dt title="Device speed from the probe; the reference machine is 100">bench score</dt>
+          <dd>{{ benchScore ?? '—' }}</dd>
         </dl>
       </div>
 

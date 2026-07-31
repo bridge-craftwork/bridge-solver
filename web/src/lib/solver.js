@@ -13,6 +13,7 @@
 // annotation and nothing else.
 
 import { dealStringFrom } from './deal.js'
+import { probeDeal, scoreFrom } from './benchmark.js'
 import { record, recordSolve, timeSegment } from './perf.js'
 
 /** Column order of a decoded DD table row. */
@@ -269,6 +270,31 @@ export function parseLin(input) {
  */
 export function parseLinFile(content) {
   return call('parseLinFile', { content })
+}
+
+/**
+ * Time one small fixed solve, to find out how fast this device is.
+ *
+ * Run once, before the first real analysis, because a warning about a slow
+ * device is only useful before the wait rather than during it. Resolves to
+ * `{ ms, score, ok }` — `ok` false meaning the device produced the wrong table,
+ * which is a wasm correctness bug on that platform and worth more than the
+ * timing beside it.
+ *
+ * Resolves to `null` rather than throwing: a probe that fails should cost the
+ * warning, not the analysis.
+ */
+export function runBenchmark() {
+  const { deal, ddtricks } = probeDeal()
+  const started = performance.now()
+  return optional(
+    'benchmark',
+    call('ddTable', { dealstr: deal }).then((result) => {
+      const ms = performance.now() - started
+      if (!result?.tricks) throw new Error('the probe returned no table')
+      return { ms, score: scoreFrom(ms), ok: encodeDdTricks(result.tricks) === ddtricks }
+    })
+  )
 }
 
 /** How many positions the session cache is holding. */

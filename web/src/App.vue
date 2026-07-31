@@ -33,8 +33,10 @@ import {
   fetchDoubleDummy,
   fetchOptimalLine,
   playRequest,
+  runBenchmark,
   timed,
 } from './lib/solver.js'
+import { slowMessage } from './lib/benchmark.js'
 import { suitVerdict, summariseCosts, trickTotalFrom } from './lib/errors.js'
 import { resolveInitial, save as saveSession } from './lib/session.js'
 import { TRICK_SIZE, nextToPlay, trickStartOf } from './lib/cardplay.js'
@@ -119,6 +121,39 @@ const embed = ref(initial.options.embed)
 
 /** Show the cold-start readout. Set from `?debug=1`, never from storage. */
 const debug = ref(initial.options.debug)
+
+/** This device's measured speed, with the reference machine at 100. */
+const benchScore = ref(null)
+
+/** False if the probe computed the wrong table — a wasm bug on this platform. */
+const benchOk = ref(true)
+
+/**
+ * What stage the analysis is at, for a determinate progress readout.
+ *
+ * `total` counts the trace and the table plus one step per costed error, so it
+ * is only complete once the trace has said how many errors there are. Before
+ * that the readout names the stage without claiming a fraction, which is
+ * honest: a bar that jumps backwards when the denominator arrives reads as
+ * broken.
+ */
+const progress = ref(null)
+
+/**
+ * The in-flight double-dummy table solve, so the verdict pass can wait for it
+ * before claiming the progress readout.
+ *
+ * The table is posted to the worker before the trace is published, and the
+ * verdict calls are posted after — so the worker's real order of work is trace,
+ * table, verdicts. Without this the watcher relabelled the readout the instant
+ * the trace landed, and the page said "checking mistake 1 of 5" for the whole
+ * time it was actually solving the table. Awaiting it costs nothing: the
+ * verdict calls are queued behind the table either way.
+ */
+const tablePending = ref(null)
+
+/** The pre-solve warning for a slow device, or null. */
+const slowWarning = computed(() => slowMessage(benchScore.value))
 
 /**
  * A fixed pixel box, set by `?width` / `?height`. Used by the gallery to preview a
@@ -437,6 +472,19 @@ function reportTiming(extra = {}) {
 
 onMounted(() => {
   window.addEventListener('keydown', onKeydown)
+
+  /*
+   * Probe this device before anything else is asked of it. Not awaited: both go
+   * to the same single-threaded worker and the probe is posted first, so it
+   * finishes first either way — and awaiting it would hold up the analysis on
+   * exactly the slow devices the probe exists to detect.
+   */
+  runBenchmark().then((result) => {
+    if (!result) return
+    benchScore.value = result.score
+    benchOk.value = result.ok
+  })
+
   // A hand from the URL, or the one open last time.
   if (initial.hand) analyse(initial.hand)
 })
@@ -472,6 +520,8 @@ async function loadBoard() {
       return
     }
 
+    progress.value = { stage: 'trace', done: 0, total: null }
+
     // The trace goes first. It is the answer to the question this page exists
     // to ask — where did the hand go wrong — and it is measured at about a
     // third of what the table costs. Solving the table first held it back by
@@ -486,12 +536,15 @@ async function loadBoard() {
     // concurrency — and publishing the trace is what starts the verdict pass,
     // the most expensive stage of the three. A table requested after that
     // would sit behind all of it and arrive seconds late.
-    const tablePending = fetchDoubleDummy(b.hands)
+    const pending = fetchDoubleDummy(b.hands)
+    tablePending.value = pending
+
+    progress.value = { stage: 'table', done: 1, total: null }
 
     trace.value = result
     originalTrace.value = result
 
-    const table = await tablePending
+    const table = await pending
     if (board.value !== b) return
     ddTable.value = table
   })
@@ -516,6 +569,7 @@ watch(trace, async (current) => {
   verdicts.value = {}
   verdictMs.value = 0
   if (!current || !request.value) {
+    progress.value = null
     reportTiming()
     return
   }
@@ -523,13 +577,35 @@ watch(trace, async (current) => {
   const b = board.value
   const forTrace = current
   const started = performance.now()
-  for (const e of current.trace.filter((x) => x.cost > 0)) {
+  const costed = current.trace.filter((x) => x.cost > 0)
+
+  /*
+   * These are the only steps whose count is known in advance, so this is where
+   * a determinate readout becomes possible. They are also wildly uneven — the
+   * opening lead is measured at 217 ms against 0.9 ms at trick seven, because
+   * search depth falls as the hand is played — so this counts steps and does
+   * not extrapolate a time from them. An ETA off the first node would promise
+   * a wait several times longer than the real one.
+   */
+  /*
+   * Let the table finish before taking over the readout. These calls are queued
+   * behind it on the one worker regardless, so this delays the label rather than
+   * the work — and stops the page reporting a stage it has not reached.
+   */
+  if (tablePending.value) await tablePending.value
+  if (board.value !== b || trace.value !== forTrace) return
+
+  let done = 0
+  for (const e of costed) {
+    progress.value = { stage: 'verdicts', done, total: costed.length }
     const result = await fetchDdPlayNode(request.value, e.index)
     // Abandon quietly if the board or the line moved on while these were queued.
     if (board.value !== b || trace.value !== forTrace) return
     const verdict = suitVerdict(result)
     if (verdict) verdicts.value = { ...verdicts.value, [e.index]: verdict }
+    done += 1
   }
+  progress.value = null
   verdictMs.value = performance.now() - started
   reportTiming()
 })
@@ -704,6 +780,54 @@ watch(boardIndex, loadBoard)
       :hand="currentInput"
       @analyse="analyse"
     />
+
+    <!--
+      Shown while the analysis is running, and while the page sits empty waiting
+      for a hand — but not once an analysis has finished, by which point the
+      reader has seen the wait for themselves and the note is just clutter.
+
+      Not gated on "before the solve": a hand arriving from the URL or from
+      storage starts analysing on mount, so there is no before, and a warning
+      that only rendered while nothing was happening would never be seen in the
+      case it exists for.
+    -->
+    <p v-if="slowWarning && (progress || !board)" class="slow-note" role="note">
+      {{ slowWarning }}
+    </p>
+
+    <p v-if="!benchOk" class="bench-bad" role="alert">
+      This browser computed a known deal incorrectly, so the analysis on this page cannot
+      be trusted. Please report it — that is a genuine bug in the WebAssembly build on
+      this platform.
+    </p>
+
+    <!--
+      Determinate wherever the count is known, and honestly indeterminate where
+      it is not. The verdict steps are the only stage whose length is known in
+      advance, so it is the only one that shows a fraction.
+    -->
+    <p v-if="progress" class="progress" role="status" aria-live="polite">
+      <span class="progress-label">
+        <template v-if="progress.stage === 'trace'">Replaying the play…</template>
+        <template v-else-if="progress.stage === 'table'">Solving the double-dummy table…</template>
+        <template v-else>
+          Checking mistake {{ progress.done + 1 }} of {{ progress.total }}…
+        </template>
+      </span>
+      <span
+        v-if="progress.total"
+        class="progress-bar"
+        role="progressbar"
+        :aria-valuenow="progress.done"
+        :aria-valuemin="0"
+        :aria-valuemax="progress.total"
+      >
+        <span
+          class="progress-fill"
+          :style="{ width: `${Math.round((progress.done / progress.total) * 100)}%` }"
+        />
+      </span>
+    </p>
 
     <p v-if="problems.length" class="problems" role="note">
       {{ problems.length }} board{{ problems.length === 1 ? '' : 's' }} in that file
@@ -933,6 +1057,7 @@ watch(boardIndex, loadBoard)
       :trace-ms="traceMs"
       :solve-ms="solveMs"
       :verdict-ms="verdictMs"
+      :bench-score="benchScore"
     />
 
     <VerifySection v-if="!embed" :elapsed-ms="solveMs" />
@@ -1010,6 +1135,55 @@ main > * {
   display: block;
   font-family: var(--font-mono);
   font-size: 12px;
+}
+
+/* Same amber as .problems: a wait worth mentioning, not a failure. */
+.slow-note {
+  font-size: 13px;
+  color: #8a6d1f;
+  background: #fdf6e3;
+  border: 1px solid #eadfae;
+  border-radius: var(--radius-button);
+  padding: 8px 12px;
+}
+
+.bench-bad {
+  font-size: 13px;
+  color: #7f1d1d;
+  background: #fef2f2;
+  border: 1px solid #fecaca;
+  border-radius: var(--radius-button);
+  padding: 8px 12px;
+}
+
+.progress {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 13px;
+  color: var(--text-muted, #555);
+}
+
+.progress-label {
+  /* Fixed so the bar does not shuffle sideways as the wording changes. */
+  min-width: 20ch;
+}
+
+.progress-bar {
+  flex: 1;
+  max-width: 240px;
+  height: 6px;
+  border-radius: 3px;
+  background: rgba(0, 0, 0, 0.1);
+  overflow: hidden;
+}
+
+.progress-fill {
+  display: block;
+  height: 100%;
+  background: currentColor;
+  opacity: 0.55;
+  transition: width 120ms linear;
 }
 
 .boards {
