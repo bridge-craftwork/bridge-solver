@@ -44,9 +44,11 @@ defineProps({
         </li>
         <li>
           <strong>Watch the network.</strong> Open developer tools, go to the
-          Network tab, clear it, then analyse a hand. There are no requests. The
-          only traffic this page makes is fetching itself, and the solver, when it
-          first loads.
+          Network tab, clear it, then analyse a hand. The hand never appears.
+          What you will see is this page and the solver being fetched, and a
+          short anonymous usage record once the analysis finishes — open it and
+          read it. It carries timings and your browser family; the cards, the
+          contract and the players' names are not in it.
         </li>
         <li>
           <strong>Make it try to leak.</strong> This page ships a
@@ -63,17 +65,33 @@ new Image().src = 'https://example.com/x?d=test';</code></pre>
       </ol>
 
       <p class="caveat">
-        The one caveat, stated plainly: the policy is
-        <code>connect-src 'self'</code> rather than <code>'none'</code>, because the
-        WebAssembly solver is itself fetched from this origin when the page loads.
-        That origin is GitHub Pages, which serves static files and has nothing that
-        could receive an upload.
+        The caveat, stated plainly: the policy is
+        <code>connect-src 'self'</code> rather than <code>'none'</code>, because two
+        things do travel to this origin — the WebAssembly solver, fetched when the
+        page loads, and the anonymous usage record described above. Neither carries
+        anything derived from your hand. What the record contains, and what it
+        deliberately leaves out, is set out in the
+        <a href="./privacy.html">privacy note</a>.
       </p>
     </div>
   </details>
+
+  <!--
+    A sibling of the <details>, not a child: everything after <summary> is hidden
+    while it is collapsed, and a privacy note nobody can find is not a disclosure.
+  -->
+  <p class="privacy-link">
+    <a href="./privacy.html">Privacy</a>
+  </p>
 </template>
 
 <style scoped>
+.privacy-link {
+  margin: 0.5rem 0 0;
+  font-size: 13px;
+  text-align: right;
+}
+
 .verify {
   border: 1px solid var(--border);
   border-radius: var(--radius-card);

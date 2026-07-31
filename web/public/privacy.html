@@ -1,0 +1,155 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'none'; style-src 'unsafe-inline'; img-src 'self' data:;"
+    />
+    <meta name="referrer" content="no-referrer" />
+    <meta name="color-scheme" content="light" />
+    <title>Privacy — Bridge double-dummy analysis</title>
+    <style>
+      :root {
+        --ink: #1a1a1a;
+        --muted: #555;
+        --rule: #e2e2e2;
+      }
+      body {
+        margin: 0 auto;
+        padding: 2rem 1.25rem 4rem;
+        max-width: 40rem;
+        font-family: system-ui, -apple-system, 'Segoe UI', sans-serif;
+        font-size: 17px;
+        line-height: 1.6;
+        color: var(--ink);
+      }
+      h1 {
+        font-size: 1.6rem;
+        margin-bottom: 0.25rem;
+      }
+      h2 {
+        font-size: 1.1rem;
+        margin-top: 2.25rem;
+        padding-top: 1rem;
+        border-top: 1px solid var(--rule);
+      }
+      .lede {
+        font-size: 1.05rem;
+        color: var(--muted);
+        margin-top: 0;
+      }
+      .updated {
+        color: var(--muted);
+        font-size: 0.9rem;
+      }
+      a {
+        color: #1a5fb4;
+      }
+      ul {
+        padding-left: 1.2rem;
+      }
+      li {
+        margin: 0.35rem 0;
+      }
+      footer {
+        margin-top: 3rem;
+        padding-top: 1rem;
+        border-top: 1px solid var(--rule);
+        font-size: 0.9rem;
+        color: var(--muted);
+      }
+    </style>
+  </head>
+  <body>
+    <h1>Privacy</h1>
+    <p class="lede">
+      The hands you analyse stay on your device. This page collects anonymous usage and
+      performance figures, and nothing else.
+    </p>
+
+    <h2>The hands stay with you</h2>
+    <p>
+      All the analysis runs inside your browser. When you paste a deal, a LIN record or a
+      Bridge Base Online handviewer link, that text is read and solved locally — there is
+      no server doing the work, so the hand itself is never sent anywhere.
+    </p>
+    <p>
+      That matters because a BBO record usually carries the players' usernames alongside the
+      cards. Since the hand never leaves your browser, those usernames never reach us: they
+      are not transmitted, not stored, and not something we could look at even if we wanted
+      to.
+    </p>
+
+    <h2>What is kept on your device</h2>
+    <p>
+      The site remembers the last hand you looked at and a couple of display preferences, so
+      that returning to the page picks up where you left off. That is held in your browser's
+      local storage and stays there — it is never uploaded. Clearing your browser's site data
+      removes it, and the <strong>Clear</strong> button on the page does the same thing.
+    </p>
+
+    <h2>What we do collect</h2>
+    <p>
+      When the page loads, and when an analysis finishes, the site sends a short anonymous
+      record so we can tell whether the tool is being used and how quickly it runs on real
+      hardware. In broad terms that is:
+    </p>
+    <ul>
+      <li>how long the analysis took, and roughly how fast your device is</li>
+      <li>your browser and operating system family, and your country</li>
+      <li>which website the page was embedded in, if it was loaded inside another site</li>
+      <li>which version of this software you were running</li>
+    </ul>
+    <p>
+      Performance figures are what make this worth collecting at all: the analysis is
+      demanding, and knowing how it behaves on older phones and tablets is the only way to
+      make it usable on them.
+    </p>
+
+    <h2>What we deliberately don't collect</h2>
+    <ul>
+      <li>
+        <strong>Nothing from the deal.</strong> Not the cards, not the contract, not the
+        result, not the players' names, and not any identifier derived from them.
+      </li>
+      <li>
+        <strong>No identifier for you.</strong> No account, no login, no cookie, no
+        advertising ID, no fingerprint. Two records cannot be connected to each other, which
+        means we can count how often the tool is used but not how many people use it. That is
+        a deliberate trade and we think it is the right one.
+      </li>
+      <li>
+        <strong>No tracking across other sites</strong>, and no advertising or analytics
+        network embedded in the page.
+      </li>
+    </ul>
+
+    <h2>Where it goes</h2>
+    <p>
+      The site is hosted by Cloudflare, and the anonymous records are stored on their
+      analytics platform and deleted automatically after about three months. Your IP address
+      is used in passing to work out which country a request came from, and is not stored.
+      Nobody else receives any of it, and none of it is sold.
+    </p>
+
+    <h2>If this page is embedded elsewhere</h2>
+    <p>
+      This analysis can be embedded in other websites. Where that happens, the host site's own
+      privacy policy governs that site, and this one governs this page. The hand you are
+      looking at is not shared with the site hosting it.
+    </p>
+
+    <h2>Questions</h2>
+    <p>
+      If something here is unclear, or you would like a record removed, please get in touch
+      via the project's repository.
+    </p>
+
+    <footer>
+      <p class="updated">Last updated: 31 July 2026.</p>
+      <p><a href="./">← Back to the analysis</a></p>
+    </footer>
+  </body>
+</html>
