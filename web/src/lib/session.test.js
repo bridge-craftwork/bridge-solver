@@ -122,4 +122,28 @@ describe('resolveInitial', () => {
     // The preference that *is* about the hand still comes back.
     expect(got.options.declarerSouth).toBe(false)
   })
+
+  /*
+   * Same reasoning as the box: asking for the diagnostic panel once should not
+   * leave it on the page for good.
+   */
+  it('does not restore the debug flag from storage', () => {
+    const got = resolveInitial(url(), {
+      hand: DEAL,
+      options: { debug: true },
+    })
+    expect(got.options.debug).toBe(false)
+  })
+
+  it('turns the debug panel on from the URL', () => {
+    expect(readUrl('?debug=1').options.debug).toBe(true)
+    // Bare presence reads as true, like the other flags.
+    expect(readUrl('?debug').options.debug).toBe(true)
+    expect(readUrl('?debug=0').options.debug).toBe(false)
+  })
+
+  it('leaves debug off when the URL does not mention it', () => {
+    expect(readUrl('?embed=1').options.debug).toBeUndefined()
+    expect(resolveInitial(url(), null).options.debug).toBe(false)
+  })
 })

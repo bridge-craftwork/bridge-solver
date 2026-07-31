@@ -35,6 +35,14 @@ name = "bridge-solver"
 path = "src/bin/bridge-solver/main.rs"
 required-features = ["cli"]
 
+# Declared so the featureless `clippy --all-targets` pass skips it rather than
+# failing to compile: it uses `analyse_play`, which is gated behind
+# `play-analysis`.
+[[example]]
+name = "bench_fixtures"
+path = "examples/bench_fixtures.rs"
+required-features = ["play-analysis"]
+
 [dependencies]
 bridge-types = { git = "https://github.com/bridge-craftwork/bridge-types" }
 clap = { version = "4", features = ["derive"], optional = true }
