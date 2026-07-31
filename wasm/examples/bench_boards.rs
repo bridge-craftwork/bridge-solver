@@ -171,8 +171,8 @@ fn main() {
 
     println!("=== per-board cost, native release ===\n");
     println!(
-        "{:>5} {:>6} {:>9} {:>7} {:>7} {:>9} {:>7}  {}",
-        "board", "cards", "contract", "table", "trace", "verdicts", "total", "errors by player"
+        "{:>5} {:>6} {:>9} {:>7} {:>7} {:>9} {:>7}  errors by player",
+        "board", "cards", "contract", "table", "trace", "verdicts", "total"
     );
     for r in &rows {
         let total = r.table_ms + r.trace_ms + r.verdict_ms;
