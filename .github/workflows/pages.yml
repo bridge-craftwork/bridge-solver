@@ -75,6 +75,9 @@ jobs:
         working-directory: web
         run: |
           test -f dist/index.html
+          # The gallery is a second entry point; a rollupOptions mistake would drop
+          # it silently rather than fail the build.
+          test -f dist/gallery.html
           ls dist/assets/*.wasm
           ls dist/assets/*.js
           du -sh dist

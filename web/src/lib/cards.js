@@ -104,3 +104,28 @@ export function seatAtIndex(seat, n) {
 export function sideOf(seat) {
   return seat === 'N' || seat === 'S' ? 'NS' : 'EW'
 }
+
+/**
+ * Which seat to draw in a given screen position, when the table is turned so that
+ * `southSeat` sits at the bottom.
+ *
+ * Turning the table is only a relabelling of which slot each hand occupies —
+ * because every seat moves by the same number of steps, the clockwise order around
+ * the screen is unchanged, so each hand still has its true LHO on its left and its
+ * partner opposite. The badges keep naming real compass seats; what moves is the
+ * viewpoint, exactly as it would if you got up and sat somewhere else.
+ *
+ * `southSeat` of `null`, or `'S'`, leaves North at the top.
+ */
+export function seatAtPosition(position, southSeat) {
+  const posIdx = SEAT_ORDER.indexOf(position)
+  if (posIdx < 0) return position
+  if (!southSeat) return position
+
+  const wantedIdx = SEAT_ORDER.indexOf(southSeat)
+  if (wantedIdx < 0) return position
+
+  // Offset that carries `southSeat` onto the South slot, applied to every seat.
+  const offset = (wantedIdx - SEAT_ORDER.indexOf('S') + 4) % 4
+  return SEAT_ORDER[(posIdx + offset) % 4]
+}

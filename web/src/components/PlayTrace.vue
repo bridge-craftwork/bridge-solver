@@ -11,6 +11,7 @@
 import { computed } from 'vue'
 import { SUIT_SYMBOLS, formatCard, getSuitClass, parseCardCode } from '../lib/cards.js'
 import { TRICK_SIZE } from '../lib/cardplay.js'
+import { signedEffect } from '../lib/errors.js'
 
 const props = defineProps({
   /** `[{ index, seat, card, cost }]` from the running trace. */
@@ -19,6 +20,14 @@ const props = defineProps({
   selectedIndex: { type: Number, default: -1 },
   /** Per-trick winners from the replay, indexed by trick number - 1. */
   tricks: { type: Array, default: () => [] },
+  /**
+   * Needed to sign a cost against declarer.
+   *
+   * Without it this panel showed every error as a bare `−n` while the error table
+   * showed the same card signed — so a defender's mistake read as `−1` here and
+   * `+1` there. One card, two numbers.
+   */
+  declarer: { type: String, default: null },
 })
 
 defineEmits(['select'])
@@ -42,6 +51,12 @@ const grouped = computed(() => {
 const totalErrors = computed(() => props.trace.filter((e) => e.cost > 0).length)
 const totalCost = computed(() => props.trace.reduce((n, e) => n + e.cost, 0))
 
+/** The card's effect on declarer's total, matching the error table exactly. */
+function signed(entry) {
+  const n = signedEffect(entry, props.declarer)
+  return n > 0 ? `+${n}` : String(n)
+}
+
 function glyph(code) {
   const { suit, rank } = parseCardCode(code)
   return { symbol: SUIT_SYMBOLS[suit], rank: formatCard(rank), cls: getSuitClass(suit) }
@@ -61,7 +76,17 @@ function glyph(code) {
 
     <ol class="tricks">
       <li v-for="t in grouped" :key="t.number" class="trick" :class="{ 'has-cost': t.cost > 0 }">
-        <span class="trick-no">{{ t.number }}</span>
+        <!-- Clicking the trick moves to its opening lead, so you can walk the hand
+             trick by trick without having to aim at a particular card. -->
+        <button
+          type="button"
+          class="trick-no"
+          :class="{ selected: t.entries.some((e) => e.index === selectedIndex) }"
+          :title="`Go to the start of trick ${t.number}`"
+          @click="$emit('select', t.entries[0].index)"
+        >
+          {{ t.number }}
+        </button>
         <span class="trick-cards">
           <button
             v-for="e in t.entries"
@@ -84,7 +109,7 @@ function glyph(code) {
             <span class="play-card" :class="glyph(e.card).cls">
               {{ glyph(e.card).symbol }}{{ glyph(e.card).rank }}
             </span>
-            <span v-if="e.cost > 0" class="play-cost">−{{ e.cost }}</span>
+            <span v-if="e.cost > 0" class="play-cost">{{ signed(e) }}</span>
           </button>
         </span>
         <span class="trick-won">{{ t.winner || '' }}</span>
@@ -149,6 +174,33 @@ function glyph(code) {
   color: var(--text-muted);
   font-variant-numeric: tabular-nums;
   text-align: center;
+}
+
+.trick-no {
+  font: inherit;
+  font-size: 11px;
+  border: 1px solid transparent;
+  background: transparent;
+  border-radius: 3px;
+  padding: 1px 2px;
+  cursor: pointer;
+  color: var(--text-muted);
+}
+
+.trick-no:hover {
+  background: var(--focus-blue);
+  color: var(--text);
+}
+
+.trick-no.selected {
+  border-color: var(--border-strong);
+  color: var(--text);
+  font-weight: 700;
+}
+
+.trick-no:focus-visible {
+  outline: 2px solid var(--green);
+  outline-offset: 1px;
 }
 
 .trick-cards {

@@ -50,13 +50,6 @@ function markFor(letter, rank) {
   return props.marks?.cards?.[letter + rank] || null
 }
 
-/** Reserve the badge's overhang only when this hand actually has one. */
-const hasBadges = computed(() => {
-  const cards = props.marks?.cards
-  if (!cards) return false
-  return Object.values(cards).some((m) => m?.badge)
-})
-
 function onClick(letter, rank) {
   if (!props.inspectable) return
   emit('card-click', { suit: letter, rank, code: letter + rank })
@@ -64,7 +57,7 @@ function onClick(letter, rank) {
 </script>
 
 <template>
-  <div class="holding" :class="{ 'has-badges': hasBadges, 'hide-played': hidePlayedCards }">
+  <div class="holding" :class="{ 'hide-played': hidePlayedCards }">
     <div v-for="suit in suits" :key="suit.name" class="suit-row">
       <span class="suit-symbol" :class="suit.cls" aria-hidden="true">{{ suit.symbol }}</span>
       <span class="sr-only">{{ suit.name }}:</span>
@@ -110,8 +103,13 @@ function onClick(letter, rank) {
   gap: calc(4px * var(--table-scale));
 }
 
-/* Badges overhang the top-right of a glyph; reserve room so they never clip. */
-.holding.has-badges {
+/*
+ * Badges overhang the top-right of a glyph, so the room is reserved
+ * unconditionally. Reserving it only when a hand *has* a badge made every hand
+ * change height the moment the overlay moved — which is 8px of the page jumping on
+ * every click.
+ */
+.holding {
   padding-top: calc(8px * var(--table-scale));
   padding-right: calc(7px * var(--table-scale));
 }

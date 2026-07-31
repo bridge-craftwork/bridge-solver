@@ -43,7 +43,20 @@
   /* The badge/annotation channel. Reserved: nothing else uses purple. */
   --badge: #6a1b9a;
 
-  /* Double-dummy cost tinting. Alpha-blended so the glyph stays legible. */
+  /*
+   * Double-dummy cost tinting. Alpha-blended so the glyph stays legible.
+   *
+   * Two kinds of mistake, two colours. Amber means the suit was playable and the
+   * card within it was wrong; red means every card in that suit gave a trick
+   * away, so the suit itself was the mistake. Red is the worse of the two and
+   * reads as the more alarming, which is the right way round.
+   */
+  --cost-card: rgba(240, 173, 78, 0.4);
+  --cost-card-ink: #8a5a00;
+  --cost-suit: rgba(216, 72, 72, 0.28);
+  --cost-suit-severe: rgba(198, 40, 40, 0.42);
+  --cost-ink: #c62828;
+  /* Before the suit verdict is known, or when it cannot be judged. */
   --cost-mild: rgba(216, 72, 72, 0.28);
   --cost-severe: rgba(198, 40, 40, 0.4);
   --alt-good: rgba(46, 160, 67, 0.34);

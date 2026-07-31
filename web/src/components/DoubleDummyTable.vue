@@ -1,79 +1,77 @@
 <script setup>
 /**
- * The 20-cell double-dummy table: how many tricks each seat takes in each
- * strain.
+ * The double-dummy table: tricks available to each seat in each strain.
  *
- * Vendored from Bridge-Classroom, adapted at one point. Its version takes the
- * 20-character `ddtricks` interchange string and decodes it with `buildDdRows`;
- * this engine returns the table already structured, so the decode step is gone.
- * `solver.js` keeps an `encodeDdTricks` for anyone who needs that string back.
+ * Re-vendored from Bridge-Classroom after its rewrite. Two things came with it.
+ * Rows read `N, S, E, W` — partners adjacent, which is how a double-dummy table
+ * is always drawn, and the ordering the collapse depends on. And identical
+ * partnership rows merge into one `NS` / `EW` row, which is lossless (a pair only
+ * merges when every cell already matches) and is the common case, since the two
+ * hands of a partnership usually take the same tricks.
  *
- * The classroom's `diverged` prop is dropped — it flagged a disagreement with a
- * bidding engine's auction, which has no meaning here.
+ * Its `compact`, `rotated` and `par` props are not vendored: those exist to fit
+ * the table into a corner of the classroom's grid arranger, and this page gives
+ * it a column of its own. `diverged` is also dropped — it flagged a disagreement
+ * with a bidding engine, which has no meaning on a played hand.
  */
 import { computed } from 'vue'
-import { DD_SEATS, DD_STRAINS } from '../lib/solver.js'
+import { buildDdRows, collapseDdRows, contractTarget, DISPLAY_STRAINS } from '../lib/ddTable.js'
 import { SUIT_SYMBOLS, getSuitClass } from '../lib/cards.js'
 
 const props = defineProps({
-  /** Rows in `N,E,S,W` order, columns in `C,D,H,S,NT` order. */
+  /** The engine's `tricks[seat][strain]`, rows `N,E,S,W`, columns `C,D,H,S,NT`. */
   tricks: { type: Array, default: null },
-  /** Highlight the cell this contract lands on. */
   contract: { type: String, default: '' },
   declarer: { type: String, default: '' },
+  /** Merge a partnership's rows when their tricks are identical. */
+  collapse: { type: Boolean, default: true },
 })
 
-const SEAT_NAMES = { N: 'North', E: 'East', S: 'South', W: 'West' }
+const SEAT_LABELS = {
+  N: 'North',
+  S: 'South',
+  E: 'East',
+  W: 'West',
+  NS: 'North and South',
+  EW: 'East and West',
+}
 
 const columns = computed(() =>
-  DD_STRAINS.map((strain) => ({
+  DISPLAY_STRAINS.map((strain) => ({
     strain,
     label: strain === 'NT' ? 'NT' : SUIT_SYMBOLS[strain],
     cls: strain === 'NT' ? 'dd-nt' : getSuitClass(strain),
   }))
 )
 
-/** Which cell the contract sits in, so it can be marked. */
-const contractCell = computed(() => {
-  if (!props.contract || !props.declarer) return null
-  const m = String(props.contract)
-    .trim()
-    .match(/^[1-7]\s*(NT?|S|H|D|C)/i)
-  if (!m) return null
-  const raw = m[1].toUpperCase()
-  const strain = raw === 'N' || raw === 'NT' ? 'NT' : raw
-  return { seat: props.declarer.toUpperCase(), strain }
+const rows = computed(() => {
+  const built = buildDdRows(props.tricks, { contract: props.contract, declarer: props.declarer })
+  return props.collapse ? collapseDdRows(built) : built
 })
 
-function isContract(seat, strain) {
-  return contractCell.value?.seat === seat && contractCell.value?.strain === strain
-}
+const target = computed(() => contractTarget(props.contract))
 
-/** Tricks needed to make the contract, for reading a cell as made or beaten. */
-const contractTricks = computed(() => {
-  const m = String(props.contract || '')
-    .trim()
-    .match(/^([1-7])/)
-  return m ? Number(m[1]) + 6 : null
-})
+function cellTitle(seat, strain, cell) {
+  const who = SEAT_LABELS[seat] || seat
+  const what = strain === 'NT' ? 'notrump' : strain
+  const base = `${who} ${seat.length > 1 ? 'take' : 'takes'} ${cell.tricks} tricks in ${what}`
+  if (!cell.isContract || target.value == null) return base
 
-function cellTitle(seat, strain, value) {
-  const base = `${SEAT_NAMES[seat]} takes ${value} tricks in ${strain === 'NT' ? 'notrump' : strain}`
-  if (!isContract(seat, strain) || contractTricks.value == null) return base
-  const diff = value - contractTricks.value
+  const diff = cell.tricks - target.value
   if (diff === 0) return `${base} — exactly makes ${props.contract}`
   if (diff > 0) return `${base} — makes ${props.contract} with ${diff} over`
-  return `${base} — ${props.contract} is down ${-diff}`
+  return `${base} — ${props.contract} is down ${-diff} on best play`
 }
 </script>
 
 <template>
-  <div v-if="tricks" class="dd-wrap">
+  <div v-if="rows" class="dd-wrap">
     <div class="dd-label">Double-dummy tricks</div>
     <table class="dd-table">
       <caption class="sr-only">
-        Tricks available to each seat in each strain, with both sides playing
-        perfectly.
+        Tricks available to each seat in each strain with both sides playing
+        perfectly. A partnership shows as one row when both hands take the same
+        tricks.
       </caption>
       <thead>
         <tr>
@@ -84,15 +82,15 @@ function cellTitle(seat, strain, value) {
         </tr>
       </thead>
       <tbody>
-        <tr v-for="(seat, row) in DD_SEATS" :key="seat">
-          <th scope="row" class="dd-seat">{{ seat }}</th>
+        <tr v-for="row in rows" :key="row.seat">
+          <th scope="row" class="dd-seat">{{ row.seat }}</th>
           <td
-            v-for="(col, i) in columns"
-            :key="col.strain"
-            :class="{ 'dd-contract': isContract(seat, col.strain) }"
-            :title="cellTitle(seat, col.strain, tricks[row][i])"
+            v-for="(cell, i) in row.cells"
+            :key="i"
+            :class="{ 'dd-contract': cell.isContract }"
+            :title="cellTitle(row.seat, columns[i].strain, cell)"
           >
-            {{ tricks[row][i] }}
+            {{ cell.tricks }}
           </td>
         </tr>
       </tbody>
@@ -137,6 +135,8 @@ function cellTitle(seat, strain, value) {
   background: var(--surface-alt);
   color: var(--text) !important;
   font-weight: 600;
+  /* Room for a merged `NS` without the column jumping when it collapses. */
+  min-width: 3ch;
 }
 
 .dd-contract {

@@ -102,8 +102,13 @@ function label(bid) {
   border: 2px solid var(--border-strong);
   border-radius: 4px;
   overflow: hidden;
-  min-width: calc(220px * var(--table-scale));
-  max-width: calc(300px * var(--table-scale));
+  /*
+   * Fits its container rather than demanding a width. It sits in a 215px table
+   * corner, and a 220px minimum meant the last column was clipped off the right
+   * edge — measured at iPad landscape, where the corner is exactly its budget.
+   */
+  width: 100%;
+  min-width: 0;
 }
 
 .header {
@@ -189,7 +194,6 @@ function label(bid) {
   padding: 0;
   font-size: 12px;
   color: var(--text-secondary);
-  max-width: calc(300px * var(--table-scale));
 }
 
 .annotations li {

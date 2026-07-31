@@ -2,6 +2,8 @@ import { fileURLToPath, URL } from 'node:url'
 import { defineConfig } from 'vite'
 import vue from '@vitejs/plugin-vue'
 
+const entry = (name) => fileURLToPath(new URL(name, import.meta.url))
+
 export default defineConfig({
   plugins: [vue()],
 
@@ -17,6 +19,15 @@ export default defineConfig({
 
   build: {
     outDir: 'dist',
+    // Two pages: the app, and a gallery that embeds it at each viewport. The
+    // gallery imports the shared example module, so it has to be an entry rather
+    // than a static file copied past the bundler.
+    rollupOptions: {
+      input: {
+        main: entry('index.html'),
+        gallery: entry('gallery.html'),
+      },
+    },
     // The wasm module is a megabyte-ish on its own; the default 500 kB warning
     // is noise here rather than a signal.
     chunkSizeWarningLimit: 2000,

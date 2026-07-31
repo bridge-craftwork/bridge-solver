@@ -11,7 +11,7 @@ defineProps({
   inspectable: { type: Boolean, default: false },
   /** Frame this seat — used for the seat on lead at an inspected node. */
   active: { type: Boolean, default: false },
-  /** Note beside the seat label, e.g. `Declarer` or `Dummy`. */
+  /** Note beside the seat badge, e.g. `Declarer` or `Dummy`. */
   role: { type: String, default: '' },
 })
 
@@ -23,7 +23,14 @@ const SEAT_NAMES = { N: 'North', E: 'East', S: 'South', W: 'West' }
 <template>
   <div class="seat-panel" :class="{ active }">
     <div class="seat-head">
-      <span class="seat-label">{{ SEAT_NAMES[seat] }}</span>
+      <!--
+        A circled letter rather than the word, following the classroom's
+        SeatIndicator badge. Four boxes headed NORTH / EAST / SOUTH / WEST spent
+        more ink on the labels than on the cards, and the compass is already
+        legible from the layout — the badge is confirmation, not information.
+      -->
+      <span class="seat-badge" :title="SEAT_NAMES[seat]">{{ seat }}</span>
+      <span class="sr-only">{{ SEAT_NAMES[seat] }}</span>
       <span v-if="role" class="seat-role">{{ role }}</span>
       <span v-if="name" class="seat-name" :title="name">{{ name }}</span>
     </div>
@@ -40,10 +47,16 @@ const SEAT_NAMES = { N: 'North', E: 'East', S: 'South', W: 'West' }
 .seat-panel {
   background: var(--surface);
   border-radius: 8px;
-  padding: calc(12px * var(--table-scale));
+  padding: calc(10px * var(--table-scale));
   /* Transparent by default so framing the active seat never shifts layout. */
   border: 2px solid transparent;
-  min-width: min(calc(210px * var(--table-scale)), 100%);
+  /*
+   * Fixed, not `min-width`: a rewound hand holds fewer cards and would otherwise
+   * shrink its column, sliding the whole centred grid sideways. A freakishly long
+   * suit scrolls inside its own panel rather than moving everything else.
+   */
+  width: calc(215px * var(--table-scale));
+  max-width: 100%;
 }
 
 .seat-panel.active {
@@ -53,17 +66,25 @@ const SEAT_NAMES = { N: 'North', E: 'East', S: 'South', W: 'West' }
 
 .seat-head {
   display: flex;
-  align-items: baseline;
-  gap: 8px;
-  margin-bottom: calc(6px * var(--table-scale));
+  align-items: center;
+  gap: 7px;
+  margin-bottom: calc(5px * var(--table-scale));
 }
 
-.seat-label {
-  font-size: calc(12px * var(--table-scale));
+.seat-badge {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: calc(22px * var(--table-scale));
+  height: calc(22px * var(--table-scale));
+  border-radius: 50%;
+  background: var(--bg-white);
+  color: var(--text);
   font-weight: 700;
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
-  color: var(--text-secondary);
+  font-size: calc(13px * var(--table-scale));
+  line-height: 1;
+  border: 1.5px solid rgba(0, 0, 0, 0.15);
 }
 
 .seat-role {
@@ -78,7 +99,7 @@ const SEAT_NAMES = { N: 'North', E: 'East', S: 'South', W: 'West' }
   font-size: calc(12px * var(--table-scale));
   color: var(--text-muted);
   margin-left: auto;
-  max-width: 11ch;
+  max-width: 12ch;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;

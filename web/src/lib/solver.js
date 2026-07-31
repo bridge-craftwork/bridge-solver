@@ -53,6 +53,30 @@ function call(op, payload) {
 }
 
 /**
+ * How long the last measured run of work took, in milliseconds.
+ *
+ * Wall clock from the main thread, so it includes the worker hop and the JSON at
+ * both ends — which is the honest number, because that is what the page waited
+ * for. Measured here rather than in Rust because `std::time::Instant` has no
+ * wasm32 implementation and traps at runtime.
+ */
+let lastElapsedMs = 0
+
+export function elapsedMs() {
+  return lastElapsedMs
+}
+
+/** Run `work`, recording how long it took whether or not it succeeds. */
+export async function timed(work) {
+  const started = performance.now()
+  try {
+    return await work()
+  } finally {
+    lastElapsedMs = performance.now() - started
+  }
+}
+
+/**
  * Swallow a failed analysis into `null`, but say why on the console.
  *
  * The `null` is deliberate — an overlay that cannot be computed should cost the
@@ -132,6 +156,22 @@ export function fetchDdPlayNode(request, node) {
       if (!Array.isArray(result?.alternatives)) {
         throw new Error('response carried no alternatives')
       }
+      return result
+    })
+  )
+}
+
+/**
+ * A double-dummy-perfect continuation from one point in the hand.
+ *
+ * Resolves to `{ from, cards, seats, declaring_tricks }` or `null`. Started at the
+ * first costed error, this is the correction for it: what should have happened.
+ */
+export function fetchOptimalLine(request, from) {
+  return optional(
+    'optimal line',
+    call('ddOptimalLine', { request, from }).then((result) => {
+      if (!Array.isArray(result?.cards)) throw new Error('response carried no line')
       return result
     })
   )

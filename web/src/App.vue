@@ -14,7 +14,7 @@
  * the question here is where a hand went wrong, which is answered by scanning
  * tricks rather than hunting badges across four holdings.
  */
-import { computed, ref, watch } from 'vue'
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import AuctionTable from './components/AuctionTable.vue'
 import BridgeTable from './components/BridgeTable.vue'
 import DoubleDummyTable from './components/DoubleDummyTable.vue'
@@ -25,7 +25,18 @@ import PlayerErrors from './components/PlayerErrors.vue'
 import PlayTrace from './components/PlayTrace.vue'
 import VerifySection from './components/VerifySection.vue'
 import { parseInput } from './lib/input.js'
-import { fetchDdPlay, fetchDdPlayNode, fetchDoubleDummy, playRequest } from './lib/solver.js'
+import {
+  elapsedMs,
+  fetchDdPlay,
+  fetchDdPlayNode,
+  fetchDoubleDummy,
+  fetchOptimalLine,
+  playRequest,
+  timed,
+} from './lib/solver.js'
+import { suitVerdict, summariseCosts, trickTotalFrom } from './lib/errors.js'
+import { resolveInitial, save as saveSession } from './lib/session.js'
+import { TRICK_SIZE, nextToPlay } from './lib/cardplay.js'
 import {
   remainingHands,
   replay,
@@ -46,6 +57,72 @@ const ddTable = ref(null)
 const trace = ref(null)
 const node = ref(null)
 
+/**
+ * The trace of what was actually played, kept while a draft is open.
+ *
+ * A correction needs to know where the first mistake was, and any alternative line
+ * is only interesting next to the real one — so the original analysis survives
+ * exploring.
+ */
+const originalTrace = ref(null)
+
+/** Wall clock for the last solve, shown so the claim is checkable. */
+const solveMs = ref(0)
+
+/**
+ * An alternative line, when one is being explored.
+ *
+ * Both extra modes are the same idea, so they share one mechanism: a replacement
+ * play record that branches from the original at `from`. The engine composes it for
+ * a correction; you compose it a card at a time in free play. Everything downstream
+ * — the board, the trace, the costs — reads the active record without caring which
+ * of the two produced it.
+ *
+ * `{ from, plays, source: 'corrected' | 'free', result }`
+ */
+const draft = ref(null)
+
+/** Whether clicking a card adds it to the line rather than inspecting it. */
+const freePlay = ref(false)
+
+/** What the URL asked for, or what was open last time. */
+const initial = resolveInitial()
+
+/** The text of the current hand, kept so it can be stored and restored. */
+const currentInput = ref('')
+
+/**
+ * Strip the page to the analysis, for embedding in another site. Set by `?embed`.
+ */
+const embed = ref(initial.options.embed)
+
+/**
+ * A fixed pixel box, set by `?width` / `?height`. Used by the gallery to preview a
+ * viewport, and by a host site that wants the analysis to sit in a known space.
+ */
+const boxWidth = ref(initial.options.width)
+const boxHeight = ref(initial.options.height)
+
+/**
+ * Turn the table so declarer sits at the bottom.
+ *
+ * On by default: a hand under review is conventionally read from declarer's side,
+ * and the alternative — a fixed compass — makes you re-orient on every board as
+ * declarer moves around. Turning it only relabels which slot each hand occupies,
+ * so the badges keep naming real seats and the geography is unchanged.
+ */
+const declarerSouth = ref(initial.options.declarerSouth)
+
+/**
+ * `'card'` or `'suit'` per costed play index: whether a playable card existed in
+ * the suit, or the suit itself was the mistake.
+ *
+ * Filled in after the trace, one `dd_play_node` per error. Each of those costs a
+ * solve per legal card, so they are deliberately not part of the headline timing
+ * and the rows colour in as they land.
+ */
+const verdicts = ref({})
+
 const board = computed(() => boards.value[boardIndex.value] || null)
 
 /**
@@ -54,10 +131,20 @@ const board = computed(() => boards.value[boardIndex.value] || null)
  * Needs the trump and the opening leader, so it is only meaningful once a
  * contract is known.
  */
+/** The record under analysis: the draft when one is open, else what was played. */
+const activePlays = computed(() => draft.value?.plays ?? board.value?.plays ?? [])
+
 const replayed = computed(() => {
   const b = board.value
-  if (!b?.plays?.length || !b.leader) return null
-  return replay(b.plays, b.leader, trumpFromContract(b.contract))
+  if (!activePlays.value.length || !b?.leader) return null
+  return replay(activePlays.value, b.leader, trumpFromContract(b.contract))
+})
+
+/** Who is on turn, and what they may play — only meaningful in free play. */
+const turn = computed(() => {
+  const b = board.value
+  if (!freePlay.value || !b?.hands || !b.leader) return null
+  return nextToPlay(b.hands, activePlays.value, b.leader, trumpFromContract(b.contract))
 })
 
 const taken = computed(() => (replayed.value ? tricksTaken(replayed.value.tricks) : { NS: 0, EW: 0 }))
@@ -88,6 +175,18 @@ const errorBadges = computed(() => {
  * acting seat's legal cards are tinted by what they were worth, and everything
  * else is cleared so there is one thing to read.
  */
+/**
+ * In free play, mark the cards the seat on turn may legally play, so the next move
+ * is visible rather than something you discover by clicking.
+ */
+const turnBadges = computed(() => {
+  const t = turn.value
+  if (!t) return null
+  const cards = {}
+  for (const code of t.legal) cards[code] = { current: true }
+  return { N: {}, E: {}, S: {}, W: {}, [t.seat]: cards }
+})
+
 const nodeBadges = computed(() => {
   const n = node.value
   if (!n) return null
@@ -119,8 +218,11 @@ const nodeBadges = computed(() => {
 const shownHands = computed(() => {
   const b = board.value
   if (!b) return {}
+  // In free play the table shows the position you have played to; otherwise the
+  // deal as dealt, unless a node is being inspected.
+  if (freePlay.value && turn.value) return turn.value.remaining
   if (!node.value || !replayed.value) return b.hands
-  return remainingHands(b.hands, b.plays, replayed.value.seatOf, node.value.index)
+  return remainingHands(b.hands, activePlays.value, replayed.value.seatOf, node.value.index)
 })
 
 /** The trick in the middle: at a node, only the cards played before that seat acted. */
@@ -134,6 +236,22 @@ const shownTrick = computed(() => {
 
 const request = computed(() => {
   const b = board.value
+  if (!b?.contract || !b.declarer || !b.leader || !activePlays.value.length) return null
+  return playRequest({
+    hands: b.hands,
+    trump: trumpFromContract(b.contract) || 'NT',
+    declarer: b.declarer,
+    leader: b.leader,
+    plays: activePlays.value,
+  })
+})
+
+/**
+ * The original record's request, for the reference figures a draft is compared
+ * against. Kept separate so switching lines does not lose what actually happened.
+ */
+const originalRequest = computed(() => {
+  const b = board.value
   if (!b?.contract || !b.declarer || !b.leader || !b.plays?.length) return null
   return playRequest({
     hands: b.hands,
@@ -143,6 +261,14 @@ const request = computed(() => {
     plays: b.plays,
   })
 })
+
+/** Which seat the table is turned to put at the bottom, if any. */
+const southSeat = computed(() =>
+  declarerSouth.value && board.value?.declarer ? board.value.declarer : null
+)
+
+/** The real hand's split of costs, for comparing a draft against. */
+const originalSummary = computed(() => summariseCosts(originalTrace.value?.trace, board.value?.declarer))
 
 const contractSummary = computed(() => {
   const b = board.value
@@ -157,6 +283,7 @@ const contractSummary = computed(() => {
 })
 
 async function analyse(text) {
+  currentInput.value = text
   error.value = ''
   problems.value = []
   node.value = null
@@ -183,6 +310,78 @@ async function analyse(text) {
   }
 }
 
+/**
+ * Remember the hand and the options, so coming back resumes where you left off.
+ *
+ * Only once a hand has actually parsed: storing a paste that failed would greet
+ * you with the same error next time.
+ */
+watch([currentInput, declarerSouth], () => {
+  if (boards.value.length && currentInput.value.trim()) {
+    saveSession(currentInput.value, { declarerSouth: declarerSouth.value })
+  }
+})
+
+/**
+ * Walk the play with the keyboard.
+ *
+ * Up and down move a whole trick, keeping the position within it, so you can
+ * follow one seat down the hand. Left and right move a single card and cross trick
+ * boundaries, so the whole record is one continuous sequence. Nothing is selected
+ * yet means starting at the opening lead.
+ */
+function onKeydown(event) {
+  if (event.metaKey || event.ctrlKey || event.altKey) return
+  // Never steal keys from the paste box or any other field.
+  const tag = event.target?.tagName
+  if (tag === 'INPUT' || tag === 'TEXTAREA' || event.target?.isContentEditable) return
+
+  const step = {
+    ArrowDown: TRICK_SIZE,
+    ArrowUp: -TRICK_SIZE,
+    ArrowRight: 1,
+    ArrowLeft: -1,
+  }[event.key]
+  if (step === undefined) return
+
+  const total = board.value?.plays?.length || 0
+  if (!total || !request.value) return
+
+  event.preventDefault()
+
+  const from = node.value ? node.value.index : null
+  const next = from === null ? 0 : from + step
+  if (next < 0 || next >= total) return
+  inspect(next, false)
+}
+
+/**
+ * Re-analyse whenever the active line changes.
+ *
+ * The costs have to describe the line on screen, or the tally would be talking
+ * about a hand nobody is looking at. Each new position is one solve and the prefix
+ * cache covers everything before it, so walking a line forward is cheap.
+ */
+watch(activePlays, async (plays) => {
+  if (!draft.value) return
+  if (!plays.length || !request.value) {
+    trace.value = null
+    return
+  }
+  const b = board.value
+  const result = await fetchDdPlay(request.value)
+  if (board.value !== b) return
+  trace.value = result
+})
+
+onMounted(() => {
+  window.addEventListener('keydown', onKeydown)
+  // A hand from the URL, or the one open last time.
+  if (initial.hand) analyse(initial.hand)
+})
+
+onUnmounted(() => window.removeEventListener('keydown', onKeydown))
+
 /** Solve the current board: the table always, the trace when there is play. */
 async function loadBoard() {
   const b = board.value
@@ -190,24 +389,68 @@ async function loadBoard() {
 
   node.value = null
   trace.value = null
+  originalTrace.value = null
   ddTable.value = null
+  verdicts.value = {}
+  solveMs.value = 0
+  draft.value = null
+  freePlay.value = false
 
-  const table = await fetchDoubleDummy(b.hands)
-  // Guard against a slow solve landing after the user moved on.
-  if (board.value !== b) return
-  ddTable.value = table
-
-  if (request.value) {
-    const result = await fetchDdPlay(request.value)
+  await timed(async () => {
+    const table = await fetchDoubleDummy(b.hands)
+    // Guard against a slow solve landing after the user moved on.
     if (board.value !== b) return
-    trace.value = result
-  }
+    ddTable.value = table
+
+    if (request.value) {
+      const result = await fetchDdPlay(request.value)
+      if (board.value !== b) return
+      trace.value = result
+      originalTrace.value = result
+    }
+  })
+  if (board.value !== b) return
+  solveMs.value = elapsedMs()
 }
 
-async function inspect(index) {
+/**
+ * Work out, for each costed card, whether the suit or only the card was wrong.
+ *
+ * One node analysis per error, and each of those solves every legal card from that
+ * position — far more work than the trace itself. Deliberately not awaited: the page
+ * is already complete and correct without it, and each answer colours its own row as
+ * it arrives.
+ *
+ * Driven by the trace rather than by loading a board, because an explored line has
+ * costed cards of its own that deserve the same explanation. It also has to be:
+ * verdicts are keyed by play index, so a stale one from the original record would
+ * otherwise be applied to whatever card a draft happens to have at that index.
+ */
+watch(trace, async (current) => {
+  verdicts.value = {}
+  if (!current || !request.value) return
+
+  const b = board.value
+  const forTrace = current
+  for (const e of current.trace.filter((x) => x.cost > 0)) {
+    const result = await fetchDdPlayNode(request.value, e.index)
+    // Abandon quietly if the board or the line moved on while these were queued.
+    if (board.value !== b || trace.value !== forTrace) return
+    const verdict = suitVerdict(result)
+    if (verdict) verdicts.value = { ...verdicts.value, [e.index]: verdict }
+  }
+})
+
+/**
+ * Open the analysis at one play index.
+ *
+ * `toggle` closes it when the same index is already open, which is what a click on
+ * it should do. Keyboard movement passes `false`: arrowing onto the current card
+ * should stay there rather than dismiss the panel.
+ */
+async function inspect(index, toggle = true) {
   if (!request.value) return
-  // Clicking the open node again closes it.
-  if (node.value?.index === index) {
+  if (toggle && node.value?.index === index) {
     node.value = null
     return
   }
@@ -226,6 +469,11 @@ async function inspect(index) {
  * moments is what the play trace is for, where the tricks are laid out in order.
  */
 function onCardClick({ code }) {
+  // While composing a line, a click on a legal card plays it.
+  if (freePlay.value) {
+    playCard(normalizeCardCode(code))
+    return
+  }
   if (node.value) {
     node.value = null
     return
@@ -237,6 +485,69 @@ function onCardClick({ code }) {
   if (index >= 0) inspect(index)
 }
 
+/** The first card that gave a trick away, which is where a correction starts. */
+const firstErrorIndex = computed(() => {
+  const first = (originalTrace.value?.trace || []).find((e) => e.cost > 0)
+  return first ? first.index : -1
+})
+
+/**
+ * Replace the play from the first mistake onwards with what should have happened.
+ *
+ * The engine plays it out for both sides, so this is not "what a good player might
+ * have tried" but the line that was actually available.
+ */
+async function showCorrectedLine() {
+  const b = board.value
+  if (!originalRequest.value || firstErrorIndex.value < 0) return
+
+  const from = firstErrorIndex.value
+  const line = await fetchOptimalLine(originalRequest.value, from)
+  if (!line || board.value !== b) return
+
+  freePlay.value = false
+  node.value = null
+  draft.value = {
+    from,
+    plays: [...b.plays.slice(0, from), ...line.cards],
+    source: 'corrected',
+    result: line.declaring_tricks,
+  }
+}
+
+/** Take the hand over from a point and play it on yourself. */
+function startFreePlay(from = node.value?.index ?? 0) {
+  const b = board.value
+  if (!b?.plays?.length) return
+  node.value = null
+  freePlay.value = true
+  draft.value = { from, plays: b.plays.slice(0, from), source: 'free', result: null }
+}
+
+/** Add a card to the line being composed. */
+function playCard(code) {
+  const t = turn.value
+  if (!t || !t.legal.has(code)) return
+  draft.value = { ...draft.value, plays: [...draft.value.plays, code] }
+}
+
+/** Back to what was actually played. */
+function resetLine() {
+  draft.value = null
+  freePlay.value = false
+  node.value = null
+  // The draft watcher does not run for the original line, so restore its analysis
+  // rather than leaving the page with the alternative's costs — or with none.
+  trace.value = originalTrace.value
+}
+
+/** Undo the last card of a line you are composing. */
+function undoCard() {
+  const d = draft.value
+  if (!d || d.plays.length <= d.from) return
+  draft.value = { ...d, plays: d.plays.slice(0, -1) }
+}
+
 function goTo(i) {
   if (i < 0 || i >= boards.value.length) return
   boardIndex.value = i
@@ -246,23 +557,32 @@ watch(boardIndex, loadBoard)
 </script>
 
 <template>
-  <header class="masthead">
+  <div
+    class="app"
+    :class="{ 'is-embed': embed }"
+    :style="{
+      width: boxWidth ? boxWidth + 'px' : null,
+      height: boxHeight ? boxHeight + 'px' : null,
+    }"
+  >
+  <header v-if="!embed" class="masthead">
     <div class="wrap">
       <h1>Bridge double-dummy analysis</h1>
       <p class="tagline">
         Paste a hand and see the double-dummy table, then every card that gave a
         trick away and what should have been played instead.
       </p>
-      <p class="privacy" role="note">
-        <strong>The hand never leaves this page.</strong> The solver is compiled
-        into the page and runs in your browser — nothing is sent to a server.
-        <a href="#verify">Don't take our word for it →</a>
-      </p>
     </div>
   </header>
 
   <main class="wrap">
-    <InputPanel :busy="busy" :error="error" @analyse="analyse" />
+    <InputPanel
+      v-if="!embed"
+      :busy="busy"
+      :error="error"
+      :hand="currentInput"
+      @analyse="analyse"
+    />
 
     <p v-if="problems.length" class="problems" role="note">
       {{ problems.length }} board{{ problems.length === 1 ? '' : 's' }} in that file
@@ -307,6 +627,69 @@ watch(boardIndex, loadBoard)
         <span v-if="contractSummary?.claim != null" class="chip">
           Claimed {{ contractSummary.claim }}
         </span>
+
+        <label v-if="board.declarer" class="chip chip-toggle">
+          <input v-model="declarerSouth" type="checkbox" />
+          Declarer at the bottom
+        </label>
+      </section>
+
+      <!--
+        Two ways to leave the record behind: have the engine show what should have
+        happened, or take the hand over and try something. Both produce an
+        alternative line, and the analysis follows it.
+      -->
+      <section v-if="originalRequest" class="modes" aria-label="Explore the hand">
+        <button
+          v-if="firstErrorIndex >= 0"
+          type="button"
+          class="mode-btn"
+          :class="{ active: draft?.source === 'corrected' }"
+          @click="showCorrectedLine"
+        >
+          Show the corrected line
+        </button>
+        <button
+          type="button"
+          class="mode-btn"
+          :class="{ active: freePlay }"
+          :title="
+            node
+              ? `Take over from trick ${trickNumberOf(node.index)} and play it yourself`
+              : 'Take the hand over from the start and play it yourself'
+          "
+          @click="startFreePlay()"
+        >
+          {{ node ? `Play on from trick ${trickNumberOf(node.index)}` : 'Play it yourself' }}
+        </button>
+
+        <template v-if="draft">
+          <button
+            v-if="freePlay"
+            type="button"
+            class="mode-btn"
+            :disabled="draft.plays.length <= draft.from"
+            @click="undoCard"
+          >
+            Undo
+          </button>
+          <button type="button" class="mode-btn" @click="resetLine">
+            Back to what was played
+          </button>
+        </template>
+
+        <span v-if="draft" class="mode-status">
+          <template v-if="draft.source === 'corrected'">
+            Corrected from trick {{ trickNumberOf(draft.from) }} —
+            <strong>{{ draft.result }} tricks</strong> instead of
+            {{ trickTotalFrom(contractSummary?.ddTricks, originalSummary) }}
+          </template>
+          <template v-else-if="turn">
+            Your line · {{ turn.seat }} to play ·
+            {{ 52 - draft.plays.length }} cards left
+          </template>
+          <template v-else>Your line · the hand is complete</template>
+        </span>
       </section>
 
       <!--
@@ -317,14 +700,13 @@ watch(boardIndex, loadBoard)
       <ErrorSummary
         v-if="trace"
         :trace="trace.trace"
-        :tricks="replayed?.tricks || []"
         :selected-index="node?.index ?? -1"
         :names="board.names"
         :declarer="board.declarer"
+        :contract-tricks="trace.contract_tricks"
+        :verdicts="verdicts"
         @select="inspect"
       />
-
-      <NodePanel v-if="node" :node="node" @close="node = null" />
 
       <!--
         Three columns on a wide screen: the play record, the table, and the
@@ -339,27 +721,65 @@ watch(boardIndex, loadBoard)
             :trace="trace.trace"
             :tricks="replayed?.tricks || []"
             :selected-index="node?.index ?? -1"
+            :declarer="board.declarer"
             @select="inspect"
           />
         </section>
 
         <div class="table-col">
+          <!--
+            The four corners a compass leaves empty. On a 1180-wide iPad those were
+            four holes in the middle of the screen while the summaries queued up
+            below the fold; now everything is in one glance. The inspector goes NE
+            in a reserved box, which is what keeps the hands from moving when it
+            opens.
+          -->
           <BridgeTable
             :hands="shownHands"
             :names="board.names"
-            :card-badges="node ? nodeBadges : errorBadges"
+            :card-badges="freePlay ? turnBadges : node ? nodeBadges : errorBadges"
             :trick="shownTrick"
             :tricks-taken="taken"
-            :active-seat="node?.seat || null"
+            :active-seat="turn?.seat || node?.seat || null"
             :declarer="board.declarer"
-            :inspectable="!!request"
+            :south-seat="southSeat"
+            :inspectable="!!originalRequest"
             @card-click="onCardClick"
-          />
+          >
+            <template #nw>
+              <AuctionTable :bids="board.auction" :dealer="board.dealer" />
+            </template>
 
-          <p v-if="request && !node" class="table-hint">
-            Cards that gave a trick away are tinted and badged with the trick
-            number. Click any card to see what every alternative was worth.
-          </p>
+            <template #ne>
+              <NodePanel
+                v-if="originalRequest"
+                :node="node"
+                :idle-hint="
+                  freePlay
+                    ? 'Playing your own line. Click a highlighted card to play it.'
+                    : undefined
+                "
+                @close="node = null"
+              />
+            </template>
+
+            <template #sw>
+              <PlayerErrors
+                v-if="trace"
+                :trace="trace.trace"
+                :declarer="board.declarer"
+                :names="board.names"
+              />
+            </template>
+
+            <template #se>
+              <DoubleDummyTable
+                :tricks="ddTable?.tricks"
+                :contract="board.contract || ''"
+                :declarer="board.declarer || ''"
+              />
+            </template>
+          </BridgeTable>
 
           <p v-if="board.plays?.length && !request" class="note">
             This board has a play record but no contract, so there is nothing to
@@ -371,34 +791,20 @@ watch(boardIndex, loadBoard)
             played.
           </p>
         </div>
-
-        <aside class="side-col">
-          <DoubleDummyTable
-            :tricks="ddTable?.tricks"
-            :contract="board.contract || ''"
-            :declarer="board.declarer || ''"
-          />
-          <PlayerErrors
-            v-if="trace"
-            :trace="trace.trace"
-            :declarer="board.declarer"
-            :names="board.names"
-          />
-          <AuctionTable :bids="board.auction" :dealer="board.dealer" />
-        </aside>
       </div>
     </template>
 
-    <VerifySection />
+    <VerifySection v-if="!embed" :elapsed-ms="solveMs" />
   </main>
 
-  <footer class="wrap">
+  <footer v-if="!embed" class="wrap">
     <p>
       Built on
       <a href="https://github.com/bridge-craftwork/bridge-solver">bridge-solver</a>,
       compiled to WebAssembly. Unlicense.
     </p>
   </footer>
+  </div>
 </template>
 
 <style scoped>
@@ -406,6 +812,28 @@ watch(boardIndex, loadBoard)
   max-width: var(--max-width);
   margin: 0 auto;
   padding: 0 18px;
+}
+
+/*
+ * A fixed pixel box, when `?width`/`?height` ask for one. The gallery uses it to
+ * preview a viewport; a host site uses it to give the analysis a known space.
+ * Scrolls internally rather than pushing the host page around.
+ */
+.app {
+  overflow: auto;
+}
+
+/* Embedded: no masthead, no paste box, no footer — just the analysis. */
+.is-embed {
+  padding: 10px 0;
+}
+
+.is-embed .wrap {
+  padding: 0 10px;
+}
+
+.is-embed main > * {
+  margin-bottom: 12px;
 }
 
 .masthead {
@@ -420,19 +848,8 @@ h1 {
 }
 
 .tagline {
-  margin: 0 0 10px;
-  color: var(--text-secondary);
-  max-width: 62ch;
-}
-
-.privacy {
   margin: 0;
-  font-size: 14px;
-  background: #f0faf5;
-  border: 1px solid #c9e9d8;
-  border-radius: var(--radius-button);
-  padding: 8px 12px;
-  display: inline-block;
+  color: var(--text-secondary);
 }
 
 main > * {
@@ -503,6 +920,57 @@ main > * {
   color: var(--text-secondary);
 }
 
+.modes {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.mode-btn {
+  font: inherit;
+  font-size: 13px;
+  padding: 5px 12px;
+  border: 1px solid var(--border);
+  background: var(--bg-white);
+  border-radius: var(--radius-button);
+  cursor: pointer;
+}
+
+.mode-btn:not(:disabled):hover {
+  border-color: var(--green);
+}
+
+.mode-btn:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.mode-btn.active {
+  background: var(--green-pale);
+  border-color: #b9dfc6;
+  color: var(--green-ink);
+  font-weight: 600;
+}
+
+.mode-status {
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+
+.chip-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  cursor: pointer;
+  user-select: none;
+}
+
+.chip-toggle input {
+  margin: 0;
+  cursor: pointer;
+}
+
 .chip-contract {
   font-weight: 700;
   color: var(--green-ink);
@@ -511,14 +979,13 @@ main > * {
 }
 
 /*
- * Trace | table | summaries. The outer columns size to their content and the
- * table takes the rest, so the compass stays centred in whatever is left rather
- * than drifting against one edge.
+ * Trace beside the table. The summaries used to need a third column; they now sit
+ * in the table's own corners, which is both tighter and closer to the cards.
  */
 .layout {
   display: grid;
-  grid-template-columns: minmax(210px, 250px) minmax(0, 1fr) auto;
-  gap: 26px;
+  grid-template-columns: minmax(320px, 350px) minmax(0, 1fr);
+  gap: 22px;
   align-items: start;
 }
 
@@ -537,29 +1004,21 @@ main > * {
   align-items: center;
 }
 
-.side-col {
-  display: flex;
-  flex-direction: column;
-  gap: 16px;
-}
-
-/* Two columns: the trace moves under the table, the summaries stay beside it. */
-@media (max-width: 1180px) {
+/*
+ * The table with its corners measures 665px and the trace column 350px, so the two
+ * fit side by side from about 1060px. The previous 1240px breakpoint collapsed them
+ * on an iPad in landscape (1180px) — the one case the corner layout exists for —
+ * which pushed the trace below the fold and made the page over two screens tall.
+ */
+@media (max-width: 1060px) {
   .layout {
-    grid-template-columns: minmax(0, 1fr) auto;
+    grid-template-columns: minmax(0, 1fr);
   }
 
   .trace-col {
     grid-row: 2;
-    grid-column: 1 / -1;
     position: static;
     max-height: none;
-  }
-}
-
-@media (max-width: 720px) {
-  .layout {
-    grid-template-columns: minmax(0, 1fr);
   }
 }
 

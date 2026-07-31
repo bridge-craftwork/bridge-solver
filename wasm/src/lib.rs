@@ -195,6 +195,27 @@ impl Analyzer {
         .map_err(|e| JsError::new(&format!("could not serialise the trace: {}", e)))
     }
 
+    /// A double-dummy-perfect continuation from one point in the hand.
+    ///
+    /// What should have happened from `from` onwards, with both sides playing
+    /// optimally. Started at the first costed error, it is the correction for it.
+    ///
+    /// Done in one call rather than by walking `dd_play_node` forward: the work is
+    /// the same shape, but the caches live for the whole playout instead of being
+    /// rebuilt per position, and one call replaces forty round trips.
+    pub fn dd_optimal_line(&self, request_json: &str, from: usize) -> Result<String, JsError> {
+        let req: PlayRequest = serde_json::from_str(request_json)
+            .map_err(|e| JsError::new(&format!("could not read the request: {}", e)))?;
+
+        let input = parse_input(&req).map_err(|e| JsError::new(&e))?;
+
+        let line = analyse_play::optimal_line(&input, from)
+            .map_err(|e| JsError::new(&format!("{:?}", e)))?;
+
+        serde_json::to_string(&line)
+            .map_err(|e| JsError::new(&format!("could not serialise the line: {}", e)))
+    }
+
     /// Tier 2: the alternatives at one decision node, with each card's cost.
     ///
     /// This is what a click on a tagged card shows. `node` is a 0-based index

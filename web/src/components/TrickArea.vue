@@ -6,7 +6,7 @@
  * cleanest of its table components and needed no adaptation.
  */
 import { computed } from 'vue'
-import { SUIT_SYMBOLS, formatCard, getSuitClass } from '../lib/cards.js'
+import { SUIT_SYMBOLS, formatCard, getSuitClass, seatAtPosition } from '../lib/cards.js'
 
 const props = defineProps({
   /** `{ leader, plays: [{ seat, suit, rank }] }`. */
@@ -18,11 +18,23 @@ const props = defineProps({
   nextSeat: { type: String, default: null },
   /** Which seat won, once the trick is complete. */
   winner: { type: String, default: null },
+  /** Turn the trick with the table, so a card stays in front of its player. */
+  southSeat: { type: String, default: null },
 })
 
 const bySeat = computed(() => {
   const out = { N: null, E: null, S: null, W: null }
   for (const p of props.trick?.plays || []) out[p.seat] = p
+  return out
+})
+
+/** The card and seat belonging to a screen position under the current rotation. */
+const at = computed(() => {
+  const out = {}
+  for (const position of ['N', 'E', 'S', 'W']) {
+    const seat = seatAtPosition(position, props.southSeat)
+    out[position] = { seat, play: bySeat.value[seat] }
+  }
   return out
 })
 
@@ -37,15 +49,15 @@ function symbolFor(play) {
 <template>
   <div class="trick-area">
     <div class="trick-grid">
-      <div class="slot slot-n" :class="{ 'is-next': nextSeat === 'N' }">
-        <div v-if="bySeat.N" class="card" :class="cardClass(bySeat.N)">
-          {{ symbolFor(bySeat.N) }}{{ formatCard(bySeat.N.rank) }}
+      <div class="slot slot-n" :class="{ 'is-next': nextSeat === at.N.seat }">
+        <div v-if="at.N.play" class="card" :class="cardClass(at.N.play)">
+          {{ symbolFor(at.N.play) }}{{ formatCard(at.N.play.rank) }}
         </div>
       </div>
 
-      <div class="slot slot-w" :class="{ 'is-next': nextSeat === 'W' }">
-        <div v-if="bySeat.W" class="card" :class="cardClass(bySeat.W)">
-          {{ symbolFor(bySeat.W) }}{{ formatCard(bySeat.W.rank) }}
+      <div class="slot slot-w" :class="{ 'is-next': nextSeat === at.W.seat }">
+        <div v-if="at.W.play" class="card" :class="cardClass(at.W.play)">
+          {{ symbolFor(at.W.play) }}{{ formatCard(at.W.play.rank) }}
         </div>
       </div>
 
@@ -57,15 +69,15 @@ function symbolFor(play) {
         <div v-if="winner" class="last-winner">{{ winner }} won</div>
       </div>
 
-      <div class="slot slot-e" :class="{ 'is-next': nextSeat === 'E' }">
-        <div v-if="bySeat.E" class="card" :class="cardClass(bySeat.E)">
-          {{ symbolFor(bySeat.E) }}{{ formatCard(bySeat.E.rank) }}
+      <div class="slot slot-e" :class="{ 'is-next': nextSeat === at.E.seat }">
+        <div v-if="at.E.play" class="card" :class="cardClass(at.E.play)">
+          {{ symbolFor(at.E.play) }}{{ formatCard(at.E.play.rank) }}
         </div>
       </div>
 
-      <div class="slot slot-s" :class="{ 'is-next': nextSeat === 'S' }">
-        <div v-if="bySeat.S" class="card" :class="cardClass(bySeat.S)">
-          {{ symbolFor(bySeat.S) }}{{ formatCard(bySeat.S.rank) }}
+      <div class="slot slot-s" :class="{ 'is-next': nextSeat === at.S.seat }">
+        <div v-if="at.S.play" class="card" :class="cardClass(at.S.play)">
+          {{ symbolFor(at.S.play) }}{{ formatCard(at.S.play.rank) }}
         </div>
       </div>
     </div>
