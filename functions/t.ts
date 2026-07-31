@@ -124,8 +124,8 @@ export const onRequestPost: PagesFunction<Env> = async ({ request, env }) => {
   return new Response(null, { status: 204 })
 }
 
-/** Anything other than POST is not an error worth describing, just not allowed. */
-export const onRequest: PagesFunction<Env> = async ({ request, next }) => {
-  if (request.method !== 'POST') return new Response(null, { status: 405 })
-  return next()
-}
+// Only `onRequestPost` is exported, deliberately. Pages answers 405 by itself
+// for a method with no matching handler, so an `onRequest` catch-all that
+// checked the method and called `next()` was both redundant and wrong: it
+// served HEAD correctly but hung GET into a 522, because `next()` from a
+// catch-all falls through to static-asset resolution for a path that has none.
