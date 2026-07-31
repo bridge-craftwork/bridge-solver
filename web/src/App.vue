@@ -70,6 +70,16 @@ const originalTrace = ref(null)
 const solveMs = ref(0)
 
 /**
+ * Wall clock for the per-error node solves that follow it.
+ *
+ * Separate from `solveMs` because they are separate work with very different
+ * costs: the headline solve is one table plus one trace, while this is a solve per
+ * legal card at every mistake. Reporting them as one number would hide which of
+ * the two actually costs anything.
+ */
+const verdictMs = ref(0)
+
+/**
  * An alternative line, when one is being explored.
  *
  * Both extra modes are the same idea, so they share one mechanism: a replacement
@@ -377,6 +387,36 @@ watch(activePlays, async (plays) => {
   trace.value = result
 })
 
+/**
+ * Tell an embedding page how long the analysis took.
+ *
+ * Only when embedded, and only ever timings and counts — never the hand. The
+ * gallery uses this to benchmark a cold start per viewport, and a host site can use
+ * it to show its own progress. Sent to `*` because the page cannot know its host's
+ * origin, which is safe precisely because the payload carries nothing private.
+ */
+function reportTiming(extra = {}) {
+  if (window.parent === window) return
+  try {
+    window.parent.postMessage(
+      {
+        type: 'bridge-solver:analysis',
+        solveMs: Math.round(solveMs.value),
+        verdictMs: Math.round(verdictMs.value),
+        totalMs: Math.round(solveMs.value + verdictMs.value),
+        errors: summariseCosts(trace.value?.trace, board.value?.declarer).errors,
+        cardsPlayed: activePlays.value.length,
+        width: window.innerWidth,
+        height: window.innerHeight,
+        ...extra,
+      },
+      '*'
+    )
+  } catch {
+    // A host that rejects the message is not a reason to break the analysis.
+  }
+}
+
 onMounted(() => {
   window.addEventListener('keydown', onKeydown)
   // A hand from the URL, or the one open last time.
@@ -431,10 +471,15 @@ async function loadBoard() {
  */
 watch(trace, async (current) => {
   verdicts.value = {}
-  if (!current || !request.value) return
+  verdictMs.value = 0
+  if (!current || !request.value) {
+    reportTiming()
+    return
+  }
 
   const b = board.value
   const forTrace = current
+  const started = performance.now()
   for (const e of current.trace.filter((x) => x.cost > 0)) {
     const result = await fetchDdPlayNode(request.value, e.index)
     // Abandon quietly if the board or the line moved on while these were queued.
@@ -442,6 +487,8 @@ watch(trace, async (current) => {
     const verdict = suitVerdict(result)
     if (verdict) verdicts.value = { ...verdicts.value, [e.index]: verdict }
   }
+  verdictMs.value = performance.now() - started
+  reportTiming()
 })
 
 /**

@@ -128,6 +128,56 @@
         font-size: 11px;
         color: #167a5a;
       }
+      .bench {
+        margin-top: 28px;
+        background: #fff;
+        border: 1px solid var(--line);
+        border-radius: 10px;
+        padding: 14px 16px;
+        max-width: 760px;
+      }
+      .bench h2 {
+        font-family: Georgia, 'Times New Roman', serif;
+        font-size: 17px;
+        margin: 0 0 4px;
+      }
+      .bench-note {
+        margin: 0 0 10px;
+        font-size: 12px;
+        color: var(--muted);
+        max-width: 72ch;
+      }
+      .bench-table {
+        border-collapse: collapse;
+        font-size: 13px;
+        font-variant-numeric: tabular-nums;
+      }
+      .bench-table th,
+      .bench-table td {
+        border-bottom: 1px solid var(--line);
+        padding: 4px 14px 4px 0;
+        text-align: right;
+      }
+      .bench-table th:first-child,
+      .bench-table td:first-child {
+        text-align: left;
+      }
+      .bench-table thead th {
+        font-size: 10px;
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
+        color: var(--faint);
+        font-weight: 600;
+      }
+      .bench-table tfoot td {
+        font-weight: 700;
+        border-bottom: none;
+        border-top: 1px solid #333;
+      }
+      .bench-waiting td {
+        color: var(--faint);
+        font-style: italic;
+      }
     </style>
   </head>
   <body>
@@ -141,6 +191,37 @@
         interact with it.
       </p>
       <div class="vps" id="vps"></div>
+
+      <!--
+        A benchmark, not decoration. Each frame is a whole app instance with its own
+        worker and its own empty position cache, so every one of them solves the
+        board from cold — which makes this five independent cold-start measurements
+        rather than one warm and four cached.
+      -->
+      <section class="bench" id="bench" aria-live="polite">
+        <h2>Timing</h2>
+        <p class="bench-note">
+          Each frame runs its own solver with an empty cache, so these are five
+          independent cold starts of the same board. <strong>Solve</strong> is the
+          double-dummy table plus the running trace; <strong>verdicts</strong> is the
+          per-error node analysis that follows it, which is far more work.
+        </p>
+        <table class="bench-table">
+          <thead>
+            <tr>
+              <th>Viewport</th>
+              <th>Solve</th>
+              <th>Verdicts</th>
+              <th>Total</th>
+              <th>Errors</th>
+            </tr>
+          </thead>
+          <tbody id="bench-rows">
+            <tr class="bench-waiting"><td colspan="5">waiting for frames…</td></tr>
+          </tbody>
+          <tfoot id="bench-foot"></tfoot>
+        </table>
+      </section>
     </div>
 
     <script type="module">
@@ -185,6 +266,69 @@
 
       const host = document.getElementById('vps')
 
+      /*
+       * Timings, reported up by each frame when its analysis settles.
+       *
+       * Keyed by the frame's window so a message is attributed to the frame that
+       * sent it rather than to whichever mounted last — the frames finish out of
+       * order, since they mount as they scroll into view.
+       */
+      const timings = new Map()
+      // Declared viewport order, so the table reads the same as the frames above it
+      // rather than in whatever order they happened to finish.
+      const frameOrder = []
+      const pageStart = performance.now()
+      let lastReport = 0
+
+      window.addEventListener('message', (event) => {
+        if (event.data?.type !== 'bridge-solver:analysis') return
+        // Match on the element's live `contentWindow` rather than one captured at
+        // load: registering on load would both race the first report and order the
+        // rows by completion.
+        const entry = frameOrder.find((f) => f.frame.querySelector('iframe')?.contentWindow === event.source)
+        if (!entry) return
+        timings.set(entry.name, { ...event.data, wallMs: performance.now() - pageStart })
+        lastReport = performance.now() - pageStart
+        renderBench()
+      })
+
+      const ms = (n) => (n == null ? '—' : `${(n / 1000).toFixed(2)} s`)
+
+      function renderBench() {
+        const rows = document.getElementById('bench-rows')
+        const foot = document.getElementById('bench-foot')
+        const done = frameOrder.filter((f) => timings.has(f.name))
+        if (!done.length) return
+
+        rows.innerHTML = done
+          .map((f) => {
+            const d = timings.get(f.name)
+            return (
+              '<tr><td>' + f.name +
+              '</td><td>' + ms(d.solveMs) +
+              '</td><td>' + ms(d.verdictMs) +
+              '</td><td>' + ms(d.totalMs) +
+              '</td><td>' + (d.errors ?? '—') +
+              '</td></tr>'
+            )
+          })
+          .join('')
+
+        const sum = (key) => done.reduce((n, f) => n + (timings.get(f.name)[key] || 0), 0)
+        const pending = frameOrder.length - done.length
+        foot.innerHTML =
+          '<tr><td>' + done.length + ' of ' + frameOrder.length + ' frames' +
+          (pending ? ' (' + pending + ' pending)' : '') +
+          '</td><td>' + ms(sum('solveMs')) +
+          '</td><td>' + ms(sum('verdictMs')) +
+          '</td><td>' + ms(sum('totalMs')) +
+          '</td><td></td></tr>' +
+          // Wall clock is the number you feel; the sum above is the work done. They
+          // differ because the frames mount lazily and then run concurrently.
+          '<tr><td>wall clock to last frame</td><td colspan="4" style="text-align:left">' +
+          ms(lastReport) + '</td></tr>'
+      }
+
       for (const [name, vp] of Object.entries(VIEWPORTS)) {
         const scale = Math.min(MAXW / vp.w, MAXH / vp.h)
         const pw = Math.round(vp.w * scale)
@@ -219,6 +363,7 @@
         cell.querySelector('.cap').append(link)
 
         host.append(cell)
+        frameOrder.push({ name, frame })
 
         // Mount lazily: five live copies of a WebAssembly solver is a lot to start
         // at once, and the ones below the fold are not being looked at yet.
