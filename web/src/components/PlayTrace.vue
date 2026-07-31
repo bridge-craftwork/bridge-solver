@@ -28,6 +28,13 @@ const props = defineProps({
    * `+1` there. One card, two numbers.
    */
   declarer: { type: String, default: null },
+  /**
+   * `'card'` or `'suit'` per play index — the same verdicts the error table
+   * colours by, so a mistake looks like the same kind of mistake wherever you meet
+   * it. Without this the trace tinted everything one shade of red and quietly
+   * disagreed with the table above it.
+   */
+  verdicts: { type: Object, default: () => ({}) },
 })
 
 defineEmits(['select'])
@@ -50,6 +57,19 @@ const grouped = computed(() => {
 
 const totalErrors = computed(() => props.trace.filter((e) => e.cost > 0).length)
 const totalCost = computed(() => props.trace.reduce((n, e) => n + e.cost, 0))
+
+/** Amber for a wrong card in a playable suit, red for a wrong suit. */
+function costClass(entry) {
+  if (!(entry.cost > 0)) return {}
+  const verdict = props.verdicts[entry.index]
+  return {
+    error: true,
+    'error-card': verdict === 'card',
+    'error-suit': verdict === 'suit',
+    'error-unknown': !verdict,
+    severe: verdict === 'suit' && entry.cost >= 2,
+  }
+}
 
 /** The card's effect on declarer's total, matching the error table exactly. */
 function signed(entry) {
@@ -93,11 +113,7 @@ function glyph(code) {
             :key="e.index"
             type="button"
             class="play"
-            :class="{
-              error: e.cost > 0,
-              severe: e.cost >= 2,
-              selected: e.index === selectedIndex,
-            }"
+            :class="{ ...costClass(e), selected: e.index === selectedIndex }"
             :title="
               e.cost > 0
                 ? `${e.seat} gave away ${e.cost} ${e.cost === 1 ? 'trick' : 'tricks'} — click to see the alternatives`
@@ -231,12 +247,22 @@ function glyph(code) {
   outline-offset: 1px;
 }
 
-.play.error {
-  background: var(--cost-mild);
+.play.error-card {
+  background: var(--cost-card);
 }
 
-.play.severe {
-  background: var(--cost-severe);
+.play.error-suit {
+  background: var(--cost-suit);
+}
+
+.play.error-suit.severe {
+  background: var(--cost-suit-severe);
+}
+
+/* Until the alternatives come back the kind of mistake is unknown; mark it as an
+   error without claiming which. */
+.play.error-unknown {
+  background: var(--cost-mild);
 }
 
 .play.selected {

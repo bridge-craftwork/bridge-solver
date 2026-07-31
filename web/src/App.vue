@@ -36,7 +36,7 @@ import {
 } from './lib/solver.js'
 import { suitVerdict, summariseCosts, trickTotalFrom } from './lib/errors.js'
 import { resolveInitial, save as saveSession } from './lib/session.js'
-import { TRICK_SIZE, nextToPlay } from './lib/cardplay.js'
+import { TRICK_SIZE, nextToPlay, trickStartOf } from './lib/cardplay.js'
 import {
   remainingHands,
   replay,
@@ -68,6 +68,16 @@ const originalTrace = ref(null)
 
 /** Wall clock for the last solve, shown so the claim is checkable. */
 const solveMs = ref(0)
+
+/**
+ * Wall clock for the per-error node solves that follow it.
+ *
+ * Separate from `solveMs` because they are separate work with very different
+ * costs: the headline solve is one table plus one trace, while this is a solve per
+ * legal card at every mistake. Reporting them as one number would hide which of
+ * the two actually costs anything.
+ */
+const verdictMs = ref(0)
 
 /**
  * An alternative line, when one is being explored.
@@ -236,7 +246,10 @@ const shownTrick = computed(() => {
 
 const request = computed(() => {
   const b = board.value
-  if (!b?.contract || !b.declarer || !b.leader || !activePlays.value.length) return null
+  // Deliberately not requiring a play record. A deal with a contract and no cards
+  // played is a perfectly good thing to analyse: the contract's double-dummy value
+  // is available, and both explore modes work from the opening lead.
+  if (!b?.contract || !b.declarer || !b.leader) return null
   return playRequest({
     hands: b.hands,
     trump: trumpFromContract(b.contract) || 'NT',
@@ -252,7 +265,7 @@ const request = computed(() => {
  */
 const originalRequest = computed(() => {
   const b = board.value
-  if (!b?.contract || !b.declarer || !b.leader || !b.plays?.length) return null
+  if (!b?.contract || !b.declarer || !b.leader) return null
   return playRequest({
     hands: b.hands,
     trump: trumpFromContract(b.contract) || 'NT',
@@ -374,6 +387,36 @@ watch(activePlays, async (plays) => {
   trace.value = result
 })
 
+/**
+ * Tell an embedding page how long the analysis took.
+ *
+ * Only when embedded, and only ever timings and counts — never the hand. The
+ * gallery uses this to benchmark a cold start per viewport, and a host site can use
+ * it to show its own progress. Sent to `*` because the page cannot know its host's
+ * origin, which is safe precisely because the payload carries nothing private.
+ */
+function reportTiming(extra = {}) {
+  if (window.parent === window) return
+  try {
+    window.parent.postMessage(
+      {
+        type: 'bridge-solver:analysis',
+        solveMs: Math.round(solveMs.value),
+        verdictMs: Math.round(verdictMs.value),
+        totalMs: Math.round(solveMs.value + verdictMs.value),
+        errors: summariseCosts(trace.value?.trace, board.value?.declarer).errors,
+        cardsPlayed: activePlays.value.length,
+        width: window.innerWidth,
+        height: window.innerHeight,
+        ...extra,
+      },
+      '*'
+    )
+  } catch {
+    // A host that rejects the message is not a reason to break the analysis.
+  }
+}
+
 onMounted(() => {
   window.addEventListener('keydown', onKeydown)
   // A hand from the URL, or the one open last time.
@@ -428,10 +471,15 @@ async function loadBoard() {
  */
 watch(trace, async (current) => {
   verdicts.value = {}
-  if (!current || !request.value) return
+  verdictMs.value = 0
+  if (!current || !request.value) {
+    reportTiming()
+    return
+  }
 
   const b = board.value
   const forTrace = current
+  const started = performance.now()
   for (const e of current.trace.filter((x) => x.cost > 0)) {
     const result = await fetchDdPlayNode(request.value, e.index)
     // Abandon quietly if the board or the line moved on while these were queued.
@@ -439,6 +487,8 @@ watch(trace, async (current) => {
     const verdict = suitVerdict(result)
     if (verdict) verdicts.value = { ...verdicts.value, [e.index]: verdict }
   }
+  verdictMs.value = performance.now() - started
+  reportTiming()
 })
 
 /**
@@ -485,23 +535,45 @@ function onCardClick({ code }) {
   if (index >= 0) inspect(index)
 }
 
-/** The first card that gave a trick away, which is where a correction starts. */
+/** Whether this board came with any cards played. */
+const hasPlayRecord = computed(() => (board.value?.plays?.length ?? 0) > 0)
+
+/** The trick a correction would start at, given what is selected. */
+const correctFromTrick = computed(() => {
+  const anchor = node.value ? node.value.index : Math.max(firstErrorIndex.value, 0)
+  return trickNumberOf(anchor)
+})
+
+/** The first card that gave a trick away — the default place to correct from. */
 const firstErrorIndex = computed(() => {
   const first = (originalTrace.value?.trace || []).find((e) => e.cost > 0)
   return first ? first.index : -1
 })
 
 /**
- * Replace the play from the first mistake onwards with what should have happened.
+ * Replace the play from the selected trick onwards with what should have happened.
+ *
+ * Every earlier trick is kept exactly as played — the correction starts at the trick
+ * you are looking at, so you can ask "what if it had gone right from *here*" at any
+ * point rather than only from the hand's first mistake. With nothing selected it
+ * falls back to that first mistake, which is the most likely thing to want.
+ *
+ * It always begins at a trick boundary rather than mid-trick: a correction that
+ * started on the third card of a trick would leave the two before it standing and
+ * read as a different, stranger question.
  *
  * The engine plays it out for both sides, so this is not "what a good player might
  * have tried" but the line that was actually available.
  */
 async function showCorrectedLine() {
   const b = board.value
-  if (!originalRequest.value || firstErrorIndex.value < 0) return
+  if (!originalRequest.value) return
 
-  const from = firstErrorIndex.value
+  // No selection and no mistakes to find — with an empty record that is the normal
+  // case — means correcting the whole hand from the opening lead.
+  const anchor = node.value ? node.value.index : Math.max(firstErrorIndex.value, 0)
+  const from = trickStartOf(anchor)
+
   const line = await fetchOptimalLine(originalRequest.value, from)
   if (!line || board.value !== b) return
 
@@ -515,13 +587,19 @@ async function showCorrectedLine() {
   }
 }
 
-/** Take the hand over from a point and play it on yourself. */
+/**
+ * Take the hand over from a point and play it on yourself.
+ *
+ * Guarded on the contract rather than on a play record: a deal with a contract and
+ * no cards played is the case most worth playing yourself, and requiring a record
+ * refused it outright.
+ */
 function startFreePlay(from = node.value?.index ?? 0) {
   const b = board.value
-  if (!b?.plays?.length) return
+  if (!b?.contract || !b.leader) return
   node.value = null
   freePlay.value = true
-  draft.value = { from, plays: b.plays.slice(0, from), source: 'free', result: null }
+  draft.value = { from, plays: (b.plays || []).slice(0, from), source: 'free', result: null }
 }
 
 /** Add a card to the line being composed. */
@@ -641,13 +719,21 @@ watch(boardIndex, loadBoard)
       -->
       <section v-if="originalRequest" class="modes" aria-label="Explore the hand">
         <button
-          v-if="firstErrorIndex >= 0"
           type="button"
           class="mode-btn"
           :class="{ active: draft?.source === 'corrected' }"
+          :title="
+            hasPlayRecord
+              ? `Keep every trick before ${correctFromTrick}, then play it out perfectly from there`
+              : 'Play the whole hand out double-dummy from the opening lead'
+          "
           @click="showCorrectedLine"
         >
-          Show the corrected line
+          {{
+            hasPlayRecord
+              ? `Correct it from trick ${correctFromTrick}`
+              : 'Show the double-dummy line'
+          }}
         </button>
         <button
           type="button"
@@ -656,7 +742,7 @@ watch(boardIndex, loadBoard)
           :title="
             node
               ? `Take over from trick ${trickNumberOf(node.index)} and play it yourself`
-              : 'Take the hand over from the start and play it yourself'
+              : 'Play the hand yourself from the opening lead'
           "
           @click="startFreePlay()"
         >
@@ -679,10 +765,14 @@ watch(boardIndex, loadBoard)
         </template>
 
         <span v-if="draft" class="mode-status">
-          <template v-if="draft.source === 'corrected'">
+          <template v-if="draft.source === 'corrected' && hasPlayRecord">
             Corrected from trick {{ trickNumberOf(draft.from) }} —
             <strong>{{ draft.result }} tricks</strong> instead of
             {{ trickTotalFrom(contractSummary?.ddTricks, originalSummary) }}
+          </template>
+          <template v-else-if="draft.source === 'corrected'">
+            <!-- Nothing was played, so there is no "instead of" to give. -->
+            Double-dummy line — <strong>{{ draft.result }} tricks</strong>
           </template>
           <template v-else-if="turn">
             Your line · {{ turn.seat }} to play ·
@@ -722,6 +812,7 @@ watch(boardIndex, loadBoard)
             :tricks="replayed?.tricks || []"
             :selected-index="node?.index ?? -1"
             :declarer="board.declarer"
+            :verdicts="verdicts"
             @select="inspect"
           />
         </section>
@@ -785,10 +876,10 @@ watch(boardIndex, loadBoard)
             This board has a play record but no contract, so there is nothing to
             cost the cards against. The double-dummy table still applies.
           </p>
-          <p v-else-if="!board.plays?.length" class="note">
-            No play record in this board — the double-dummy table is all there is
-            to show. A LIN record or a BBO handviewer URL carries the cards
-            played.
+          <p v-else-if="!hasPlayRecord" class="note">
+            No cards were played in this board. The double-dummy table applies, and
+            you can still play the hand out yourself or watch the double-dummy line
+            — there is just nothing to compare them against.
           </p>
         </div>
       </div>

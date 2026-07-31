@@ -107,7 +107,8 @@ function loadExample() {
         spellcheck="false"
         autocapitalize="off"
         autocomplete="off"
-        placeholder="Paste a PBN board, a LIN record, or a BBO handviewer URL — or drop a file here"
+        placeholder="Paste here"
+        title="A PBN board, a LIN record, or a BBO handviewer URL — or drop a file anywhere on this panel"
         @keydown.enter="submit"
       />
       <!-- A whole file pasted or dropped: the content is not worth reading, so
@@ -162,8 +163,14 @@ function loadExample() {
   flex-wrap: wrap;
 }
 
+/*
+ * Deliberately small. Nobody types a LIN record and nobody reads one back, so the
+ * field only has to hold its own prompt — a full-width box was giving the top of
+ * the page over to a hundred characters of machine text.
+ */
 input[type='text'] {
-  flex: 1 1 320px;
+  flex: 0 0 auto;
+  width: 11ch;
   min-width: 0;
   font-family: var(--font-mono);
   font-size: 12px;
@@ -180,7 +187,7 @@ input[type='text']:focus {
 }
 
 .loaded {
-  flex: 1 1 320px;
+  flex: 0 0 auto;
   margin: 0;
   font-size: 13px;
   color: var(--text-secondary);
