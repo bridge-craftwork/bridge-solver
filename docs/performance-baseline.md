@@ -77,6 +77,35 @@ penalty is not uniform — about 1.2x on the solve but **2.1x on the verdict
 pass**, so the stage that already costs the most is also the one that degrades
 worst off the reference machine.
 
+### Corrected on ten real boards — the table dominates, not the verdicts
+
+Everything above is **one board**, and it turns out not to be representative.
+Re-measured across the ten real club boards in `fixtures/bench-boards.lin`
+(`cargo run --release --example bench_boards` in `wasm/`):
+
+| Unit | 10 real boards | The single verified board |
+|---|---:|---:|
+| `dd_table` | **64.4%** (1038 ms) | 37.5% |
+| `running_trace` | 25.0% (404 ms) | 17.4% |
+| verdicts | **10.6%** (171 ms) | 45.1% |
+
+So the claim at the top of this document — that the verdict pass costs about as
+much as everything else put together — **is true of the verified board and false
+in general.** That board is unusual: five costed errors, one of them the opening
+lead, which is the single most expensive node there is. Real boards carry nought
+to three errors, mostly later in the hand where the search is shallow, and the
+verdict pass is correspondingly cheap.
+
+Two consequences, both of which point the same way:
+
+* **The double-dummy table is the thing to attack.** At 64% it is now the
+  clear majority of the work, which strengthens rather than weakens the
+  recommendation to get it off the critical path — it is worth more than the
+  earlier figure implied, not less.
+* **Beware of tuning against a single board.** The measurement that produced the
+  original split was correct about that board and misleading about the workload.
+  The ten-board set exists so that does not happen again.
+
 ### Why a worker pool buys much less than it looks like it should
 
 The verdict pass is not evenly divisible. Search depth falls as the hand is

@@ -1,11 +1,23 @@
+import { readFileSync } from 'node:fs'
 import { fileURLToPath, URL } from 'node:url'
 import { defineConfig } from 'vite'
 import vue from '@vitejs/plugin-vue'
 
 const entry = (name) => fileURLToPath(new URL(name, import.meta.url))
 
+// Read rather than imported: a JSON import needs an assertion whose syntax has
+// moved twice, and this config is the one place that already does file IO.
+const pkg = JSON.parse(readFileSync(new URL('./package.json', import.meta.url), 'utf8'))
+
 export default defineConfig({
   plugins: [vue()],
+
+  // The build's own version, so a telemetry record can say which build produced
+  // it — otherwise a regression looks identical to a slow device. Inlined at
+  // build time, so nothing reads package.json at runtime.
+  define: {
+    __APP_VERSION__: JSON.stringify(pkg.version),
+  },
 
   // Served from https://<org>.github.io/bridge-solver/, so assets must be
   // referenced relatively rather than from the domain root.

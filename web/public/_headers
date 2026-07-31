@@ -1,0 +1,35 @@
+# Cloudflare Pages response headers.
+#
+# Vite copies everything in `web/public/` into the build output verbatim, so
+# this file ends up at the root of the deploy where Pages looks for it.
+#
+# Deliberately no Content-Security-Policy here. Each page already carries its
+# own stricter one in a `<meta http-equiv>` tag — `index.html` runs
+# `default-src 'none'`, and `gallery.html` additionally needs
+# `script-src 'unsafe-inline'` for its inline frame harness. When a header and a
+# meta policy are both present the browser enforces *both*, so a blanket `/*`
+# policy here could only ever intersect them further: it would add nothing to
+# the app page and would break the gallery. The per-page tags are the right
+# place for this, and they stay the single source of truth.
+
+/*
+  X-Content-Type-Options: nosniff
+  # Load-bearing, not decoration. A hand can travel in the query string
+  # (`?hand=`, `?lin=`, `?pbn=`, `?url=`), so a referrer sent to a third party
+  # would leak the deal itself — the one thing this site promises never leaves
+  # the browser. Do not relax this without re-reading how the page takes input.
+  Referrer-Policy: no-referrer
+
+# Vite content-hashes everything under `assets/` — the wasm binary, the JS
+# chunks, the CSS. A hashed name can never mean different bytes, so it is safe
+# to cache forever, and repeat visits skip the engine download entirely.
+/assets/*
+  Cache-Control: public, max-age=31536000, immutable
+
+# The entry points are not hashed, so they must be revalidated or a deploy would
+# never reach anyone still holding the old one.
+/index.html
+  Cache-Control: public, max-age=0, must-revalidate
+
+/gallery.html
+  Cache-Control: public, max-age=0, must-revalidate

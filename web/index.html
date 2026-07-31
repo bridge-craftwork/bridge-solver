@@ -16,9 +16,10 @@
 
       connect-src 'self' is the important one: it blocks fetch, XMLHttpRequest,
       WebSocket, EventSource and navigator.sendBeacon to every origin except the
-      one this page was served from. 'self' rather than 'none' only because the
-      WebAssembly module is itself fetched from here; the origin is GitHub Pages,
-      which serves static files and has nothing that could receive an upload.
+      one this page was served from. 'self' rather than 'none' because two things
+      travel to that origin: the WebAssembly module, fetched when the page loads,
+      and the anonymous usage beacon in lib/telemetry.js. Neither carries anything
+      derived from the hand, and the deal itself is never sent anywhere.
 
       'wasm-unsafe-eval' in script-src is required to instantiate WebAssembly at
       all. Despite the name it does not enable eval() — it permits compiling a

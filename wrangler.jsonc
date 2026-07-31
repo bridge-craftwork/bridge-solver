@@ -1,0 +1,37 @@
+// Cloudflare Pages configuration.
+//
+// The site is a static build plus two Pages Functions: `/t` takes the telemetry
+// beacon, and `/api/stats` serves the aggregate JSON the public stats page
+// reads. Everything the deploy needs lives here rather than in dashboard
+// settings, so a change to the hosting is a reviewable diff like any other.
+//
+// Deploy with `npx wrangler pages deploy` after `npm --prefix web run build`.
+{
+  "name": "bridge-solver",
+  "compatibility_date": "2026-07-31",
+
+  // Vite writes here, and it is what `_headers` and `_redirects` are copied
+  // into (they live in `web/public/`, which Vite copies verbatim).
+  "pages_build_output_dir": "web/dist",
+
+  // Where the daily aggregate lands. The stats page reads this rather than
+  // querying Analytics Engine directly: the SQL API needs an account token that
+  // must not reach the browser, and a cached blob also makes the page immune to
+  // a traffic spike.
+  "kv_namespaces": [
+    {
+      "binding": "SOLVER_STATS",
+      "id": "b48796607e574d4cb345d0c2e99afda3"
+    }
+  ],
+
+  // The telemetry sink. Writing a data point needs only this binding; *reading*
+  // it back needs an account-level API token, which is why the aggregation runs
+  // as a scheduled worker with its own secret rather than from here.
+  "analytics_engine_datasets": [
+    {
+      "binding": "SOLVER",
+      "dataset": "solver_events"
+    }
+  ]
+}

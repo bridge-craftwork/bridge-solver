@@ -1,0 +1,17 @@
+{
+  "version": "bench-v2",
+  "source": "fixtures/bench-boards.lin — 10 real boards, names anonymised",
+  "note": "ms figures are a native release build on the reference machine, NOT the browser; treat them as a ranking. ddtricks is seat-major N,S,E,W over strains NT,S,H,D,C.",
+  "boards": [
+    { "board": 1, "cards": 52, "contract": "3HX", "ddtricks": "69668696696377373773", "tableMs": 54.3, "traceMs": 27.1, "verdictMs": 1.8, "errorsByPlayer": {"Player B": 1, "Player C": 1} },
+    { "board": 2, "cards": 40, "contract": "1H", "ddtricks": "baa99baa992332423334", "tableMs": 68.5, "traceMs": 13.9, "verdictMs": 1.6, "errorsByPlayer": {"Player A": 1} },
+    { "board": 3, "cards": 52, "contract": "2N", "ddtricks": "56684676947664976649", "tableMs": 207.4, "traceMs": 73.0, "verdictMs": 13.7, "errorsByPlayer": {"Player B": 1, "Player C": 1} },
+    { "board": 4, "cards": 52, "contract": "2D", "ddtricks": "68446684467589675896", "tableMs": 90.6, "traceMs": 37.6, "verdictMs": 0.0, "errorsByPlayer": {} },
+    { "board": 5, "cards": 52, "contract": "2S", "ddtricks": "86897868975744657446", "tableMs": 157.0, "traceMs": 43.6, "verdictMs": 39.9, "errorsByPlayer": {"Player B": 1, "Player E": 2} },
+    { "board": 6, "cards": 52, "contract": "3H", "ddtricks": "46733467339759a9759a", "tableMs": 103.2, "traceMs": 74.1, "verdictMs": 33.7, "errorsByPlayer": {"Player B": 1, "Player G": 1, "~~Robot": 1} },
+    { "board": 7, "cards": 52, "contract": "3N", "ddtricks": "56574565747786977869", "tableMs": 78.7, "traceMs": 72.2, "verdictMs": 19.2, "errorsByPlayer": {"Player G": 1} },
+    { "board": 8, "cards": 37, "contract": "5CX", "ddtricks": "31118311185bcb55bcb5", "tableMs": 15.1, "traceMs": 28.2, "verdictMs": 24.1, "errorsByPlayer": {"~~Robot": 1} },
+    { "board": 9, "cards": 52, "contract": "2H", "ddtricks": "2422424224b7bb9b7bb9", "tableMs": 21.8, "traceMs": 11.3, "verdictMs": 2.5, "errorsByPlayer": {"Player B": 1, "Player H": 2} },
+    { "board": 10, "cards": 45, "contract": "3N", "ddtricks": "3861738617857c6857c6", "tableMs": 268.9, "traceMs": 23.8, "verdictMs": 33.3, "errorsByPlayer": {"Player A": 2, "Player J": 1} }
+  ]
+}
