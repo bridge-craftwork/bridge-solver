@@ -61,7 +61,17 @@ function glyph(code) {
 
     <ol class="tricks">
       <li v-for="t in grouped" :key="t.number" class="trick" :class="{ 'has-cost': t.cost > 0 }">
-        <span class="trick-no">{{ t.number }}</span>
+        <!-- Clicking the trick moves to its opening lead, so you can walk the hand
+             trick by trick without having to aim at a particular card. -->
+        <button
+          type="button"
+          class="trick-no"
+          :class="{ selected: t.entries.some((e) => e.index === selectedIndex) }"
+          :title="`Go to the start of trick ${t.number}`"
+          @click="$emit('select', t.entries[0].index)"
+        >
+          {{ t.number }}
+        </button>
         <span class="trick-cards">
           <button
             v-for="e in t.entries"
@@ -149,6 +159,33 @@ function glyph(code) {
   color: var(--text-muted);
   font-variant-numeric: tabular-nums;
   text-align: center;
+}
+
+.trick-no {
+  font: inherit;
+  font-size: 11px;
+  border: 1px solid transparent;
+  background: transparent;
+  border-radius: 3px;
+  padding: 1px 2px;
+  cursor: pointer;
+  color: var(--text-muted);
+}
+
+.trick-no:hover {
+  background: var(--focus-blue);
+  color: var(--text);
+}
+
+.trick-no.selected {
+  border-color: var(--border-strong);
+  color: var(--text);
+  font-weight: 700;
+}
+
+.trick-no:focus-visible {
+  outline: 2px solid var(--green);
+  outline-offset: 1px;
 }
 
 .trick-cards {

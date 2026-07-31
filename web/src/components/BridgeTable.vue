@@ -1,16 +1,25 @@
 <script setup>
 /**
- * The four hands in compass positions with the trick in the middle.
+ * The table: four hands in compass positions, the trick in the middle, and the
+ * four corners available to whatever the page wants to put there.
+ *
+ * The corners are the whole point of the layout. A compass leaves them empty by
+ * construction, which on a 1180-wide iPad is four sizeable holes in the middle of
+ * the screen while the summaries queue up below the fold. Filling them puts the
+ * auction, the double-dummy table, the per-player tally and the inspector all
+ * within the same glance as the cards.
+ *
+ * Corner cells hold their size whether or not they have content, which is what
+ * keeps **the hand stationary**. Before, the inspector appeared above the table
+ * and every card click shoved the hands and the trick list down the page; now it
+ * opens into a reserved box and nothing else moves.
  *
  * This owns `marksFor`, the load-bearing part of the double-dummy overlay: it
  * merges played state, current-trick state and the DD badges into the single
  * `marks` object `HandDisplay` renders from. The merge order matters and is the
- * same as Bridge-Classroom's.
- *
- * The classroom's grid arranger — 877 lines of per-region scale clamps and layout
- * ledgers for fitting a live table into arbitrary viewports — is deliberately not
- * vendored. Its legacy compass branch, which is what this is, renders the same
- * thing with the same merge and no configuration.
+ * same as Bridge-Classroom's. Its grid arranger — 877 lines of per-region scale
+ * clamps for fitting a live table into arbitrary viewports — is deliberately not
+ * vendored; this is the legacy compass branch, same merge, no configuration.
  */
 import { computed } from 'vue'
 import SeatPanel from './SeatPanel.vue'
@@ -44,15 +53,6 @@ const props = defineProps({
 
 defineEmits(['card-click'])
 
-/**
- * Merge the three mark channels for one seat.
- *
- * Order is deliberate: played first, then current-trick cards overwrite it
- * (dummy's led card should highlight rather than strike through), then the DD
- * badges merge *onto* whatever is there without setting `played` — so an error
- * badge can sit on a card that is not struck through. Keeping the strike and the
- * overlay separate is the whole reason the overlay is readable.
- */
 function marksFor(seat) {
   const cards = {}
 
@@ -60,10 +60,14 @@ function marksFor(seat) {
     cards[normalizeCardCode(code)] = { played: true }
   }
 
+  // Current-trick cards highlight rather than strike through.
   for (const code of props.currentCards?.[seat] || []) {
     cards[normalizeCardCode(code)] = { current: true }
   }
 
+  // The DD overlay merges *onto* whatever is there without setting `played`, so an
+  // error badge can sit on a card that is not struck through. Keeping the strike
+  // and the overlay separate is the whole reason the overlay is readable.
   for (const [code, mark] of Object.entries(props.cardBadges?.[seat] || {})) {
     const key = normalizeCardCode(code)
     cards[key] = { ...cards[key], ...mark }
@@ -104,6 +108,11 @@ const slots = computed(() =>
 
 <template>
   <div class="bridge-table">
+    <div class="corner corner-nw"><slot name="nw" /></div>
+    <div class="corner corner-ne"><slot name="ne" /></div>
+    <div class="corner corner-sw"><slot name="sw" /></div>
+    <div class="corner corner-se"><slot name="se" /></div>
+
     <div v-for="slot in slots" :key="slot.position" :class="`cell-${slot.position.toLowerCase()}`">
       <SeatPanel
         :seat="slot.seat"
@@ -133,9 +142,9 @@ const slots = computed(() =>
 .bridge-table {
   display: grid;
   grid-template-areas:
-    '.  n  .'
-    'w  c  e'
-    '.  s  .';
+    'nw n ne'
+    'w  c e'
+    'sw s se';
   grid-template-columns: auto auto auto;
   justify-content: center;
   align-items: start;
@@ -157,23 +166,64 @@ const slots = computed(() =>
 .cell-s {
   grid-area: s;
 }
+.corner-nw {
+  grid-area: nw;
+}
+.corner-ne {
+  grid-area: ne;
+}
+.corner-sw {
+  grid-area: sw;
+}
+.corner-se {
+  grid-area: se;
+}
 
 /*
- * Below the table's natural width the compass has to give: stack the seats in
- * reading order and drop the centre trick, which has no meaning without positions
- * around it.
+ * Corners hold their box whether filled or not. This is what makes the hand
+ * stationary: the inspector opens and closes inside a reserved space, so nothing
+ * around it reflows. Content that outgrows the box scrolls rather than pushing.
  */
-@media (max-width: 720px) {
+.corner {
+  /*
+   * A fixed box, not a minimum. The inspector goes from one line of hint text to
+   * thirteen alternatives, and if the corner grew to fit, the centred grid would
+   * slide sideways every time it opened. Content that outgrows the box scrolls.
+   */
+  width: calc(215px * var(--table-scale));
+  height: calc(200px * var(--table-scale));
+  overflow: auto;
+}
+
+/* Below the table's natural width the compass has to give: everything stacks in
+   reading order and the centre trick goes, having no meaning without positions
+   around it. */
+@media (max-width: 900px) {
   .bridge-table {
     grid-template-areas:
       'n'
       'w'
       'e'
-      's';
+      's'
+      'nw'
+      'ne'
+      'sw'
+      'se';
     grid-template-columns: minmax(0, 1fr);
   }
 
   .cell-c {
+    display: none;
+  }
+
+  .corner {
+    width: auto;
+    height: auto;
+    overflow: visible;
+  }
+
+  /* An empty corner would otherwise leave a gap in the stack. */
+  .corner:empty {
     display: none;
   }
 }

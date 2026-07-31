@@ -14,7 +14,7 @@
  * the question here is where a hand went wrong, which is answered by scanning
  * tricks rather than hunting badges across four holdings.
  */
-import { computed, ref, watch } from 'vue'
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import AuctionTable from './components/AuctionTable.vue'
 import BridgeTable from './components/BridgeTable.vue'
 import DoubleDummyTable from './components/DoubleDummyTable.vue'
@@ -34,6 +34,8 @@ import {
   timed,
 } from './lib/solver.js'
 import { suitVerdict } from './lib/errors.js'
+import { resolveInitial, save as saveSession } from './lib/session.js'
+import { TRICK_SIZE } from './lib/cardplay.js'
 import {
   remainingHands,
   replay,
@@ -57,6 +59,24 @@ const node = ref(null)
 /** Wall clock for the last solve, shown so the claim is checkable. */
 const solveMs = ref(0)
 
+/** What the URL asked for, or what was open last time. */
+const initial = resolveInitial()
+
+/** The text of the current hand, kept so it can be stored and restored. */
+const currentInput = ref('')
+
+/**
+ * Strip the page to the analysis, for embedding in another site. Set by `?embed`.
+ */
+const embed = ref(initial.options.embed)
+
+/**
+ * A fixed pixel box, set by `?width` / `?height`. Used by the gallery to preview a
+ * viewport, and by a host site that wants the analysis to sit in a known space.
+ */
+const boxWidth = ref(initial.options.width)
+const boxHeight = ref(initial.options.height)
+
 /**
  * Turn the table so declarer sits at the bottom.
  *
@@ -65,7 +85,7 @@ const solveMs = ref(0)
  * declarer moves around. Turning it only relabels which slot each hand occupies,
  * so the badges keep naming real seats and the geography is unchanged.
  */
-const declarerSouth = ref(true)
+const declarerSouth = ref(initial.options.declarerSouth)
 
 /**
  * `'card'` or `'suit'` per costed play index: whether a playable card existed in
@@ -193,6 +213,7 @@ const contractSummary = computed(() => {
 })
 
 async function analyse(text) {
+  currentInput.value = text
   error.value = ''
   problems.value = []
   node.value = null
@@ -218,6 +239,59 @@ async function analyse(text) {
     busy.value = false
   }
 }
+
+/**
+ * Remember the hand and the options, so coming back resumes where you left off.
+ *
+ * Only once a hand has actually parsed: storing a paste that failed would greet
+ * you with the same error next time.
+ */
+watch([currentInput, declarerSouth], () => {
+  if (boards.value.length && currentInput.value.trim()) {
+    saveSession(currentInput.value, { declarerSouth: declarerSouth.value })
+  }
+})
+
+/**
+ * Walk the play with the keyboard.
+ *
+ * Up and down move a whole trick, keeping the position within it, so you can
+ * follow one seat down the hand. Left and right move a single card and cross trick
+ * boundaries, so the whole record is one continuous sequence. Nothing is selected
+ * yet means starting at the opening lead.
+ */
+function onKeydown(event) {
+  if (event.metaKey || event.ctrlKey || event.altKey) return
+  // Never steal keys from the paste box or any other field.
+  const tag = event.target?.tagName
+  if (tag === 'INPUT' || tag === 'TEXTAREA' || event.target?.isContentEditable) return
+
+  const step = {
+    ArrowDown: TRICK_SIZE,
+    ArrowUp: -TRICK_SIZE,
+    ArrowRight: 1,
+    ArrowLeft: -1,
+  }[event.key]
+  if (step === undefined) return
+
+  const total = board.value?.plays?.length || 0
+  if (!total || !request.value) return
+
+  event.preventDefault()
+
+  const from = node.value ? node.value.index : null
+  const next = from === null ? 0 : from + step
+  if (next < 0 || next >= total) return
+  inspect(next, false)
+}
+
+onMounted(() => {
+  window.addEventListener('keydown', onKeydown)
+  // A hand from the URL, or the one open last time.
+  if (initial.hand) analyse(initial.hand)
+})
+
+onUnmounted(() => window.removeEventListener('keydown', onKeydown))
 
 /** Solve the current board: the table always, the trace when there is play. */
 async function loadBoard() {
@@ -267,10 +341,16 @@ async function loadVerdicts(b) {
   }
 }
 
-async function inspect(index) {
+/**
+ * Open the analysis at one play index.
+ *
+ * `toggle` closes it when the same index is already open, which is what a click on
+ * it should do. Keyboard movement passes `false`: arrowing onto the current card
+ * should stay there rather than dismiss the panel.
+ */
+async function inspect(index, toggle = true) {
   if (!request.value) return
-  // Clicking the open node again closes it.
-  if (node.value?.index === index) {
+  if (toggle && node.value?.index === index) {
     node.value = null
     return
   }
@@ -309,7 +389,15 @@ watch(boardIndex, loadBoard)
 </script>
 
 <template>
-  <header class="masthead">
+  <div
+    class="app"
+    :class="{ 'is-embed': embed }"
+    :style="{
+      width: boxWidth ? boxWidth + 'px' : null,
+      height: boxHeight ? boxHeight + 'px' : null,
+    }"
+  >
+  <header v-if="!embed" class="masthead">
     <div class="wrap">
       <h1>Bridge double-dummy analysis</h1>
       <p class="tagline">
@@ -320,7 +408,13 @@ watch(boardIndex, loadBoard)
   </header>
 
   <main class="wrap">
-    <InputPanel :busy="busy" :error="error" @analyse="analyse" />
+    <InputPanel
+      v-if="!embed"
+      :busy="busy"
+      :error="error"
+      :hand="currentInput"
+      @analyse="analyse"
+    />
 
     <p v-if="problems.length" class="problems" role="note">
       {{ problems.length }} board{{ problems.length === 1 ? '' : 's' }} in that file
@@ -388,8 +482,6 @@ watch(boardIndex, loadBoard)
         @select="inspect"
       />
 
-      <NodePanel v-if="node" :node="node" @close="node = null" />
-
       <!--
         Three columns on a wide screen: the play record, the table, and the
         summaries. The trace belongs beside the hands rather than under them —
@@ -408,6 +500,13 @@ watch(boardIndex, loadBoard)
         </section>
 
         <div class="table-col">
+          <!--
+            The four corners a compass leaves empty. On a 1180-wide iPad those were
+            four holes in the middle of the screen while the summaries queued up
+            below the fold; now everything is in one glance. The inspector goes NE
+            in a reserved box, which is what keeps the hands from moving when it
+            opens.
+          -->
           <BridgeTable
             :hands="shownHands"
             :names="board.names"
@@ -419,12 +518,32 @@ watch(boardIndex, loadBoard)
             :south-seat="southSeat"
             :inspectable="!!request"
             @card-click="onCardClick"
-          />
+          >
+            <template #nw>
+              <AuctionTable :bids="board.auction" :dealer="board.dealer" />
+            </template>
 
-          <p v-if="request && !node" class="table-hint">
-            Cards that gave a trick away are tinted and badged with the trick
-            number. Click any card to see what every alternative was worth.
-          </p>
+            <template #ne>
+              <NodePanel v-if="request" :node="node" @close="node = null" />
+            </template>
+
+            <template #sw>
+              <PlayerErrors
+                v-if="trace"
+                :trace="trace.trace"
+                :declarer="board.declarer"
+                :names="board.names"
+              />
+            </template>
+
+            <template #se>
+              <DoubleDummyTable
+                :tricks="ddTable?.tricks"
+                :contract="board.contract || ''"
+                :declarer="board.declarer || ''"
+              />
+            </template>
+          </BridgeTable>
 
           <p v-if="board.plays?.length && !request" class="note">
             This board has a play record but no contract, so there is nothing to
@@ -436,34 +555,20 @@ watch(boardIndex, loadBoard)
             played.
           </p>
         </div>
-
-        <aside class="side-col">
-          <DoubleDummyTable
-            :tricks="ddTable?.tricks"
-            :contract="board.contract || ''"
-            :declarer="board.declarer || ''"
-          />
-          <PlayerErrors
-            v-if="trace"
-            :trace="trace.trace"
-            :declarer="board.declarer"
-            :names="board.names"
-          />
-          <AuctionTable :bids="board.auction" :dealer="board.dealer" />
-        </aside>
       </div>
     </template>
 
-    <VerifySection :elapsed-ms="solveMs" />
+    <VerifySection v-if="!embed" :elapsed-ms="solveMs" />
   </main>
 
-  <footer class="wrap">
+  <footer v-if="!embed" class="wrap">
     <p>
       Built on
       <a href="https://github.com/bridge-craftwork/bridge-solver">bridge-solver</a>,
       compiled to WebAssembly. Unlicense.
     </p>
   </footer>
+  </div>
 </template>
 
 <style scoped>
@@ -471,6 +576,28 @@ watch(boardIndex, loadBoard)
   max-width: var(--max-width);
   margin: 0 auto;
   padding: 0 18px;
+}
+
+/*
+ * A fixed pixel box, when `?width`/`?height` ask for one. The gallery uses it to
+ * preview a viewport; a host site uses it to give the analysis a known space.
+ * Scrolls internally rather than pushing the host page around.
+ */
+.app {
+  overflow: auto;
+}
+
+/* Embedded: no masthead, no paste box, no footer — just the analysis. */
+.is-embed {
+  padding: 10px 0;
+}
+
+.is-embed .wrap {
+  padding: 0 10px;
+}
+
+.is-embed main > * {
+  margin-bottom: 12px;
 }
 
 .masthead {
@@ -578,14 +705,13 @@ main > * {
 }
 
 /*
- * Trace | table | summaries. The outer columns size to their content and the
- * table takes the rest, so the compass stays centred in whatever is left rather
- * than drifting against one edge.
+ * Trace beside the table. The summaries used to need a third column; they now sit
+ * in the table's own corners, which is both tighter and closer to the cards.
  */
 .layout {
   display: grid;
-  grid-template-columns: minmax(320px, 350px) minmax(0, 1fr) auto;
-  gap: 26px;
+  grid-template-columns: minmax(320px, 350px) minmax(0, 1fr);
+  gap: 22px;
   align-items: start;
 }
 
@@ -604,29 +730,17 @@ main > * {
   align-items: center;
 }
 
-.side-col {
-  display: flex;
-  flex-direction: column;
-  gap: 16px;
-}
-
-/* Two columns: the trace moves under the table, the summaries stay beside it. */
-@media (max-width: 1280px) {
+/* The table with its corners needs about 900px; below that the trace moves under
+   it rather than squeezing both. */
+@media (max-width: 1240px) {
   .layout {
-    grid-template-columns: minmax(0, 1fr) auto;
+    grid-template-columns: minmax(0, 1fr);
   }
 
   .trace-col {
     grid-row: 2;
-    grid-column: 1 / -1;
     position: static;
     max-height: none;
-  }
-}
-
-@media (max-width: 720px) {
-  .layout {
-    grid-template-columns: minmax(0, 1fr);
   }
 }
 

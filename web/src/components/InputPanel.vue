@@ -8,29 +8,34 @@
  * something with nothing to say. It still takes a multi-board file; a file that
  * size arrives by drop or picker rather than by being read on screen.
  */
-import { computed, ref } from 'vue'
+import { computed, ref, watch } from 'vue'
+import { EXAMPLE } from '../lib/example.js'
 
 const props = defineProps({
   busy: { type: Boolean, default: false },
   error: { type: String, default: '' },
+  /**
+   * The hand the app is currently showing, so the field reflects it.
+   *
+   * Needed because a hand can arrive without being typed here — restored from the
+   * last visit, or handed over by the URL. An empty box beside a rendered analysis
+   * reads as though nothing were loaded, and Clear would have had nothing to clear.
+   */
+  hand: { type: String, default: '' },
 })
 
 const emit = defineEmits(['analyse'])
 
-/**
- * A real BBO board with mistakes in it, so the example shows the page working
- * rather than a clean hand with nothing to look at. Board 3 of a club game: 3NT
- * claimed after 41 cards, five costed errors on both sides.
- *
- * The opponents' names are replaced with placeholders — this page is public, and
- * the example is a permanent fixture of it rather than something a user chose to
- * paste.
- */
-const EXAMPLE =
-  'https://www.bridgebase.com/tools/handviewer.html?lin=pn%7Csoffiadan%2COpponent+1%2COrion04%2COpponent+2%7Cst%7C%7Cmd%7C1SKT43H652DA984C94%2CSA5HAK97D732CKQ72%2CSJ98HQT83DK6CJ853%2CSQ762HJ4DQJT5CAT6%7Csv%7Ce%7Crh%7C%7Cah%7CBoard+3%7Cmb%7CP%7Cmb%7C1N%7Cmb%7CP%7Cmb%7C2C%7Cmb%7CP%7Cmb%7C2H%7Cmb%7CP%7Cmb%7C3N%7Cmb%7CP%7Cmb%7CP%7Cmb%7CP%7Cpc%7CC3%7Cpc%7CCT%7Cpc%7CC4%7Cpc%7CC2%7Cpc%7CDQ%7Cpc%7CD4%7Cpc%7CD2%7Cpc%7CDK%7Cpc%7CSJ%7Cpc%7CS2%7Cpc%7CS3%7Cpc%7CSA%7Cpc%7CD3%7Cpc%7CD6%7Cpc%7CDJ%7Cpc%7CDA%7Cpc%7CC9%7Cpc%7CC7%7Cpc%7CC5%7Cpc%7CCA%7Cpc%7CDT%7Cpc%7CD8%7Cpc%7CD7%7Cpc%7CS8%7Cpc%7CHJ%7Cpc%7CH6%7Cpc%7CH7%7Cpc%7CHQ%7Cpc%7CS9%7Cpc%7CSQ%7Cpc%7CSK%7Cpc%7CS5%7Cpc%7CST%7Cpc%7CH9%7Cpc%7CC8%7Cpc%7CS6%7Cpc%7CD9%7Cpc%7CCQ%7Cpc%7CCJ%7Cpc%7CD5%7Cpc%7CH5%7Cmc%7C7%7C'
-
-const text = ref('')
+const text = ref(props.hand || '')
 const dragging = ref(false)
+
+// Follow the app when the hand changes from outside this component.
+watch(
+  () => props.hand,
+  (next) => {
+    if (next !== text.value) text.value = next || ''
+  }
+)
 const fileInput = ref(null)
 
 /** A pasted file is many lines; say so rather than showing them in one line. */

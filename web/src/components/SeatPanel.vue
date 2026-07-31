@@ -50,7 +50,13 @@ const SEAT_NAMES = { N: 'North', E: 'East', S: 'South', W: 'West' }
   padding: calc(10px * var(--table-scale));
   /* Transparent by default so framing the active seat never shifts layout. */
   border: 2px solid transparent;
-  min-width: min(calc(200px * var(--table-scale)), 100%);
+  /*
+   * Fixed, not `min-width`: a rewound hand holds fewer cards and would otherwise
+   * shrink its column, sliding the whole centred grid sideways. A freakishly long
+   * suit scrolls inside its own panel rather than moving everything else.
+   */
+  width: calc(215px * var(--table-scale));
+  max-width: 100%;
 }
 
 .seat-panel.active {

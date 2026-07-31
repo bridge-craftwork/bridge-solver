@@ -1,0 +1,250 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="robots" content="noindex, nofollow" />
+    <title>Gallery — the analysis at every viewport</title>
+
+    <!--
+      Same policy as the app, plus `frame-src 'self'` and `child-src 'self'`: this
+      page's whole job is to embed the app in iframes, which `default-src 'none'`
+      would otherwise forbid. Still no third-party origin anywhere.
+    -->
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="
+        default-src 'none';
+        script-src 'self' 'unsafe-inline';
+        style-src 'self' 'unsafe-inline';
+        img-src 'self' data:;
+        frame-src 'self';
+        child-src 'self';
+        connect-src 'self';
+        form-action 'none';
+        base-uri 'none';
+        object-src 'none';
+      "
+    />
+    <link
+      rel="icon"
+      href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>♠</text></svg>"
+    />
+    <style>
+      :root {
+        --bg: #f5f3ef;
+        --ink: #1a1a1a;
+        --muted: #6b7280;
+        --faint: #9ca3af;
+        --line: #e0ddd7;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+        background: var(--bg);
+        color: var(--ink);
+        font-family: system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+        line-height: 1.5;
+      }
+      .wrap {
+        max-width: 1700px;
+        margin: 0 auto;
+        padding: 22px 18px 40px;
+      }
+      h1 {
+        font-family: Georgia, 'Times New Roman', serif;
+        font-size: 22px;
+        margin: 0 0 4px;
+      }
+      .lede {
+        margin: 0 0 18px;
+        color: var(--muted);
+        font-size: 14px;
+        max-width: 80ch;
+      }
+      .lede a {
+        color: #167a5a;
+      }
+      .vps {
+        display: flex;
+        gap: 20px;
+        flex-wrap: wrap;
+        align-items: flex-start;
+      }
+      .vp {
+        background: #fff;
+        border: 1px solid var(--line);
+        border-radius: 10px;
+        padding: 10px;
+      }
+      /* The frame is the scaled-down box; the iframe inside renders at true CSS
+         pixel size and is transformed down, so the app lays out exactly as it
+         would at that viewport rather than at a squeezed one. */
+      .frame {
+        position: relative;
+        overflow: hidden;
+        background: #fff;
+        border: 1px solid var(--line);
+        border-radius: 4px;
+      }
+      .frame iframe {
+        position: absolute;
+        top: 0;
+        left: 0;
+        border: 0;
+        background: #fff;
+      }
+      .ph {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        height: 100%;
+        color: var(--faint);
+        font-size: 12px;
+      }
+      .cap {
+        font-size: 12px;
+        font-weight: 600;
+        margin-top: 8px;
+        display: flex;
+        flex-direction: column;
+        gap: 1px;
+      }
+      .cap span {
+        font-weight: 400;
+        color: var(--muted);
+      }
+      .cap .dim {
+        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        font-size: 11px;
+      }
+      .cap .rep {
+        font-size: 11px;
+        color: var(--faint);
+      }
+      .cap a {
+        font-size: 11px;
+        color: #167a5a;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="wrap">
+      <h1>The analysis at every viewport</h1>
+      <p class="lede">
+        The same board rendered at each of the viewports Bridge-Classroom's scene
+        gallery uses, so the two can be compared side by side. Each frame is a live
+        iframe at true pixel size, scaled down — the app lays out as it would on the
+        real device, not as it would in a squeezed box. Open any frame full size to
+        interact with it.
+      </p>
+      <div class="vps" id="vps"></div>
+    </div>
+
+    <script type="module">
+      // Bundled by Vite as a second entry point (see vite.config.js), so this
+      // resolves in the built site as well as in dev.
+      import { EXAMPLE } from './src/lib/example.js'
+
+      /*
+       * Viewports copied from Bridge-Classroom's `src/harness/viewports.json`,
+       * in its order, so this gallery and that one are directly comparable. The
+       * `represents` strings are its words.
+       */
+      const VIEWPORTS = {
+        'desktop-wide': { w: 1440, h: 900, represents: 'Full-screen desktop' },
+        'laptop-half': {
+          w: 720,
+          h: 900,
+          represents: 'Half-screen next to Zoom — primary teaching case',
+        },
+        'tablet-landscape': { w: 1180, h: 820, represents: 'iPad landscape' },
+        'tablet-portrait': { w: 820, h: 1180, represents: 'iPad portrait' },
+        phone: { w: 390, h: 844, represents: 'Phone portrait' },
+      }
+
+      // Same frame budget as the classroom's scene.html, so the thumbnails are the
+      // same size and the comparison is like for like.
+      const MAXW = 460
+      const MAXH = 620
+
+      /**
+       * The board every frame shows. Loaded through the app's own URL parameters,
+       * which is the same path a host site would embed it by — so this gallery is
+       * also the proof that embedding works.
+       */
+      const src = (vp) =>
+        './index.html?embed=1&hand=' +
+        encodeURIComponent(EXAMPLE) +
+        '&width=' +
+        vp.w +
+        '&height=' +
+        vp.h
+
+      const host = document.getElementById('vps')
+
+      for (const [name, vp] of Object.entries(VIEWPORTS)) {
+        const scale = Math.min(MAXW / vp.w, MAXH / vp.h)
+        const pw = Math.round(vp.w * scale)
+        const ph = Math.round(vp.h * scale)
+
+        const cell = document.createElement('div')
+        cell.className = 'vp'
+        cell.innerHTML =
+          '<div class="frame" style="width:' +
+          pw +
+          'px;height:' +
+          ph +
+          'px"><div class="ph">' +
+          name +
+          '</div></div>' +
+          '<div class="cap">' +
+          name +
+          '<span class="dim">' +
+          vp.w +
+          '×' +
+          vp.h +
+          '</span><span class="rep">' +
+          vp.represents +
+          '</span></div>'
+
+        const frame = cell.querySelector('.frame')
+        const link = document.createElement('a')
+        link.href = src(vp)
+        link.target = '_blank'
+        link.rel = 'noopener'
+        link.textContent = 'open full size ↗'
+        cell.querySelector('.cap').append(link)
+
+        host.append(cell)
+
+        // Mount lazily: five live copies of a WebAssembly solver is a lot to start
+        // at once, and the ones below the fold are not being looked at yet.
+        const observer = new IntersectionObserver(
+          (entries) => {
+            for (const entry of entries) {
+              if (!entry.isIntersecting) continue
+              observer.disconnect()
+              const iframe = document.createElement('iframe')
+              iframe.width = vp.w
+              iframe.height = vp.h
+              iframe.style.width = vp.w + 'px'
+              iframe.style.height = vp.h + 'px'
+              iframe.style.transform = 'scale(' + scale + ')'
+              iframe.style.transformOrigin = 'top left'
+              iframe.setAttribute('scrolling', 'no')
+              iframe.loading = 'lazy'
+              iframe.title = name + ' · ' + vp.w + '×' + vp.h
+              iframe.src = src(vp)
+              frame.replaceChildren(iframe)
+            }
+          },
+          { rootMargin: '400px' }
+        )
+        observer.observe(frame)
+      }
+    </script>
+  </body>
+</html>

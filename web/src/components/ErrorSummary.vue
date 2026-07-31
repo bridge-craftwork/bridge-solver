@@ -152,7 +152,16 @@ function signed(n) {
       </thead>
       <tbody>
         <tr v-for="row in rows" :key="row.number">
-          <th scope="row" class="col-trick">{{ row.number }}</th>
+          <th scope="row" class="col-trick">
+            <button
+              type="button"
+              class="trick-no"
+              :title="`Go to the start of trick ${row.number}`"
+              @click="$emit('select', row.entries[0].index)"
+            >
+              {{ row.number }}
+            </button>
+          </th>
 
           <td class="col-cards">
             <button
@@ -279,6 +288,28 @@ h2 {
 
 .col-cards {
   white-space: nowrap;
+}
+
+/* The trick number is a handle for the whole trick, landing on its opening lead. */
+.trick-no {
+  font: inherit;
+  border: 1px solid transparent;
+  background: transparent;
+  border-radius: 3px;
+  padding: 1px 4px;
+  cursor: pointer;
+  color: var(--text-secondary);
+  font-variant-numeric: tabular-nums;
+}
+
+.trick-no:hover {
+  background: var(--focus-blue);
+  color: var(--text);
+}
+
+.trick-no:focus-visible {
+  outline: 2px solid var(--green);
+  outline-offset: 1px;
 }
 
 .col-effect {
