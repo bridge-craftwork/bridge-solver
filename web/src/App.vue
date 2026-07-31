@@ -36,7 +36,7 @@ import {
 } from './lib/solver.js'
 import { suitVerdict, summariseCosts, trickTotalFrom } from './lib/errors.js'
 import { resolveInitial, save as saveSession } from './lib/session.js'
-import { TRICK_SIZE, nextToPlay } from './lib/cardplay.js'
+import { TRICK_SIZE, nextToPlay, trickStartOf } from './lib/cardplay.js'
 import {
   remainingHands,
   replay,
@@ -485,23 +485,41 @@ function onCardClick({ code }) {
   if (index >= 0) inspect(index)
 }
 
-/** The first card that gave a trick away, which is where a correction starts. */
+/** The trick a correction would start at, given what is selected. */
+const correctFromTrick = computed(() => {
+  const anchor = node.value ? node.value.index : firstErrorIndex.value
+  return anchor < 0 ? 1 : trickNumberOf(anchor)
+})
+
+/** The first card that gave a trick away — the default place to correct from. */
 const firstErrorIndex = computed(() => {
   const first = (originalTrace.value?.trace || []).find((e) => e.cost > 0)
   return first ? first.index : -1
 })
 
 /**
- * Replace the play from the first mistake onwards with what should have happened.
+ * Replace the play from the selected trick onwards with what should have happened.
+ *
+ * Every earlier trick is kept exactly as played — the correction starts at the trick
+ * you are looking at, so you can ask "what if it had gone right from *here*" at any
+ * point rather than only from the hand's first mistake. With nothing selected it
+ * falls back to that first mistake, which is the most likely thing to want.
+ *
+ * It always begins at a trick boundary rather than mid-trick: a correction that
+ * started on the third card of a trick would leave the two before it standing and
+ * read as a different, stranger question.
  *
  * The engine plays it out for both sides, so this is not "what a good player might
  * have tried" but the line that was actually available.
  */
 async function showCorrectedLine() {
   const b = board.value
-  if (!originalRequest.value || firstErrorIndex.value < 0) return
+  if (!originalRequest.value) return
 
-  const from = firstErrorIndex.value
+  const anchor = node.value ? node.value.index : firstErrorIndex.value
+  if (anchor < 0) return
+  const from = trickStartOf(anchor)
+
   const line = await fetchOptimalLine(originalRequest.value, from)
   if (!line || board.value !== b) return
 
@@ -641,13 +659,16 @@ watch(boardIndex, loadBoard)
       -->
       <section v-if="originalRequest" class="modes" aria-label="Explore the hand">
         <button
-          v-if="firstErrorIndex >= 0"
+          v-if="firstErrorIndex >= 0 || node"
           type="button"
           class="mode-btn"
           :class="{ active: draft?.source === 'corrected' }"
+          :title="
+            `Keep every trick before ${correctFromTrick}, then play it out perfectly from there`
+          "
           @click="showCorrectedLine"
         >
-          Show the corrected line
+          Correct it from trick {{ correctFromTrick }}
         </button>
         <button
           type="button"
@@ -722,6 +743,7 @@ watch(boardIndex, loadBoard)
             :tricks="replayed?.tricks || []"
             :selected-index="node?.index ?? -1"
             :declarer="board.declarer"
+            :verdicts="verdicts"
             @select="inspect"
           />
         </section>
