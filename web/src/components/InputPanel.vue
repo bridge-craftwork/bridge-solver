@@ -1,25 +1,42 @@
 <script setup>
 /**
- * The input: one small field for all three accepted forms, plus a file drop.
+ * The input: no field at all, just the ways a hand actually arrives.
  *
- * Deliberately a single line rather than a textarea. What you paste is a LIN
- * record or a URL — a hundred characters of pipe-delimited machine text nobody
- * reads back — so giving it six rows of prominence spent the top of the page on
- * something with nothing to say. It still takes a multi-board file; a file that
- * size arrives by drop or picker rather than by being read on screen.
+ * There was a text field here. It went, because nobody reads back what it
+ * held: a LIN record or a handviewer URL is a hundred-odd characters of
+ * pipe-delimited machine text, and showing it spent the top of the page
+ * displaying something with nothing to say. What matters is *that* a hand
+ * loaded and which one — so this shows that instead.
+ *
+ * Three ways in, and the ordering below is deliberate:
+ *
+ * 1. **Pasting anywhere on the page.** The primary path, and the one that works
+ *    everywhere. A `paste` event carries its own `clipboardData`, and per the
+ *    Clipboard API spec an event handler may read it when "the action that
+ *    triggers the event is invoked from the user-agent's own user interface" —
+ *    no permission check, unlike `navigator.clipboard.readText()`, which must
+ *    "check clipboard read permission" and rejects without it. So Ctrl/⌘-V
+ *    works in an embed, in Firefox, and with no prompt, in all the cases the
+ *    Paste button below does not.
+ * 2. **The Paste button**, for anyone reaching for a button rather than a
+ *    keystroke — and on touch, where there is no ⌘V. This one *does* go through
+ *    the async API, so it needs the `clipboard-read` Permissions Policy and is
+ *    hidden where the API is absent. Expect it to fail inside an embed.
+ * 3. **A file**, dropped anywhere on the panel or chosen.
  */
-import { computed, ref, watch } from 'vue'
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { EXAMPLE } from '../lib/example.js'
+import { INPUT_KINDS, detectKind } from '../lib/input.js'
 
 const props = defineProps({
   busy: { type: Boolean, default: false },
   error: { type: String, default: '' },
   /**
-   * The hand the app is currently showing, so the field reflects it.
+   * The hand the app is currently showing.
    *
-   * Needed because a hand can arrive without being typed here — restored from the
-   * last visit, or handed over by the URL. An empty box beside a rendered analysis
-   * reads as though nothing were loaded, and Clear would have had nothing to clear.
+   * Still needed with the field gone: a hand can arrive without passing through
+   * this component — restored from the last visit, or handed over by the URL —
+   * and the summary line has to describe that one too.
    */
   hand: { type: String, default: '' },
 })
@@ -28,23 +45,115 @@ const emit = defineEmits(['analyse'])
 
 const text = ref(props.hand || '')
 const dragging = ref(false)
+const fileInput = ref(null)
 
-// Follow the app when the hand changes from outside this component.
 watch(
   () => props.hand,
   (next) => {
     if (next !== text.value) text.value = next || ''
   }
 )
-const fileInput = ref(null)
 
-/** A pasted file is many lines; say so rather than showing them in one line. */
-const multiline = computed(() => text.value.includes('\n'))
+/**
+ * Whether this browser will let a *button* read the clipboard.
+ *
+ * `navigator.clipboard` is undefined outside a secure context, so this covers
+ * plain HTTP as well as browsers without the API. Pasting by keystroke does not
+ * depend on any of this and is always available.
+ */
+const canPaste = typeof navigator !== 'undefined' && !!navigator.clipboard?.readText
+
+/** ⌘ on a Mac, Ctrl everywhere else — the hint is useless if it names the wrong key. */
+const pasteKey =
+  typeof navigator !== 'undefined' && /Mac|iPhone|iPad/.test(navigator.userAgent) ? '⌘V' : 'Ctrl+V'
+
+/** A failure from the Paste button, shown where a parse error would be. */
+const pasteError = ref('')
+const shownError = computed(() => pasteError.value || props.error)
+
 const lineCount = computed(() => text.value.split('\n').filter((l) => l.trim()).length)
+
+/**
+ * What is loaded, in words — the field's replacement.
+ *
+ * Says the *kind* of thing rather than echoing it, which is the whole point of
+ * removing the box. Reuses `detectKind` so this can never disagree with what
+ * the parser then does with it.
+ */
+const summary = computed(() => {
+  if (!text.value.trim()) return ''
+  if (lineCount.value > 1) return `${lineCount.value} lines loaded`
+  switch (detectKind(text.value)) {
+    case INPUT_KINDS.URL:
+      return 'Handviewer link loaded'
+    case INPUT_KINDS.LIN:
+      return 'LIN record loaded'
+    case INPUT_KINDS.PBN:
+      return 'PBN board loaded'
+    case INPUT_KINDS.DEAL:
+      return 'Deal loaded'
+    default:
+      return 'Loaded'
+  }
+})
 
 function submit() {
   if (!text.value.trim() || props.busy) return
+  pasteError.value = ''
   emit('analyse', text.value)
+}
+
+/** Take some text as the new hand and analyse it straight away. */
+function accept(value) {
+  const trimmed = String(value || '').trim()
+  if (!trimmed) return false
+  text.value = trimmed
+  submit()
+  return true
+}
+
+/**
+ * Pasting anywhere on the page loads a hand.
+ *
+ * Bound to the window rather than to a control, because with no field there is
+ * nothing to aim at — the reader arrives holding a hand and presses paste, and
+ * that should simply work.
+ *
+ * Skipped when the paste is aimed at something editable, so a future input on
+ * the page is not hijacked by this one.
+ */
+function onPaste(event) {
+  if (props.busy) return
+  const target = event.target
+  if (target?.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(target?.tagName || '')) return
+
+  const pasted = (event.clipboardData || window.clipboardData)?.getData('text')
+  if (accept(pasted)) event.preventDefault()
+}
+
+onMounted(() => window.addEventListener('paste', onPaste))
+onUnmounted(() => window.removeEventListener('paste', onPaste))
+
+/**
+ * The button path, for touch and for anyone who would rather click.
+ *
+ * Every failure lands on the same advice because from here they are
+ * indistinguishable and the remedy is identical: a refused permission, an
+ * iframe without `clipboard-read`, and a dismissed prompt all throw
+ * `NotAllowedError`. Pressing the paste keystroke works in all three.
+ */
+async function pasteAndAnalyse() {
+  if (props.busy) return
+  try {
+    const clip = (await navigator.clipboard.readText()).trim()
+    if (!clip) {
+      pasteError.value = 'There is nothing on the clipboard to paste.'
+      return
+    }
+    accept(clip)
+  } catch {
+    pasteError.value = `This browser would not let the page read the clipboard — that is normal when this page is embedded in another site. Press ${pasteKey} instead, which always works.`
+  }
 }
 
 /**
@@ -58,8 +167,7 @@ async function readFiles(fileList) {
   const files = Array.from(fileList || [])
   if (!files.length) return
   const contents = await Promise.all(files.map((f) => f.text()))
-  text.value = contents.join('\n')
-  submit()
+  accept(contents.join('\n'))
 }
 
 function onDrop(event) {
@@ -75,12 +183,12 @@ function onPick(event) {
 
 function clear() {
   text.value = ''
+  pasteError.value = ''
   emit('analyse', '')
 }
 
 function loadExample() {
-  text.value = EXAMPLE
-  submit()
+  accept(EXAMPLE)
 }
 </script>
 
@@ -93,33 +201,35 @@ function loadExample() {
     @dragleave.prevent="dragging = false"
     @drop.prevent="onDrop"
   >
-    <h2 id="input-heading" class="sr-only">Paste a hand</h2>
+    <h2 id="input-heading" class="sr-only">Load a hand</h2>
 
     <div class="row">
-      <label for="input-text" class="sr-only">
-        A PBN board, a LIN record, or a BBO handviewer URL
-      </label>
-      <input
-        v-if="!multiline"
-        id="input-text"
-        v-model="text"
-        type="text"
-        spellcheck="false"
-        autocapitalize="off"
-        autocomplete="off"
-        placeholder="Paste here"
-        title="A PBN board, a LIN record, or a BBO handviewer URL — or drop a file anywhere on this panel"
-        @keydown.enter="submit"
-      />
-      <!-- A whole file pasted or dropped: the content is not worth reading, so
-           report what it is instead of scrolling it past. -->
-      <p v-else class="loaded">
-        {{ lineCount }} lines loaded
-        <button type="button" class="btn btn-quiet" @click="text = ''">edit</button>
+      <!-- With no field, this line is the only thing telling a first-time
+           reader how to get a hand in. It says the keystroke first because that
+           is the path that works everywhere. -->
+      <p class="status" :class="{ empty: !summary }" aria-live="polite">
+        <template v-if="summary">{{ summary }}</template>
+        <template v-else>Press {{ pasteKey }} to paste a hand, or drop a file here</template>
       </p>
 
-      <button type="button" class="btn btn-primary" :disabled="!text.trim() || busy" @click="submit">
-        {{ busy ? 'Analysing…' : 'Analyse' }}
+      <button
+        v-if="canPaste"
+        type="button"
+        class="btn"
+        :class="{ 'btn-primary': !text.trim() }"
+        :disabled="busy"
+        @click="pasteAndAnalyse"
+      >
+        Paste
+      </button>
+      <button
+        v-if="text.trim()"
+        type="button"
+        class="btn btn-primary"
+        :disabled="busy"
+        @click="submit"
+      >
+        {{ busy ? 'Analysing…' : 'Analyse again' }}
       </button>
       <button type="button" class="btn" @click="fileInput.click()">Choose a file</button>
       <button type="button" class="btn" @click="loadExample">Try an example</button>
@@ -136,7 +246,7 @@ function loadExample() {
       />
     </div>
 
-    <p v-if="error" class="error" role="alert">{{ error }}</p>
+    <p v-if="shownError" class="error" role="alert">{{ shownError }}</p>
   </section>
 </template>
 
@@ -163,37 +273,22 @@ function loadExample() {
   flex-wrap: wrap;
 }
 
-/*
- * Deliberately small. Nobody types a LIN record and nobody reads one back, so the
- * field only has to hold its own prompt — a full-width box was giving the top of
- * the page over to a hundred characters of machine text.
- */
-input[type='text'] {
-  flex: 0 0 auto;
-  width: 11ch;
-  min-width: 0;
-  font-family: var(--font-mono);
-  font-size: 12px;
-  padding: 7px 10px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-button);
-  background: #fcfcfb;
-  color: var(--text);
-}
-
-input[type='text']:focus {
-  outline: 2px solid var(--green);
-  outline-offset: -1px;
-}
-
-.loaded {
-  flex: 0 0 auto;
-  margin: 0;
+/* Where the field used to be, at the same weight: present enough to read as
+   the panel's subject, quiet enough not to compete with the buttons. */
+.status {
+  flex: 0 1 auto;
+  margin: 0 4px 0 0;
   font-size: 13px;
-  color: var(--text-secondary);
+  color: var(--text);
+  font-weight: 600;
 }
 
-/* One shape for all four controls: they are peers, and two of them reading as
+.status.empty {
+  color: var(--text-secondary);
+  font-weight: 400;
+}
+
+/* One shape for all the controls: they are peers, and two of them reading as
    links made them look like a different kind of thing. */
 .btn {
   font: inherit;
@@ -226,11 +321,6 @@ input[type='text']:focus {
 .btn-primary:not(:disabled):hover {
   background: var(--green-hover);
   border-color: var(--green-hover);
-}
-
-.btn-quiet {
-  padding: 2px 8px;
-  font-size: 12px;
 }
 
 .error {

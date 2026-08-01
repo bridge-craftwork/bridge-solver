@@ -12,6 +12,28 @@ import { parseLin, parseLinFile } from './solver.js'
 export const INPUT_KINDS = { PBN: 'pbn', LIN: 'lin', URL: 'url', DEAL: 'deal', UNKNOWN: 'unknown' }
 
 /**
+ * BBO's own link shortener, which is what "Export handviewer link" hands you.
+ *
+ * Worth recognising precisely because we cannot follow it, and the reason is
+ * not a technical shortcoming to be worked around later:
+ *
+ * * **Not from the browser.** The redirect comes back without an
+ *   `Access-Control-Allow-Origin` header, so script cannot read its `Location`
+ *   cross-origin — and this page's own `connect-src 'self'` forbids the request
+ *   before that even applies.
+ * * **Not from a server of ours either.** Expanding it would be a few lines in
+ *   a Function, and the expanded URL carries the deal *and the players'
+ *   usernames* (`pn|…` is in every handviewer link). Routing that through our
+ *   infrastructure would make the deal leave the device, which is the one thing
+ *   this site promises never happens, and would specifically falsify the
+ *   privacy page's claim that BBO usernames never reach us.
+ *
+ * So the short link is a dead end by design, and the useful thing to do is say
+ * so and explain the one-step way around it.
+ */
+const BBO_SHORT_LINK = /(^|\/\/|\s)tinyurl\.bridgebase\.com\//i
+
+/**
  * Classify input by its own markers rather than by guessing.
  *
  * Checked most specific first: a handviewer URL contains a `lin=` parameter, LIN
@@ -107,6 +129,14 @@ export async function parseInput(text) {
     }
 
     default:
+      if (BBO_SHORT_LINK.test(s)) {
+        throw new Error(
+          'That is a shortened BBO link, and this page cannot open it — expanding it ' +
+            'would mean sending the deal to a server, and the hand never leaves your ' +
+            'browser. Open the link in a new tab, then copy the full address from the ' +
+            'address bar and paste that here instead.'
+        )
+      }
       throw new Error(
         'That does not look like a PBN board, a LIN record or a BBO handviewer URL.'
       )

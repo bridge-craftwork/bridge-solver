@@ -84,6 +84,31 @@ describe('parseInput, PBN', () => {
     await expect(parseInput('hello there')).rejects.toThrow(/does not look like/)
   })
 
+  /*
+   * "Export handviewer link" in BBO gives a shortened link, so this is what a
+   * lot of people will paste first. It cannot be followed — see BBO_SHORT_LINK
+   * in input.js — so the least we owe them is a message that says what to do
+   * instead of the generic "that does not look like a hand".
+   */
+  it('explains what to do with a shortened BBO link', async () => {
+    for (const link of [
+      'https://tinyurl.bridgebase.com/5cyerrh5',
+      'http://tinyurl.bridgebase.com/abc123',
+      'tinyurl.bridgebase.com/abc123',
+      '  https://tinyurl.bridgebase.com/abc123  ',
+    ]) {
+      await expect(parseInput(link)).rejects.toThrow(/copy the full address/)
+    }
+  })
+
+  it('still reads the expanded handviewer URL that link resolves to', async () => {
+    // The `lin=` parameter is what makes it recognisable, so the expanded form
+    // takes the URL path rather than falling through to the short-link message.
+    const expanded =
+      'https://www.bridgebase.com/tools/handviewer.html?v3b=web&lin=pn%7Ca%2Cb%2Cc%2Cd%7C'
+    expect(detectKind(expanded)).toBe(INPUT_KINDS.URL)
+  })
+
   it('says what is wrong with a PBN carrying no deal', async () => {
     await expect(parseInput('[Event "Nothing here"]\n[Dealer "N"]')).rejects.toThrow(/No \[Deal/)
   })
