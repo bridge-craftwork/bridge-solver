@@ -38,7 +38,7 @@ import {
 } from './lib/solver.js'
 import { slowMessage } from './lib/benchmark.js'
 import { reportLoad, reportSolve } from './lib/telemetry.js'
-import { suitVerdict, summariseCosts, trickTotalFrom } from './lib/errors.js'
+import { correctionStart, suitVerdict, summariseCosts, trickTotalFrom } from './lib/errors.js'
 import { resolveInitial, save as saveSession } from './lib/session.js'
 import { TRICK_SIZE, nextToPlay, trickStartOf } from './lib/cardplay.js'
 import {
@@ -688,11 +688,25 @@ function onCardClick({ code }) {
 /** Whether this board came with any cards played. */
 const hasPlayRecord = computed(() => (board.value?.plays?.length ?? 0) > 0)
 
-/** The trick a correction would start at, given what is selected. */
-const correctFromTrick = computed(() => {
+/**
+ * The card a correction would actually start at, given what is selected.
+ *
+ * One computed rather than two, because the button's label and the button's
+ * effect must not be able to disagree — this is the value both read.
+ */
+const correctFromIndex = computed(() => {
   const anchor = node.value ? node.value.index : Math.max(firstErrorIndex.value, 0)
-  return trickNumberOf(anchor)
+  return correctionStart(originalTrace.value?.trace, trickStartOf(anchor))
 })
+
+/**
+ * The trick the correction starts in.
+ *
+ * May be *later* than the trick selected: pointing at a trick that was played
+ * well carries on to wherever the next mistake actually is, so the label says
+ * where the correction will begin rather than where the finger was.
+ */
+const correctFromTrick = computed(() => trickNumberOf(correctFromIndex.value))
 
 /** The first card that gave a trick away — the default place to correct from. */
 const firstErrorIndex = computed(() => {
@@ -701,16 +715,19 @@ const firstErrorIndex = computed(() => {
 })
 
 /**
- * Replace the play from the selected trick onwards with what should have happened.
+ * Replace the play from the first mistake at or after the selected trick with what
+ * should have happened.
  *
- * Every earlier trick is kept exactly as played — the correction starts at the trick
- * you are looking at, so you can ask "what if it had gone right from *here*" at any
- * point rather than only from the hand's first mistake. With nothing selected it
- * falls back to that first mistake, which is the most likely thing to want.
+ * The correction begins on the offending *card*, not at the top of its trick. A
+ * trick is the granularity you can point at, but it is rarely where the mistake
+ * is: starting at the trick's first card rewinds cards that were played perfectly
+ * well, and on trick one that means replacing the opening lead — which changes the
+ * hand rather than correcting it, and is not what "what should I have done here"
+ * asked. So everything before the mistake stands, including the rest of its own
+ * trick.
  *
- * It always begins at a trick boundary rather than mid-trick: a correction that
- * started on the third card of a trick would leave the two before it standing and
- * read as a different, stranger question.
+ * Pointing at a trick that was played well does not force a rewrite of it either:
+ * the real play carries on until the next mistake, and the correction starts there.
  *
  * The engine plays it out for both sides, so this is not "what a good player might
  * have tried" but the line that was actually available.
@@ -721,8 +738,7 @@ async function showCorrectedLine() {
 
   // No selection and no mistakes to find — with an empty record that is the normal
   // case — means correcting the whole hand from the opening lead.
-  const anchor = node.value ? node.value.index : Math.max(firstErrorIndex.value, 0)
-  const from = trickStartOf(anchor)
+  const from = correctFromIndex.value
 
   const line = await fetchOptimalLine(originalRequest.value, from)
   if (!line || board.value !== b) return
@@ -922,7 +938,7 @@ watch(boardIndex, loadBoard)
           :class="{ active: draft?.source === 'corrected' }"
           :title="
             hasPlayRecord
-              ? `Keep every trick before ${correctFromTrick}, then play it out perfectly from there`
+              ? `Keep every card up to the first mistake in trick ${correctFromTrick}, then play it out perfectly from there`
               : 'Play the whole hand out double-dummy from the opening lead'
           "
           @click="showCorrectedLine"
@@ -964,7 +980,11 @@ watch(boardIndex, loadBoard)
 
         <span v-if="draft" class="mode-status">
           <template v-if="draft.source === 'corrected' && hasPlayRecord">
-            Corrected from trick {{ trickNumberOf(draft.from) }} —
+            <!-- The card, not just the trick: the whole point of the change is
+                 that the correction starts partway into a trick, and saying only
+                 "trick 3" leaves the reader unable to see where it took over. -->
+            Corrected from card {{ draft.from + 1 }}, trick
+            {{ trickNumberOf(draft.from) }} —
             <strong>{{ draft.result }} tricks</strong> instead of
             {{ trickTotalFrom(contractSummary?.ddTricks, originalSummary) }}
           </template>

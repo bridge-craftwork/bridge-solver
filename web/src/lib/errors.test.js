@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   blameFor,
+  correctionStart,
   dummyOf,
   isDeclaringSide,
   signedEffect,
@@ -156,5 +157,74 @@ describe('suitVerdict', () => {
       ],
     }
     expect(suitVerdict(node)).toBe('suit')
+  })
+})
+
+describe('correctionStart', () => {
+  /*
+   * The reported case: the mistake was the *fourth* card of trick one, and
+   * correcting from the trick boundary replaced the opening lead — which changes
+   * the hand rather than correcting it. The lead and the two cards after it were
+   * all fine and must stand.
+   */
+  const trace = [
+    { index: 0, cost: 0 },
+    { index: 1, cost: 0 },
+    { index: 2, cost: 0 },
+    { index: 3, cost: 1 }, // fourth card of trick 1
+    { index: 9, cost: 2 }, // second card of trick 3
+  ]
+
+  it('starts on the offending card, not the top of its trick', () => {
+    expect(correctionStart(trace, 0)).toBe(3)
+  })
+
+  it('keeps playing past a clean trick to the next mistake', () => {
+    // Trick 2 (indices 4–7) has nothing wrong in it, so pointing there carries
+    // on to the mistake in trick 3 rather than rewriting a well-played trick.
+    expect(correctionStart(trace, 4)).toBe(9)
+  })
+
+  it('takes a mistake that is already at the anchor', () => {
+    expect(correctionStart(trace, 3)).toBe(3)
+  })
+
+  it('returns the anchor when nothing later was a mistake', () => {
+    // Already double-dummy perfect from there, so there is nothing to correct
+    // and playing it out from the anchor reproduces the same cards.
+    expect(correctionStart(trace, 10)).toBe(10)
+  })
+
+  it('survives a missing or empty trace', () => {
+    expect(correctionStart(undefined, 4)).toBe(4)
+    expect(correctionStart([], 4)).toBe(4)
+  })
+
+  it('ignores entries that cost nothing', () => {
+    expect(correctionStart([{ index: 2, cost: 0 }], 0)).toBe(0)
+  })
+
+  /*
+   * A trace is not promised in play order — TRACE above is deliberately not —
+   * so this must take the earliest qualifying card rather than whichever the
+   * engine happened to list first. Getting this wrong corrects from a later
+   * mistake and silently leaves the real one in the line.
+   */
+  it('takes the earliest mistake even when the trace is out of order', () => {
+    const jumbled = [
+      { index: 26, cost: 1 },
+      { index: 3, cost: 1 },
+      { index: 9, cost: 2 },
+    ]
+    expect(correctionStart(jumbled, 0)).toBe(3)
+    expect(correctionStart(jumbled, 4)).toBe(9)
+    expect(correctionStart(jumbled, 10)).toBe(26)
+  })
+
+  it('works against the real board fixture', () => {
+    // North ♣3 at index 0, then East ♦Q at 4, South ♣9 at 16, East ♦10 at 20.
+    expect(correctionStart(TRACE, 0)).toBe(0)
+    expect(correctionStart(TRACE, 1)).toBe(4)
+    expect(correctionStart(TRACE, 17)).toBe(20)
   })
 })

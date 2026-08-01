@@ -75,6 +75,44 @@ export function summariseCosts(trace, declarer) {
   }
 }
 
+/**
+ * Where a correction should actually begin, given where the reader pointed.
+ *
+ * The selection this page offers is a *trick*, but a trick is rarely where the
+ * mistake is. Starting the correction at the trick's first card rewinds cards
+ * that were played perfectly well — and on trick one that means replacing the
+ * opening lead, which is not what anyone asking "what should I have done here"
+ * meant. It also quietly changes the question, because a different lead leads to
+ * a different hand.
+ *
+ * So the actual play is kept running from `fromIndex` until the first card that
+ * cost a trick, and the correction starts there. Two consequences worth stating:
+ * every card before the mistake stands, including the rest of its own trick; and
+ * pointing at a clean trick does not force a rewrite of it, it simply carries on
+ * to wherever the next mistake is.
+ *
+ * With no mistake at or after `fromIndex` there is nothing to correct — the play
+ * was already double-dummy perfect from there — so `fromIndex` is returned and
+ * the caller gets "play it out from here", which produces the same cards.
+ *
+ * The engine takes any index, not only a trick boundary: it replays the prefix
+ * into a partial trick and asks whoever is on turn. Mid-trick is a real
+ * position, so this needs no rounding.
+ */
+export function correctionStart(trace, fromIndex) {
+  // The lowest qualifying index rather than the first one encountered: a trace is
+  // not promised in play order — the fixture in this module's own tests is
+  // deliberately out of order — and taking whichever happened to be listed first
+  // would correct from the wrong card whenever it was not.
+  let earliest = null
+  for (const e of trace || []) {
+    if (e.cost > 0 && e.index >= fromIndex && (earliest === null || e.index < earliest)) {
+      earliest = e.index
+    }
+  }
+  return earliest === null ? fromIndex : earliest
+}
+
 /** Declarer's actual tricks, derived from the double-dummy result and the costs. */
 export function trickTotalFrom(contractTricks, summary) {
   if (contractTricks == null) return null
