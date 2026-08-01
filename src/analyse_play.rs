@@ -44,7 +44,7 @@
 
 use std::collections::HashMap;
 
-use crate::cards::{card_of, higher_rank, name_of, suit_of, Cards};
+use crate::cards::{card_of, higher_rank, name_of, rank_of, suit_of, Cards};
 use crate::types::{
     char_to_rank, char_to_seat, char_to_suit, is_ns, partner, seat_letter, suit_name, CLUB,
     DIAMOND, HEART, NUM_RANKS, NUM_SEATS, NUM_SUITS, SPADE,
@@ -405,10 +405,23 @@ pub fn optimal_line(input: &PlayInput, from: usize) -> Result<OptimalLine, PlayE
     let mut leader = input.leader;
     let mut ns_won = 0u8;
 
+    // Which suit each seat led most recently, and what the opening lead was.
+    // Both feed the seek order below, and both have to be gathered from the
+    // replayed prefix as well as from the cards this function goes on to choose
+    // — a correction starting at trick five still wants to know what partner led
+    // at trick one.
+    let mut opening_lead_suit: Option<usize> = None;
+    let mut last_led_suit: [Option<usize>; NUM_SEATS] = [None; NUM_SEATS];
+
     // Replay the original up to the branch point, validating as we go.
     for (k, &played) in input.plays[..from].iter().enumerate() {
         let seat = seat_to_play(&partial, leader);
         validate_play(&hands, seat, played, &partial, k)?;
+        if partial.is_empty() {
+            let suit = suit_of(played);
+            opening_lead_suit.get_or_insert(suit);
+            last_led_suit[seat] = Some(suit);
+        }
         apply_card(
             &mut hands,
             &mut partial,
@@ -423,33 +436,83 @@ pub fn optimal_line(input: &PlayInput, from: usize) -> Result<OptimalLine, PlayE
     let mut cards = Vec::new();
     let mut seats = Vec::new();
 
+    // What the deal is worth from here, in NS tricks.
+    //
+    // Solved once, because under optimal play by both sides it does not move:
+    // a card that costs nothing is exactly one that leaves this number alone,
+    // and every card chosen below is such a card. That is the same identity
+    // `running_trace` uses to price a card, read in the other direction.
+    let target_ns = solve_position_ns(&hands, &partial, leader, trump, ns_won);
+
     // From here, whoever is on turn plays the card that serves their own side best.
     while !hands.all_cards().is_empty() {
         let seat = seat_to_play(&partial, leader);
+        let leading = partial.is_empty();
         let legal = playable_cards(&hands, seat, partial.lead_suit());
+
+        // With one legal card there is no decision to price. Solving here would
+        // be asking which of one card is best.
+        let forced = legal.size() == 1;
 
         let maximising = seat == declarer || seat == partner(declarer);
         let mut best: Option<(usize, u8)> = None;
-        for card in legal.iter() {
-            let value = declaring(ns_deal_total_after(
-                &hands, &partial, seat, card, trump, ns_won,
-            ));
-            let better = match best {
-                None => true,
-                Some((_, b)) => {
-                    if maximising {
-                        value > b
-                    } else {
-                        value < b
-                    }
+
+        if !forced {
+            for card in candidate_order(
+                legal,
+                leading,
+                seat,
+                input.leader,
+                opening_lead_suit,
+                &last_led_suit,
+            ) {
+                let ns = ns_deal_total_after(&hands, &partial, seat, card, trump, ns_won);
+
+                // The first card that holds the value is the one to play, and
+                // the search stops there. Pricing the rest could only find other
+                // cards that are equally free, and choosing between those is
+                // what the seek order above already decided.
+                if ns == target_ns {
+                    best = Some((card, declaring(ns)));
+                    break;
                 }
-            };
-            if better {
-                best = Some((card, value));
+
+                // Only reachable if no card holds the value, which would mean
+                // the invariant above is wrong. Keeping the best of a bad set
+                // means such a bug degrades the line rather than losing it.
+                let value = declaring(ns);
+                let better = match best {
+                    None => true,
+                    Some((_, b)) => {
+                        if maximising {
+                            value > b
+                        } else {
+                            value < b
+                        }
+                    }
+                };
+                if better {
+                    best = Some((card, value));
+                }
             }
         }
 
-        let (card, _) = best.expect("a seat with cards has at least one legal card");
+        let card = match best {
+            Some((card, _)) => card,
+            // The forced case, and the belt-and-braces path if the loop above
+            // somehow found nothing: play the only card there is.
+            None => match legal.iter().next() {
+                Some(card) => card,
+                None => break,
+            },
+        };
+
+        if leading {
+            let suit = suit_of(card);
+            opening_lead_suit.get_or_insert(suit);
+            last_led_suit[seat] = Some(suit);
+        }
+
         cards.push(name_of(card));
         seats.push(seat_letter(seat).to_string());
         apply_card(
@@ -469,6 +532,86 @@ pub fn optimal_line(input: &PlayInput, from: usize) -> Result<OptimalLine, PlayE
         seats,
         declaring_tricks: declaring(ns_won),
     })
+}
+
+/// Which suits this seat should try first when leading, best first.
+///
+/// Returning partner's suit is the most recognisable thing a defender does, so a
+/// line that does it reads as play rather than as output. Partner's *opening*
+/// lead ranks above whatever they led since: it is the card they chose with a
+/// full hand to choose from, and is conventionally the strongest statement they
+/// make about the deal.
+///
+/// Both are `None` for a seat whose partner has never led. That includes
+/// declarer for as long as dummy has not been on lead, which is the usual case
+/// and correctly leaves declarer with no suit preference at all.
+fn preferred_lead_suits(
+    seat: usize,
+    opening_leader: usize,
+    opening_lead_suit: Option<usize>,
+    last_led_suit: &[Option<usize>; NUM_SEATS],
+) -> (Option<usize>, Option<usize>) {
+    let mate = partner(seat);
+    let opening = if mate == opening_leader {
+        opening_lead_suit
+    } else {
+        None
+    };
+    (opening, last_led_suit[mate])
+}
+
+/// The order in which to try cards — a seek order, not a tie-break.
+///
+/// The search below stops at the first card that holds the deal's value, so this
+/// ordering decides which of several equally good cards actually gets played. It
+/// is chosen so the answer looks like something a player would do:
+///
+/// * **Leading**, prefer partner's suit (opening lead first, then whatever they
+///   led most recently), and within the preference take the highest card. Top of
+///   a sequence is both the natural card and the conventional one — holding
+///   `AKQ`, all three usually cost the same, and the ace is the one a player
+///   would table.
+/// * **Following, discarding or ruffing**, take the lowest card. Winning a trick
+///   with the cheapest card that does the job, and throwing the smallest card
+///   that can be spared, is what makes a line read as deliberate rather than
+///   arbitrary. Spending an ace where a two would have done is the single most
+///   obvious tell that a machine chose the card.
+///
+/// Rank comparison is on `rank_of` rather than on the card index, so "lowest"
+/// and "highest" mean the same thing across suits — which matters when
+/// discarding, where the choice spans several suits at once.
+fn candidate_order(
+    legal: Cards,
+    leading: bool,
+    seat: usize,
+    opening_leader: usize,
+    opening_lead_suit: Option<usize>,
+    last_led_suit: &[Option<usize>; NUM_SEATS],
+) -> Vec<usize> {
+    let mut cards: Vec<usize> = legal.iter().collect();
+
+    if !leading {
+        cards.sort_by_key(|&c| rank_of(c));
+        return cards;
+    }
+
+    let (opening, recent) =
+        preferred_lead_suits(seat, opening_leader, opening_lead_suit, last_led_suit);
+
+    // A stable sort, so cards that tie on both keys keep the bitboard's own
+    // order and the result stays reproducible run to run.
+    cards.sort_by_key(|&c| {
+        let suit = Some(suit_of(c));
+        let preference = if suit == opening {
+            0
+        } else if suit == recent {
+            1
+        } else {
+            2
+        };
+        (preference, std::cmp::Reverse(rank_of(c)))
+    });
+    cards
 }
 
 fn seat_to_play(partial: &PartialTrick, leader: usize) -> usize {
@@ -1059,5 +1202,176 @@ mod tests {
         assert_ne!(k0, k1);
         assert_ne!(k0, k0_other_decl);
         assert_eq!(k0.len(), 64);
+    }
+    /// Build a hand's worth of cards for the seek-order tests.
+    fn cards_of(names: &[&str]) -> Cards {
+        let mut c = Cards::new();
+        for n in names {
+            c.add(parse_card(n).expect("valid card"));
+        }
+        c
+    }
+
+    fn names_of(cards: &[usize]) -> Vec<String> {
+        cards.iter().map(|&c| name_of(c)).collect()
+    }
+
+    #[test]
+    fn following_a_suit_seeks_the_lowest_card_first() {
+        // Spending an ace where a two would do is the clearest sign a machine
+        // picked the card, so the cheapest is always tried first.
+        let order = candidate_order(
+            cards_of(&["HA", "H2", "HQ", "H7"]),
+            false,
+            EAST,
+            WEST,
+            None,
+            &[None; NUM_SEATS],
+        );
+        assert_eq!(names_of(&order), ["H2", "H7", "HQ", "HA"]);
+    }
+
+    #[test]
+    fn discarding_seeks_the_lowest_card_across_every_suit() {
+        // A discard spans suits, so "lowest" has to mean lowest by rank rather
+        // than lowest within whichever suit the bitboard happens to reach first.
+        let order = candidate_order(
+            cards_of(&["SA", "H2", "DK", "C3"]),
+            false,
+            EAST,
+            WEST,
+            None,
+            &[None; NUM_SEATS],
+        );
+        assert_eq!(names_of(&order), ["H2", "C3", "DK", "SA"]);
+    }
+
+    #[test]
+    fn leading_without_a_partner_suit_seeks_the_highest_card() {
+        let order = candidate_order(
+            cards_of(&["S4", "HA", "D9", "CK"]),
+            true,
+            EAST,
+            WEST,
+            None,
+            &[None; NUM_SEATS],
+        );
+        assert_eq!(names_of(&order), ["HA", "CK", "D9", "S4"]);
+    }
+
+    #[test]
+    fn leading_prefers_partners_opening_lead_suit() {
+        // East is on lead and West, the partner, opened a diamond. Diamonds come
+        // first even though East holds a higher card elsewhere, and the highest
+        // diamond leads the band.
+        let order = candidate_order(
+            cards_of(&["SA", "D9", "D4", "HK"]),
+            true,
+            EAST,
+            WEST,
+            Some(DIAMOND),
+            &[None; NUM_SEATS],
+        );
+        assert_eq!(names_of(&order), ["D9", "D4", "SA", "HK"]);
+    }
+
+    #[test]
+    fn the_opening_lead_outranks_a_later_one() {
+        // Partner opened a diamond and has since led a club. The opening lead is
+        // the stronger statement, so diamonds are sought before clubs, and both
+        // before anything partner never led.
+        let mut last = [None; NUM_SEATS];
+        last[WEST] = Some(CLUB);
+        let order = candidate_order(
+            cards_of(&["SA", "D4", "CK", "H2"]),
+            true,
+            EAST,
+            WEST,
+            Some(DIAMOND),
+            &last,
+        );
+        assert_eq!(names_of(&order), ["D4", "CK", "SA", "H2"]);
+    }
+
+    #[test]
+    fn a_partner_who_never_led_gives_no_preference() {
+        // West never led, so East has nothing to return and falls back to the
+        // whole hand, highest first. Notably declarer sits here for as long as
+        // dummy has not been on lead.
+        let order = candidate_order(
+            cards_of(&["S4", "HA", "CK"]),
+            true,
+            EAST,
+            WEST,
+            None,
+            &[None; NUM_SEATS],
+        );
+        assert_eq!(names_of(&order), ["HA", "CK", "S4"]);
+    }
+
+    /// The seek order must not change what the line is worth — only which of
+    /// several equally free cards is shown. This is the guard on that.
+    #[test]
+    fn the_seek_order_leaves_the_value_alone() {
+        let inp = input(&[]);
+        let line = optimal_line(&inp, 0).expect("a line from the opening lead");
+        let expected = trace(&inp).expect("a trace").contract_tricks;
+        assert_eq!(
+            line.declaring_tricks, expected,
+            "the generated line must still be worth the double-dummy value"
+        );
+    }
+
+    /// The rules should be visible in a real line, not merely in the comparator.
+    #[test]
+    fn a_generated_line_follows_suit_with_its_cheapest_card() {
+        let inp = input(&[]);
+        let line = optimal_line(&inp, 0).expect("a line from the opening lead");
+
+        // Walk the line and check every card that followed suit was the lowest
+        // the seat could legally have played.
+        let mut hands = inp.hands;
+        let mut partial = PartialTrick::new();
+        let mut leader = inp.leader;
+        let mut ns_won = 0u8;
+
+        for name in &line.cards {
+            let card = parse_card(name).expect("the line emits real cards");
+            let seat = seat_to_play(&partial, leader);
+            let following = !partial.is_empty();
+            let legal = playable_cards(&hands, seat, partial.lead_suit());
+
+            if following && legal.size() > 1 {
+                let lowest = legal.iter().min_by_key(|&c| rank_of(c)).expect("non-empty");
+                // Only assert where the cheap card was actually free to play:
+                // a seat that must win the trick will and should go higher.
+                if rank_of(card) != rank_of(lowest) {
+                    let ns =
+                        ns_deal_total_after(&hands, &partial, seat, lowest, trump_of(&inp), ns_won);
+                    let chosen =
+                        ns_deal_total_after(&hands, &partial, seat, card, trump_of(&inp), ns_won);
+                    assert_ne!(
+                        ns,
+                        chosen,
+                        "played {name} over the cheaper {} for no gain",
+                        name_of(lowest)
+                    );
+                }
+            }
+
+            apply_card(
+                &mut hands,
+                &mut partial,
+                &mut leader,
+                &mut ns_won,
+                seat,
+                card,
+                trump_of(&inp),
+            );
+        }
+    }
+
+    fn trump_of(inp: &PlayInput) -> usize {
+        inp.trump
     }
 }
