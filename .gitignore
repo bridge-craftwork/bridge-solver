@@ -16,3 +16,10 @@ web/src/wasm/
 
 # Scratch output from driving the site in a browser locally.
 .playwright-mcp/
+
+# Local Function secrets for `wrangler pages dev` — the Analytics Engine read
+# token lives here when developing the stats page. Never committed; in
+# production it is set with `wrangler pages secret put`.
+.dev.vars
+# `wrangler pages dev` keeps its local KV and cache state here.
+.wrangler/

@@ -31,7 +31,10 @@ defineProps({
       This solve happened in your browser<span v-if="elapsedMs > 0" class="timing">
         in {{ (elapsedMs / 1000).toFixed(2) }} s</span >
     </span>
-    <a class="privacy" href="./privacy.html">Privacy</a>
+    <span class="links">
+      <a href="./stats.html">Statistics</a>
+      <a href="./privacy.html">Privacy</a>
+    </span>
   </p>
 </template>
 
@@ -56,8 +59,13 @@ defineProps({
   font-variant-numeric: tabular-nums;
 }
 
-.privacy {
+.links {
   margin-left: auto;
+  display: flex;
+  gap: 12px;
+}
+
+.links a {
   color: var(--text-muted);
   font-size: 12px;
 }

@@ -1,0 +1,307 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <!--
+      Stricter than it looks. The page needs `script-src 'self'` for stats.js —
+      which is why the logic lives in a file rather than an inline block — and
+      `connect-src 'self'` for the one fetch to /api/stats. Nothing else is
+      allowed to load or be contacted at all.
+
+      Note this is a per-page tag rather than a rule in `_headers`. A blanket
+      `/*` policy there would be enforced *alongside* each page's own, and the
+      app page runs `default-src 'none'` while the gallery needs
+      `script-src 'unsafe-inline'` — so a shared policy could only intersect
+      them further and would break the gallery. Per-page tags stay the single
+      source of truth.
+    -->
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'none'; script-src 'self'; style-src 'unsafe-inline'; connect-src 'self'; img-src 'self' data:;"
+    />
+    <!--
+      Load-bearing here for the same reason as everywhere else on this site: a
+      hand can travel in the query string, so a referrer sent anywhere would
+      leak the deal itself.
+    -->
+    <meta name="referrer" content="no-referrer" />
+    <meta name="color-scheme" content="light" />
+    <title>Statistics — Bridge double-dummy analysis</title>
+    <style>
+      /*
+       * Light only, deliberately, because the rest of the site is: privacy.html
+       * and the app both declare `color-scheme: light`, and a dashboard that
+       * flipped to dark on its own would be the one page that did.
+       *
+       * Surfaces and ink are the app's own tokens (web/src/assets/tokens.css)
+       * so this page belongs to the same site rather than looking bolted on.
+       * The two series colours are not — they come from a validated categorical
+       * palette and were checked against this page's white chart surface
+       * (worst-pair CVD ΔE 24.7, normal-vision 33.6, both clear of their
+       * floors). Do not swap them for the app's greens on aesthetic grounds
+       * without re-validating.
+       */
+      :root {
+        --bg-warm: #f5f3ef;
+        --bg-white: #ffffff;
+        --border: #e0ddd7;
+        --text: #1a1a1a;
+        --text-secondary: #52514e;
+        --text-muted: #898781;
+        --rule: #e1e0d9;
+        --axis: #c3c2b7;
+        --link: #1a5fb4;
+
+        /* Categorical slot 1 and 2. Never more than two series on one chart. */
+        --series-1: #2a78d6;
+        --series-2: #eb6834;
+        --series-1-wash: rgba(42, 120, 214, 0.1);
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        margin: 0;
+        padding: 2rem 1.25rem 4rem;
+        background: var(--bg-warm);
+        font-family: system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+        font-size: 16px;
+        line-height: 1.55;
+        color: var(--text);
+      }
+
+      .wrap {
+        max-width: 60rem;
+        margin: 0 auto;
+      }
+
+      h1 {
+        font-size: 1.6rem;
+        margin: 0 0 0.25rem;
+      }
+
+      .lede {
+        margin: 0 0 1.5rem;
+        color: var(--text-secondary);
+        max-width: 44rem;
+      }
+
+      /* A note the reader must not miss — currently that the figures still
+         include our own testing. Not an error, so not red. */
+      .caveat {
+        padding: 0.75rem 1rem;
+        margin: 0 0 1.5rem;
+        border: 1px solid var(--border);
+        border-left: 3px solid var(--series-2);
+        border-radius: 8px;
+        background: var(--bg-white);
+        font-size: 0.9rem;
+        color: var(--text-secondary);
+      }
+
+      .caveat strong {
+        color: var(--text);
+      }
+
+      /* Exactly one hero figure on the page, per the dashboard's own rules. */
+      .hero {
+        background: var(--bg-white);
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        padding: 1.25rem 1.5rem;
+        margin-bottom: 1rem;
+      }
+
+      .hero-value {
+        font-size: 3rem;
+        font-weight: 600;
+        line-height: 1.1;
+      }
+
+      .hero-label {
+        color: var(--text-secondary);
+        font-size: 0.9rem;
+      }
+
+      .tiles {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(9rem, 1fr));
+        gap: 0.75rem;
+        margin-bottom: 1.75rem;
+      }
+
+      .tile {
+        background: var(--bg-white);
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        padding: 0.8rem 1rem;
+      }
+
+      .tile-label {
+        font-size: 0.78rem;
+        color: var(--text-muted);
+        text-transform: uppercase;
+        letter-spacing: 0.03em;
+      }
+
+      .tile-value {
+        font-size: 1.5rem;
+        font-weight: 600;
+      }
+
+      .card {
+        background: var(--bg-white);
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        padding: 1.1rem 1.25rem 1.25rem;
+        margin-bottom: 1rem;
+      }
+
+      .card h2 {
+        font-size: 1.02rem;
+        margin: 0 0 0.15rem;
+      }
+
+      .card .sub {
+        margin: 0 0 0.9rem;
+        font-size: 0.86rem;
+        color: var(--text-secondary);
+      }
+
+      /* Identity never rests on colour alone: every multi-series chart carries
+         this, and the data table below it repeats the numbers outright. */
+      .legend {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 1rem;
+        margin-bottom: 0.6rem;
+        font-size: 0.84rem;
+        color: var(--text-secondary);
+      }
+
+      .legend span {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.4rem;
+      }
+
+      .key {
+        width: 12px;
+        height: 12px;
+        border-radius: 3px;
+        display: inline-block;
+      }
+
+      svg {
+        display: block;
+        width: 100%;
+        height: auto;
+        overflow: visible;
+      }
+
+      table {
+        width: 100%;
+        border-collapse: collapse;
+        font-size: 0.88rem;
+      }
+
+      th,
+      td {
+        text-align: left;
+        padding: 0.35rem 0.5rem;
+        border-bottom: 1px solid var(--rule);
+      }
+
+      td.n,
+      th.n {
+        text-align: right;
+        font-variant-numeric: tabular-nums;
+      }
+
+      thead th {
+        color: var(--text-muted);
+        font-weight: 600;
+        font-size: 0.78rem;
+        text-transform: uppercase;
+        letter-spacing: 0.03em;
+      }
+
+      details {
+        margin-top: 0.75rem;
+      }
+
+      summary {
+        cursor: pointer;
+        font-size: 0.82rem;
+        color: var(--text-muted);
+      }
+
+      .empty {
+        color: var(--text-muted);
+        font-size: 0.9rem;
+        padding: 1.25rem 0;
+        text-align: center;
+      }
+
+      /* One shared tooltip, moved to whichever mark is hovered. */
+      #tip {
+        position: fixed;
+        pointer-events: none;
+        z-index: 10;
+        background: var(--text);
+        color: #fff;
+        font-size: 0.8rem;
+        line-height: 1.35;
+        padding: 0.35rem 0.55rem;
+        border-radius: 6px;
+        opacity: 0;
+        transition: opacity 0.1s;
+        max-width: 16rem;
+      }
+
+      footer {
+        margin-top: 2.5rem;
+        padding-top: 1rem;
+        border-top: 1px solid var(--border);
+        font-size: 0.88rem;
+        color: var(--text-secondary);
+      }
+
+      a {
+        color: var(--link);
+      }
+
+      .meta {
+        font-size: 0.82rem;
+        color: var(--text-muted);
+      }
+    </style>
+  </head>
+  <body>
+    <div class="wrap">
+      <h1>Statistics</h1>
+      <p class="lede">
+        How often this tool is used, and — mostly — how fast it actually runs on real
+        devices. Everything collected is on this page: there is no identifier in any of
+        it, so these are counts of events, never of people.
+        <a href="./privacy.html">What is collected →</a>
+      </p>
+
+      <div id="root">
+        <p class="empty">Loading…</p>
+      </div>
+
+      <footer>
+        <p id="meta" class="meta"></p>
+        <p><a href="./">← Back to the analysis</a> &nbsp;·&nbsp; <a href="./privacy.html">Privacy</a></p>
+      </footer>
+    </div>
+
+    <div id="tip" role="status" aria-live="polite"></div>
+
+    <script type="module" src="./stats.js"></script>
+  </body>
+</html>

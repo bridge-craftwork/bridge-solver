@@ -14,6 +14,15 @@
   // into (they live in `web/public/`, which Vite copies verbatim).
   "pages_build_output_dir": "web/dist",
 
+  // The account whose Analytics Engine dataset `/api/stats` reads back. Not a
+  // credential — it appears in every dashboard URL — so it belongs here as a
+  // plain var rather than a secret. The credential that goes with it is
+  // `AE_TOKEN`, set with `wrangler pages secret put AE_TOKEN` and deliberately
+  // absent from this file.
+  "vars": {
+    "CF_ACCOUNT_ID": "13691335358be0d5da6e79540083d975"
+  },
+
   // Where the daily aggregate lands. The stats page reads this rather than
   // querying Analytics Engine directly: the SQL API needs an account token that
   // must not reach the browser, and a cached blob also makes the page immune to
