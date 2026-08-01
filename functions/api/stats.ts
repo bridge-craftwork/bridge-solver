@@ -96,12 +96,17 @@ type Row = Record<string, string | number | null>
  * an empty panel.
  */
 async function sql(env: Env, statement: string): Promise<Row[]> {
-  const account = env.CF_ACCOUNT_ID
+  // Trimmed because the secret is pasted at a prompt by a person, and a stray
+  // newline or space rides along more easily than you would think. It arrives
+  // as a `403 Authentication error` — the token rejected outright rather than
+  // found wanting a permission — which is an expensive thing to debug for a
+  // cause this cheap to rule out.
+  const account = env.CF_ACCOUNT_ID?.trim()
   const response = await fetch(
     `https://api.cloudflare.com/client/v4/accounts/${account}/analytics_engine/sql`,
     {
       method: 'POST',
-      headers: { Authorization: `Bearer ${env.AE_TOKEN}` },
+      headers: { Authorization: `Bearer ${env.AE_TOKEN?.trim()}` },
       body: statement,
     }
   )
