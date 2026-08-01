@@ -261,6 +261,16 @@ interface Aggregate {
   dataStart: string
   panels: Record<string, Row[] | null>
   failed: string[]
+  /**
+   * Why each failed panel failed.
+   *
+   * Naming the panel without saying what went wrong turned out to be useless
+   * the first time this broke in production: sixteen panels failed at once and
+   * the response could not distinguish a rejected credential from a query that
+   * had stopped parsing. These are the SQL API's own messages, truncated. They
+   * carry the status and its complaint, never the token.
+   */
+  errors: Record<string, string>
 }
 
 /**
@@ -276,6 +286,7 @@ async function aggregate(env: Env): Promise<Aggregate> {
 
   const panels: Record<string, Row[] | null> = {}
   const failed: string[] = []
+  const errors: Record<string, string> = {}
 
   settled.forEach((outcome, i) => {
     if (outcome.status === 'fulfilled') {
@@ -283,6 +294,7 @@ async function aggregate(env: Env): Promise<Aggregate> {
     } else {
       panels[names[i]] = null
       failed.push(names[i])
+      errors[names[i]] = String(outcome.reason?.message ?? outcome.reason).slice(0, 200)
     }
   })
 
@@ -308,6 +320,7 @@ async function aggregate(env: Env): Promise<Aggregate> {
     dataStart: DATA_START,
     panels,
     failed,
+    errors,
   }
 }
 
@@ -318,11 +331,24 @@ async function refresh(env: Env): Promise<string> {
   return blob
 }
 
+/**
+ * How long a *degraded* aggregate is held before retrying.
+ *
+ * A blob whose panels all failed is not data, it is an outage — a rejected
+ * credential, most likely. Holding it for the full TTL means that after the
+ * cause is fixed the page keeps reporting the failure for another quarter of an
+ * hour, which is exactly when someone is watching and wondering whether their
+ * fix worked. So it is retried a minute later instead.
+ */
+const DEGRADED_TTL_MS = 60 * 1000
+
 /** Whether a stored blob is old enough to warrant recomputing. */
 function isStale(blob: string): boolean {
   try {
     const parsed = JSON.parse(blob) as Aggregate
-    return Date.now() - Date.parse(parsed.generatedAt) > TTL_MS
+    const age = Date.now() - Date.parse(parsed.generatedAt)
+    const degraded = (parsed.failed?.length ?? 0) > 0
+    return age > (degraded ? DEGRADED_TTL_MS : TTL_MS)
   } catch {
     // Unparseable is worse than stale — replace it.
     return true
