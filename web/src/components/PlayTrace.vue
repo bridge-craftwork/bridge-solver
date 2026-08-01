@@ -236,6 +236,9 @@ function cellTitle(t, seat, entry) {
             :class="{ lead: t.leader === c.seat, won: t.winner === c.seat }"
             :title="cellTitle(t, c.seat, t.bySeat[c.seat])"
           >
+            <!-- Purely decorative: the cell's title already says "led", so this
+                 must not be announced a second time. -->
+            <span v-if="t.leader === c.seat" class="lead-chevron" aria-hidden="true"></span>
             <button
               v-if="t.bySeat[c.seat]"
               type="button"
@@ -354,6 +357,9 @@ thead th {
 
 .cell {
   text-align: center;
+  /* Anchors the lead chevron, which is positioned rather than laid out so it
+     costs no column width — these cells are about 70px and cannot spare any. */
+  position: relative;
 }
 
 /* The play order the fixed columns gave up, handed back as colour. The tint sits
@@ -377,6 +383,37 @@ thead th {
  */
 .cell.lead {
   box-shadow: inset 3px 0 0 #5b86b5;
+}
+
+/*
+ * The direction cue on the seat that led.
+ *
+ * A clip-path rather than the CSS border-triangle trick, which cannot produce a
+ * flat left edge to fuse against the bar — it only makes triangles whose sides
+ * are all borders of one box. This is a plain rectangle with the right-pointing
+ * third of it clipped away, so its left edge is genuinely flat and meets the bar
+ * cleanly.
+ *
+ * Absolutely positioned, so it overlays the cell's left margin and adds nothing
+ * to the column width. The chip inside is centred with roughly 20px of clearance
+ * either side, so the two do not meet.
+ *
+ * The proportions are the anti-aliasing constraint, not taste: a wide, short
+ * triangle puts the hypotenuse near horizontal, where the clip is stepped across
+ * many pixels and reads as fuzzy. Tall and narrow keeps it steep — 4.5px across
+ * 14px of height puts the edge about 33° off vertical, comfortably in the range
+ * that stays crisp. Widening this without lengthening it is what would spoil it.
+ */
+.lead-chevron {
+  position: absolute;
+  left: 3px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 4.5px;
+  height: 14px;
+  background: #5b86b5;
+  clip-path: polygon(0 0, 0 100%, 100% 50%);
+  pointer-events: none;
 }
 
 .trick-no {
@@ -504,9 +541,24 @@ thead th {
   display: inline-block;
 }
 
+/* The swatch carries the chevron too, or the legend would explain a mark the
+   table does not actually show. */
 .swatch.lead {
   background: #e8eef5;
   box-shadow: inset 3px 0 0 #5b86b5;
+  position: relative;
+}
+
+.swatch.lead::after {
+  content: '';
+  position: absolute;
+  left: 3px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 3px;
+  height: 9px;
+  background: #5b86b5;
+  clip-path: polygon(0 0, 0 100%, 100% 50%);
 }
 
 .swatch.won {
