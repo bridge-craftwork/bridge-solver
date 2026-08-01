@@ -190,6 +190,41 @@ function clear() {
 function loadExample() {
   accept(EXAMPLE)
 }
+
+/**
+ * What is currently in the field.
+ *
+ * Almost always empty: a paste is taken straight out of the event and the box
+ * blanks, so this only holds something while it is being typed by hand — a bare
+ * deal string, realistically, since nobody types a LIN record.
+ */
+const typed = ref('')
+
+/**
+ * Take a paste out of the field without ever showing it.
+ *
+ * The field exists because a touchscreen has no paste keystroke: holding a real
+ * input is the only way to raise the system Paste, and on an iPad the button
+ * above cannot stand in for it — Chrome there would not hand the page the
+ * clipboard at all. But the reason the field went away in the first place still
+ * holds, so the text is read from the event and the default insertion is
+ * prevented. Nothing is ever rendered into the box.
+ */
+function onPasteInto(event) {
+  const pasted = (event.clipboardData || window.clipboardData)?.getData('text')
+  if (!pasted?.trim()) return
+  event.preventDefault()
+  typed.value = ''
+  accept(pasted)
+}
+
+/** Enter on something typed by hand — the one case the paste path misses. */
+function submitTyped() {
+  if (!typed.value.trim()) return
+  const value = typed.value
+  typed.value = ''
+  accept(value)
+}
 </script>
 
 <template>
@@ -204,12 +239,33 @@ function loadExample() {
     <h2 id="input-heading" class="sr-only">Load a hand</h2>
 
     <div class="row">
-      <!-- With no field, this line is the only thing telling a first-time
-           reader how to get a hand in. It says the keystroke first because that
-           is the path that works everywhere. -->
+      <!--
+        A real field, because on a touch device it is the only thing that can be
+        held to raise the system Paste. It is a paste *target* rather than a
+        display, though: what lands in it is taken and the box blanks again, so
+        nobody has to look at a LIN record.
+      -->
+      <label for="input-text" class="sr-only">
+        A PBN board, a LIN record, or a BBO handviewer URL
+      </label>
+      <input
+        id="input-text"
+        v-model="typed"
+        type="text"
+        spellcheck="false"
+        autocapitalize="off"
+        autocomplete="off"
+        autocorrect="off"
+        :disabled="busy"
+        placeholder="Paste here"
+        title="Paste a hand here — hold to bring up Paste on a touchscreen"
+        @paste="onPasteInto"
+        @keydown.enter="submitTyped"
+      />
+
       <p class="status" :class="{ empty: !summary }" aria-live="polite">
         <template v-if="summary">{{ summary }}</template>
-        <template v-else>Press {{ pasteKey }} to paste a hand, or drop a file here</template>
+        <template v-else>Paste a hand here, or drop a file</template>
       </p>
 
       <button
@@ -275,6 +331,32 @@ function loadExample() {
 
 /* Where the field used to be, at the same weight: present enough to read as
    the panel's subject, quiet enough not to compete with the buttons. */
+/*
+ * Small, because it is a target rather than a display — it never holds more
+ * than a moment's worth of text. But not *too* small: it has to be comfortable
+ * to press and hold on a touchscreen to raise the system Paste, which is the
+ * whole reason it exists, so the height clears the usual 34px tap minimum even
+ * though the width does not need to.
+ */
+input[type='text'] {
+  flex: 0 0 auto;
+  width: 10ch;
+  min-width: 0;
+  min-height: 34px;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  padding: 7px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-button);
+  background: #fcfcfb;
+  color: var(--text);
+}
+
+input[type='text']:focus {
+  outline: 2px solid var(--green);
+  outline-offset: -1px;
+}
+
 .status {
   flex: 0 1 auto;
   margin: 0 4px 0 0;
