@@ -72,18 +72,32 @@ const WINDOW_DAYS = 90
 const MIN_BUCKET = 5
 
 /**
- * Ignore anything recorded before this instant.
+ * Drop the browser-automation traffic recorded before `?nolog` existed.
  *
- * Telemetry carries no identifier by design, which means our own development
- * traffic cannot be told apart from real traffic by anything except when it
- * happened. This is the lever for that. It is currently wide open, so the
- * dashboard shows every point ever collected — including the smoke tests.
+ * Automated browser testing drives the real site, so its page loads and solves
+ * were landing here alongside real ones — and skewing the timings especially,
+ * since an automated browser is slower than a person's and re-solves the same
+ * board. The client now suppresses its own record when the URL carries `?nolog`,
+ * which is the durable fix; this clause only cleans up what was recorded before
+ * that existed.
  *
- * **Set this to the moment real traffic starts** and the published figures stop
- * being a chart of our own testing. It cannot be applied retroactively by any
- * other means.
+ * It is deliberately narrow. Telemetry carries no identifier, so the only field
+ * that distinguished those runs was the browser version — the automated browser
+ * reported `Chrome 151` while the machine driving it was on `Chrome 150`. A
+ * plain start date could not be used: the two were interleaved over the same two
+ * days, so any date late enough to drop the automated runs also threw away every
+ * real one beside them.
+ *
+ * Hence version *and* date together, and the date is what keeps this from
+ * becoming a permanent lie: real traffic reaches Chrome 151 soon enough, and
+ * from the cut-off onward those visits count normally. The cut-off is just after
+ * the last automated run.
+ *
+ * Delete this once the window has aged out of Analytics Engine's three-month
+ * retention, at which point it can no longer match anything.
  */
-const DATA_START = '2000-01-01 00:00:00'
+const EXCLUDE_AUTOMATED =
+  "NOT (blob1 = 'Chrome 151' AND timestamp < toDateTime('2026-08-02 05:00:00'))"
 
 /** Rows come back from the SQL API as NDJSON under `FORMAT JSONEachRow`. */
 type Row = Record<string, string | number | null>
@@ -133,10 +147,10 @@ function num(value: string | number | null | undefined): number {
 /**
  * The window clause every query shares.
  *
- * Both halves matter: the retention window bounds the query, and `DATA_START`
- * is the only available way to exclude our own testing.
+ * Both halves matter: the retention window bounds the query, and the exclusion
+ * above removes the automation traffic that predates `?nolog`.
  */
-const WINDOW = `timestamp > NOW() - INTERVAL '${WINDOW_DAYS}' DAY AND timestamp >= toDateTime('${DATA_START}')`
+const WINDOW = `timestamp > NOW() - INTERVAL '${WINDOW_DAYS}' DAY AND ${EXCLUDE_AUTOMATED}`
 
 /** A weighted percentile. AE samples, and ignoring `_sample_interval` understates. */
 function q(quantile: number, column: string): string {
@@ -263,7 +277,7 @@ interface Aggregate {
   generatedAt: string
   windowDays: number
   minBucket: number
-  dataStart: string
+  excluded: string
   panels: Record<string, Row[] | null>
   failed: string[]
   /**
@@ -322,7 +336,7 @@ async function aggregate(env: Env): Promise<Aggregate> {
     generatedAt: new Date().toISOString(),
     windowDays: WINDOW_DAYS,
     minBucket: MIN_BUCKET,
-    dataStart: DATA_START,
+    excluded: EXCLUDE_AUTOMATED,
     panels,
     failed,
     errors,

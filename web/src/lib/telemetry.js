@@ -94,15 +94,44 @@ function common() {
 }
 
 /**
+ * Whether `?nolog` is on the URL.
+ *
+ * An opt-out for automated visits. Browser testing drives the real site, so its
+ * page loads and solves were landing in the statistics alongside real ones and
+ * skewing them — the timings especially, since an automated browser is slower
+ * than a person's and repeats the same board. Excluding it after the fact turned
+ * out to be impossible: the only distinguishing field was the browser version,
+ * which real traffic reaches soon enough, and the runs were interleaved with
+ * real ones so no cut-off date separated them either. Suppressing the record at
+ * source is the only thing that works.
+ *
+ * Deliberately a URL parameter rather than a stored setting: this site writes
+ * nothing to the device, and a flag that persisted would be exactly the kind of
+ * client-side state ADR-001 rules out. It also has to be set per visit, which
+ * makes it hard to leave switched on by accident.
+ *
+ * Any value will do, including none — `?nolog`, `?nolog=1`.
+ */
+export function suppressed(win = typeof window === 'undefined' ? null : window) {
+  if (!win) return false
+  try {
+    return new URLSearchParams(win.location.search).has('nolog')
+  } catch {
+    return false
+  }
+}
+
+/**
  * Whether to send at all.
  *
  * Off in development, because a dev server has no `/t` to receive it and a
  * console full of failed beacons trains you to ignore the console. Off when the
  * browser has no `sendBeacon`, which is the only transport that survives the tab
- * closing mid-solve.
+ * closing mid-solve. Off when `?nolog` asks for it.
  */
 function enabled() {
   if (typeof navigator === 'undefined' || typeof navigator.sendBeacon !== 'function') return false
+  if (suppressed()) return false
   return Boolean(import.meta.env?.PROD)
 }
 
@@ -150,4 +179,4 @@ export function reportSolve({ ms, cards, cold, bench, cancelled } = {}) {
 }
 
 /** Exposed for tests, which need to assert the gate rather than the transport. */
-export const __test = { enabled, common }
+export const __test = { enabled, common, suppressed }

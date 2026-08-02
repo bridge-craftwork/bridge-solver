@@ -441,25 +441,17 @@ function render(data) {
   const solves = Number(totals.solves) || 0
   const loads = Number(totals.loads) || 0
 
-  // The caveat that matters most right now. `dataStart` being wide open means
-  // these figures still contain our own smoke tests, and a reader has no way to
-  // know that unless the page says so.
-  const wideOpen = (data.dataStart || '').startsWith('2000')
-  if (wideOpen || solves < 50) {
+  // Sample size is the caveat that matters at this volume, and it has to be
+  // stated rather than left to be worked out from the bucket counts.
+  if (solves < 50) {
     const caveat = html('div', 'caveat')
     caveat.append(html('strong', null, 'Read these numbers with care. '))
     caveat.append(
       document.createTextNode(
-        wideOpen
-          ? 'No start date has been set, so development and testing traffic is included in every figure below — a meaningful share of it at this volume. '
-          : ''
-      )
-    )
-    caveat.append(
-      document.createTextNode(
         `The whole window holds ${count(solves)} ${solves === 1 ? 'analysis' : 'analyses'} and ` +
           `${count(loads)} page ${loads === 1 ? 'load' : 'loads'}, which is too few for any ` +
-          'percentile here to be stable. Bucket counts are shown throughout so you can see what each rests on.'
+          'percentile here to be stable, and some of it is still the author testing. ' +
+          'Bucket counts are shown throughout so you can see what each rests on.'
       )
     )
     root.append(caveat)

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { bucket, embedOrigin } from './telemetry.js'
+import { bucket, embedOrigin, suppressed } from './telemetry.js'
 
 describe('bucket', () => {
   /*
@@ -88,5 +88,42 @@ describe('embedOrigin', () => {
 
   it('is empty with no window at all, so it is safe under a test runner', () => {
     expect(embedOrigin(null)).toBe('')
+  })
+})
+
+describe('the nolog opt-out', () => {
+  /*
+   * Browser testing drives the real site, so without this its page loads and
+   * solves land in the public statistics beside real ones — which is exactly
+   * what happened, and it could not be undone afterwards: the only field that
+   * distinguished the automated runs was the browser version, and they were
+   * interleaved with real traffic so no cut-off date separated them either.
+   * Suppressing at source is the only thing that works, so this gate is
+   * load-bearing rather than a convenience.
+   */
+  const win = (search) => ({ location: { search } })
+
+  it('is off by default', () => {
+    expect(suppressed(win(''))).toBe(false)
+    expect(suppressed(win('?hand=abc'))).toBe(false)
+  })
+
+  it('takes the flag with or without a value', () => {
+    expect(suppressed(win('?nolog'))).toBe(true)
+    expect(suppressed(win('?nolog=1'))).toBe(true)
+    expect(suppressed(win('?nolog=0'))).toBe(true)
+  })
+
+  it('takes the flag alongside a hand, which is how testing uses it', () => {
+    expect(suppressed(win('?lin=pn%7Ca&nolog'))).toBe(true)
+  })
+
+  it('is not fooled by a parameter that merely contains the word', () => {
+    expect(suppressed(win('?nologging=1'))).toBe(false)
+    expect(suppressed(win('?x=nolog'))).toBe(false)
+  })
+
+  it('says nothing outside a browser rather than throwing', () => {
+    expect(suppressed(null)).toBe(false)
   })
 })
