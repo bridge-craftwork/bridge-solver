@@ -49,7 +49,17 @@ function family(ua: string): { browser: string; os: string } {
 
   let browser = 'other'
   if (/Edg\//.test(ua)) browser = `Edge ${major(/Edg\/(\d+)/)}`
+  else if (/EdgiOS\//.test(ua)) browser = `Edge ${major(/EdgiOS\/(\d+)/)}`
   else if (/OPR\//.test(ua)) browser = `Opera ${major(/OPR\/(\d+)/)}`
+  // On iOS every browser is Safari's engine wearing a different badge, and the
+  // badge is the only thing in the UA that differs: Chrome sends `CriOS`, Firefox
+  // `FxiOS`, Edge `EdgiOS`, and none of them send `Chrome/` or `Firefox/` at all.
+  // Checked before the desktop patterns, which they would otherwise fall past
+  // into `other` — which is exactly what happened, and it hid every iPad and
+  // iPhone behind an unlabelled bucket. Those are the slow devices this
+  // telemetry exists to measure, so losing them defeated the point.
+  else if (/CriOS\//.test(ua)) browser = `Chrome ${major(/CriOS\/(\d+)/)}`
+  else if (/FxiOS\//.test(ua)) browser = `Firefox ${major(/FxiOS\/(\d+)/)}`
   else if (/Firefox\//.test(ua)) browser = `Firefox ${major(/Firefox\/(\d+)/)}`
   else if (/Chrome\//.test(ua)) browser = `Chrome ${major(/Chrome\/(\d+)/)}`
   else if (/Safari\//.test(ua) && /Version\//.test(ua)) {
