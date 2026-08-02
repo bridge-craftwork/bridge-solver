@@ -457,15 +457,22 @@ pub fn optimal_line(input: &PlayInput, from: usize) -> Result<OptimalLine, PlayE
         let maximising = seat == declarer || seat == partner(declarer);
         let mut best: Option<(usize, u8)> = None;
 
-        if !forced {
-            for card in candidate_order(
-                legal,
-                leading,
+        let pref = if leading {
+            lead_preference(
                 seat,
+                &hands,
+                declarer,
+                trump,
                 input.leader,
                 opening_lead_suit,
                 &last_led_suit,
-            ) {
+            )
+        } else {
+            LeadPreference::default()
+        };
+
+        if !forced {
+            for card in candidate_order(legal, leading, pref) {
                 let ns = ns_deal_total_after(&hands, &partial, seat, card, trump, ns_won);
 
                 // The first card that holds the value is the one to play, and
@@ -534,30 +541,78 @@ pub fn optimal_line(input: &PlayInput, from: usize) -> Result<OptimalLine, PlayE
     })
 }
 
-/// Which suits this seat should try first when leading, best first.
+/// Which suits a seat should try first when leading, best first.
 ///
-/// Returning partner's suit is the most recognisable thing a defender does, so a
-/// line that does it reads as play rather than as output. Partner's *opening*
-/// lead ranks above whatever they led since: it is the card they chose with a
-/// full hand to choose from, and is conventionally the strongest statement they
-/// make about the deal.
+/// Empty for a seat with nothing to go on, in which case the whole hand is
+/// tried in rank order.
+#[derive(Default, Clone, Copy)]
+struct LeadPreference {
+    /// Trumps, while the declaring side still has any to draw.
+    draw_trumps: Option<usize>,
+    /// Partner's opening lead.
+    opening: Option<usize>,
+    /// Whatever partner led most recently.
+    recent: Option<usize>,
+}
+
+/// Whether either defender still holds a trump.
 ///
-/// Both are `None` for a seat whose partner has never led. That includes
-/// declarer for as long as dummy has not been on lead, which is the usual case
-/// and correctly leaves declarer with no suit preference at all.
-fn preferred_lead_suits(
+/// Double-dummy analysis sees every hand, so this is simply a fact about the
+/// position rather than an inference declarer would have to make.
+fn defenders_hold_trumps(hands: &Hands, declarer: usize, trump: usize) -> bool {
+    if trump == NOTRUMP {
+        return false;
+    }
+    (0..NUM_SEATS)
+        .filter(|&s| s != declarer && s != partner(declarer))
+        .any(|s| !hands[s].suit(trump).is_empty())
+}
+
+/// What this seat prefers to lead, given how the hand has gone.
+///
+/// **Drawing trumps outranks everything.** It is the most obvious line declarer
+/// has, and a correction that wanders off to something else while the defenders
+/// still hold trumps reads as broken even when it is double-dummy identical —
+/// which is exactly the case here, since only free cards are ever chosen. The
+/// rule applies to declarer and dummy as one side, and lapses the moment the
+/// defenders are out of trumps, because leading trumps after that is not drawing
+/// them.
+///
+/// Otherwise, returning partner's suit is the most recognisable thing a defender
+/// does. Partner's *opening* lead ranks above whatever they led since: it is the
+/// card they chose with a full hand to choose from, and is conventionally the
+/// strongest statement they make about the deal.
+///
+/// All three are `None` for a seat with nothing to go on — a defender whose
+/// partner has not led, or declarer at notrump before dummy has been on lead.
+fn lead_preference(
     seat: usize,
+    hands: &Hands,
+    declarer: usize,
+    trump: usize,
     opening_leader: usize,
     opening_lead_suit: Option<usize>,
     last_led_suit: &[Option<usize>; NUM_SEATS],
-) -> (Option<usize>, Option<usize>) {
+) -> LeadPreference {
+    let declaring_side = seat == declarer || seat == partner(declarer);
+    let draw_trumps = if declaring_side && defenders_hold_trumps(hands, declarer, trump) {
+        Some(trump)
+    } else {
+        None
+    };
+
     let mate = partner(seat);
     let opening = if mate == opening_leader {
         opening_lead_suit
     } else {
         None
     };
-    (opening, last_led_suit[mate])
+
+    LeadPreference {
+        draw_trumps,
+        opening,
+        recent: last_led_suit[mate],
+    }
 }
 
 /// The order in which to try cards — a seek order, not a tie-break.
@@ -566,11 +621,11 @@ fn preferred_lead_suits(
 /// ordering decides which of several equally good cards actually gets played. It
 /// is chosen so the answer looks like something a player would do:
 ///
-/// * **Leading**, prefer partner's suit (opening lead first, then whatever they
-///   led most recently), and within the preference take the highest card. Top of
-///   a sequence is both the natural card and the conventional one — holding
-///   `AKQ`, all three usually cost the same, and the ace is the one a player
-///   would table.
+/// * **Leading**, follow [`LeadPreference`] — trumps while there are any to
+///   draw, else partner's suit — and within the preference take the highest
+///   card. Top of a sequence is both the natural card and the conventional one:
+///   holding `AKQ`, all three usually cost the same, and the ace is the one a
+///   player would table.
 /// * **Following, discarding or ruffing**, take the lowest card. Winning a trick
 ///   with the cheapest card that does the job, and throwing the smallest card
 ///   that can be spared, is what makes a line read as deliberate rather than
@@ -580,14 +635,7 @@ fn preferred_lead_suits(
 /// Rank comparison is on `rank_of` rather than on the card index, so "lowest"
 /// and "highest" mean the same thing across suits — which matters when
 /// discarding, where the choice spans several suits at once.
-fn candidate_order(
-    legal: Cards,
-    leading: bool,
-    seat: usize,
-    opening_leader: usize,
-    opening_lead_suit: Option<usize>,
-    last_led_suit: &[Option<usize>; NUM_SEATS],
-) -> Vec<usize> {
+fn candidate_order(legal: Cards, leading: bool, pref: LeadPreference) -> Vec<usize> {
     let mut cards: Vec<usize> = legal.iter().collect();
 
     if !leading {
@@ -595,21 +643,20 @@ fn candidate_order(
         return cards;
     }
 
-    let (opening, recent) =
-        preferred_lead_suits(seat, opening_leader, opening_lead_suit, last_led_suit);
-
     // A stable sort, so cards that tie on both keys keep the bitboard's own
     // order and the result stays reproducible run to run.
     cards.sort_by_key(|&c| {
         let suit = Some(suit_of(c));
-        let preference = if suit == opening {
+        let band = if suit == pref.draw_trumps {
             0
-        } else if suit == recent {
+        } else if suit == pref.opening {
             1
-        } else {
+        } else if suit == pref.recent {
             2
+        } else {
+            3
         };
-        (preference, std::cmp::Reverse(rank_of(c)))
+        (band, std::cmp::Reverse(rank_of(c)))
     });
     cards
 }
@@ -1216,6 +1263,19 @@ mod tests {
         cards.iter().map(|&c| name_of(c)).collect()
     }
 
+    /// Build a preference the way the tests want to talk about it.
+    fn pref(
+        draw_trumps: Option<usize>,
+        opening: Option<usize>,
+        recent: Option<usize>,
+    ) -> LeadPreference {
+        LeadPreference {
+            draw_trumps,
+            opening,
+            recent,
+        }
+    }
+
     #[test]
     fn following_a_suit_seeks_the_lowest_card_first() {
         // Spending an ace where a two would do is the clearest sign a machine
@@ -1223,10 +1283,7 @@ mod tests {
         let order = candidate_order(
             cards_of(&["HA", "H2", "HQ", "H7"]),
             false,
-            EAST,
-            WEST,
-            None,
-            &[None; NUM_SEATS],
+            pref(None, None, None),
         );
         assert_eq!(names_of(&order), ["H2", "H7", "HQ", "HA"]);
     }
@@ -1238,39 +1295,29 @@ mod tests {
         let order = candidate_order(
             cards_of(&["SA", "H2", "DK", "C3"]),
             false,
-            EAST,
-            WEST,
-            None,
-            &[None; NUM_SEATS],
+            pref(None, None, None),
         );
         assert_eq!(names_of(&order), ["H2", "C3", "DK", "SA"]);
     }
 
     #[test]
-    fn leading_without_a_partner_suit_seeks_the_highest_card() {
+    fn leading_without_a_preference_seeks_the_highest_card() {
         let order = candidate_order(
             cards_of(&["S4", "HA", "D9", "CK"]),
             true,
-            EAST,
-            WEST,
-            None,
-            &[None; NUM_SEATS],
+            pref(None, None, None),
         );
         assert_eq!(names_of(&order), ["HA", "CK", "D9", "S4"]);
     }
 
     #[test]
     fn leading_prefers_partners_opening_lead_suit() {
-        // East is on lead and West, the partner, opened a diamond. Diamonds come
-        // first even though East holds a higher card elsewhere, and the highest
-        // diamond leads the band.
+        // Partner opened a diamond, so diamonds come first even though there is
+        // a higher card elsewhere, and the highest diamond leads the band.
         let order = candidate_order(
             cards_of(&["SA", "D9", "D4", "HK"]),
             true,
-            EAST,
-            WEST,
-            Some(DIAMOND),
-            &[None; NUM_SEATS],
+            pref(None, Some(DIAMOND), None),
         );
         assert_eq!(names_of(&order), ["D9", "D4", "SA", "HK"]);
     }
@@ -1278,35 +1325,64 @@ mod tests {
     #[test]
     fn the_opening_lead_outranks_a_later_one() {
         // Partner opened a diamond and has since led a club. The opening lead is
-        // the stronger statement, so diamonds are sought before clubs, and both
-        // before anything partner never led.
-        let mut last = [None; NUM_SEATS];
-        last[WEST] = Some(CLUB);
+        // the stronger statement, so diamonds are sought first, clubs next, and
+        // both before anything partner never led.
         let order = candidate_order(
             cards_of(&["SA", "D4", "CK", "H2"]),
             true,
-            EAST,
-            WEST,
-            Some(DIAMOND),
-            &last,
+            pref(None, Some(DIAMOND), Some(CLUB)),
         );
         assert_eq!(names_of(&order), ["D4", "CK", "SA", "H2"]);
     }
 
     #[test]
-    fn a_partner_who_never_led_gives_no_preference() {
-        // West never led, so East has nothing to return and falls back to the
-        // whole hand, highest first. Notably declarer sits here for as long as
-        // dummy has not been on lead.
+    fn drawing_trumps_outranks_partners_suit() {
+        // The overriding rule. Even with partner's opening suit on the table,
+        // trumps are sought first and highest — deferring the draw is the line
+        // most likely to look broken.
         let order = candidate_order(
-            cards_of(&["S4", "HA", "CK"]),
+            cards_of(&["SA", "S3", "DK", "D2", "HA"]),
             true,
-            EAST,
-            WEST,
-            None,
-            &[None; NUM_SEATS],
+            pref(Some(SPADE), Some(DIAMOND), None),
         );
-        assert_eq!(names_of(&order), ["HA", "CK", "S4"]);
+        assert_eq!(names_of(&order), ["SA", "S3", "DK", "D2", "HA"]);
+    }
+
+    #[test]
+    fn the_declaring_side_draws_trumps_only_while_the_defence_holds_any() {
+        let hands = Hands::from_pbn(DEAL).expect("valid pbn");
+        let last = [None; NUM_SEATS];
+
+        // South declares in spades; East and West still hold some.
+        let p = lead_preference(SOUTH, &hands, SOUTH, SPADE, WEST, None, &last);
+        assert_eq!(p.draw_trumps, Some(SPADE), "trumps are still out");
+
+        // Dummy is the same side and inherits the rule.
+        let p = lead_preference(NORTH, &hands, SOUTH, SPADE, WEST, None, &last);
+        assert_eq!(p.draw_trumps, Some(SPADE), "dummy draws trumps too");
+
+        // A defender never "draws" trumps.
+        let p = lead_preference(WEST, &hands, SOUTH, SPADE, WEST, None, &last);
+        assert_eq!(p.draw_trumps, None, "the defence is not drawing trumps");
+
+        // Notrump has none to draw.
+        let p = lead_preference(SOUTH, &hands, SOUTH, NOTRUMP, WEST, None, &last);
+        assert_eq!(p.draw_trumps, None, "no trump suit exists");
+    }
+
+    #[test]
+    fn the_rule_lapses_once_the_defence_is_out_of_trumps() {
+        // Every spade sits with declarer and dummy, so there is nothing left to
+        // draw and leading one would no longer be drawing trumps.
+        let drawn = "N:AKQJT98.AKQ.AKQ. .8765.8765.KQJT9 765432.JT9.JT9.A .432.432.8765432";
+        let hands = Hands::from_pbn(drawn).expect("the no-trumps-left deal must parse");
+
+        assert!(
+            !defenders_hold_trumps(&hands, SOUTH, SPADE),
+            "the fixture is wrong if the defence still has a spade"
+        );
+        let p = lead_preference(SOUTH, &hands, SOUTH, SPADE, WEST, None, &[None; NUM_SEATS]);
+        assert_eq!(p.draw_trumps, None, "nothing left to draw");
     }
 
     /// The seek order must not change what the line is worth — only which of
