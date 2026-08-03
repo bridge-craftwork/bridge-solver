@@ -36,7 +36,6 @@ import {
   runBenchmark,
   timed,
 } from './lib/solver.js'
-import { slowMessage } from './lib/benchmark.js'
 import { reportLoad, reportSolve } from './lib/telemetry.js'
 import { correctionStart, suitVerdict, summariseCosts, trickTotalFrom } from './lib/errors.js'
 import { resolveInitial, save as saveSession } from './lib/session.js'
@@ -152,9 +151,6 @@ const progress = ref(null)
  * verdict calls are queued behind the table either way.
  */
 const tablePending = ref(null)
-
-/** The pre-solve warning for a slow device, or null. */
-const slowWarning = computed(() => slowMessage(benchScore.value))
 
 /**
  * A fixed pixel box, set by `?width` / `?height`. Used by the gallery to preview a
@@ -829,18 +825,21 @@ watch(boardIndex, loadBoard)
     />
 
     <!--
-      Shown while the analysis is running, and while the page sits empty waiting
-      for a hand — but not once an analysis has finished, by which point the
-      reader has seen the wait for themselves and the note is just clutter.
+      The "this device will take a while" warning used to appear here, and is
+      withheld while its prediction is being recalibrated.
 
-      Not gated on "before the solve": a hand arriving from the URL or from
-      storage starts analysing on mount, so there is no before, and a warning
-      that only rendered while nothing was happening would never be seen in the
-      case it exists for.
+      It was wrong every time it fired, and always in the same direction: the
+      published statistics put it at 5.7x over on the largest bucket of real
+      measurements and 7.7x on the next, telling people to expect a couple of
+      seconds where they waited three tenths of one. A warning that reliably
+      overstates the wait is worse than silence — it makes a fast device look
+      slow and teaches the reader to disregard the page.
+
+      The probe still runs and its score is still reported, so the data needed to
+      fix it keeps accumulating and `/stats` keeps grading the prediction against
+      what actually happened. Restore this when that panel says the estimate is
+      worth showing. See web/src/lib/benchmark.js for why it is wrong.
     -->
-    <p v-if="slowWarning && (progress || !board)" class="slow-note" role="note">
-      {{ slowWarning }}
-    </p>
 
     <p v-if="!benchOk" class="bench-bad" role="alert">
       This browser computed a known deal incorrectly, so the analysis on this page cannot
@@ -1186,16 +1185,6 @@ main > * {
   display: block;
   font-family: var(--font-mono);
   font-size: 12px;
-}
-
-/* Same amber as .problems: a wait worth mentioning, not a failure. */
-.slow-note {
-  font-size: 13px;
-  color: #8a6d1f;
-  background: #fdf6e3;
-  border: 1px solid #eadfae;
-  border-radius: var(--radius-button);
-  padding: 8px 12px;
 }
 
 .bench-bad {

@@ -1,5 +1,45 @@
 // A device speed probe, and what to say about a slow one.
 //
+// ## The warning is currently withheld
+//
+// `slowMessage` is not rendered anywhere. The probe still runs and its score is
+// still reported, because the data to fix this is exactly what the score
+// provides — but the estimate built on it was wrong every time it fired, and
+// always in the same direction.
+//
+// Measured against real traffic on /stats, over-prediction by device score:
+//
+//     score  41   predicted 2317 ms   actual  300 ms   7.7x
+//     score  56   predicted 1696 ms   actual  300 ms   5.7x
+//     score  86   predicted 1105 ms   actual  300 ms   3.7x
+//     score 141   predicted  674 ms   actual  800 ms   0.8x
+//
+// Two faults compound, which is why it is a factor of six rather than a factor
+// of two:
+//
+// 1. **The probe is timed cold against a warm reference.** `runBenchmark` is
+//    the first wasm call the page makes, and its timer starts before the worker
+//    `postMessage`, so it includes the worker hop and pre-JIT execution.
+//    `REFERENCE_MS` below is documented as measured across *repeated* runs —
+//    steady state. Since the score is `REFERENCE_MS / ms`, an inflated `ms`
+//    deflates the score, and every device looks slower than it is.
+//
+// 2. **`expectedTotalMs` rests on a board this repo's own docs disown.** Its 950
+//    is "377 ms solve + 575 ms verdict pass", and docs/performance-baseline.md
+//    says that verdict figure is "true of the verified board and false in
+//    general" — verdicts are 10.6% of the work across ten real boards, not 45%.
+//    The ordering fix separately took time to the answer to about 138 ms.
+//
+// A deflated score dividing an inflated constant multiplies the two errors.
+//
+// There is a third possibility the numbers above hint at and do not yet settle:
+// the actual times are flat at 300 ms from score 41 to score 100, which is not
+// what a working predictor looks like. If the probe turns out to be weakly
+// correlated with analysis cost, then recalibrating the constants would fix the
+// average error and leave an estimate that still cannot tell a fast device from
+// a slow one — in which case the honest answer is to drop the warning rather
+// than tune it. That is a question for more data, and the collection continues.
+//
 // The self-calibrating estimate — elapsed so far, extrapolated over what is
 // left — is the right way to drive a progress bar, but it cannot say anything
 // *before* the first piece of work finishes. That is exactly when a warning is
