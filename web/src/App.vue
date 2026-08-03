@@ -1022,11 +1022,24 @@ watch(boardIndex, loadBoard)
         looking at what each seat held, and putting it below the fold makes that
         two glances instead of one.
       -->
-      <!-- Two columns only when the trace is really there to fill one; see the
-           `.layout` rules for what happened when that was assumed. -->
-      <div class="layout" :class="{ 'with-trace': trace }">
-        <section v-if="trace" class="trace-col" aria-label="Play record">
+      <!--
+        Two columns whenever a trace is there *or* is about to be.
+
+        Only when it is really coming, though: the rule used to be
+        unconditional while the column is not, which handed the table the
+        350px meant for the trace and pushed half the compass off the screen —
+        see the `.layout` rules.
+
+        `freePlay` is the "about to be" case, and it has to reserve the space
+        rather than wait. Taking the hand over starts with nothing played, so
+        the column would be absent for exactly as long as it takes to choose a
+        first card and then appear underneath the pointer, re-laying out the
+        whole page — including the cards being aimed at.
+      -->
+      <div class="layout" :class="{ 'with-trace': trace || freePlay }">
+        <section v-if="trace || freePlay" class="trace-col" aria-label="Play record">
           <PlayTrace
+            v-if="trace"
             :trace="trace.trace"
             :tricks="replayed?.tricks || []"
             :selected-index="node?.index ?? -1"
@@ -1034,6 +1047,12 @@ watch(boardIndex, loadBoard)
             :verdicts="verdicts"
             @select="inspect"
           />
+          <!-- Holding the column open with nothing in it reads as a rendering
+               fault, so it says what the space is for. -->
+          <p v-else class="trace-waiting">
+            <span class="trace-waiting-label">Play</span>
+            The cards you play will be listed here, trick by trick.
+          </p>
         </section>
 
         <div class="table-col">
@@ -1371,6 +1390,23 @@ main > * {
   top: 12px;
   max-height: calc(100vh - 24px);
   overflow-y: auto;
+}
+
+/* The placeholder that holds the column open before the first card is played. */
+.trace-waiting {
+  margin: 0;
+  font-size: 13px;
+  color: var(--text-muted);
+  line-height: 1.5;
+}
+
+.trace-waiting-label {
+  display: block;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: #666;
+  margin-bottom: 6px;
 }
 
 .table-col {
