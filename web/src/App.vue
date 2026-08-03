@@ -1022,7 +1022,9 @@ watch(boardIndex, loadBoard)
         looking at what each seat held, and putting it below the fold makes that
         two glances instead of one.
       -->
-      <div class="layout">
+      <!-- Two columns only when the trace is really there to fill one; see the
+           `.layout` rules for what happened when that was assumed. -->
+      <div class="layout" :class="{ 'with-trace': trace }">
         <section v-if="trace" class="trace-col" aria-label="Play record">
           <PlayTrace
             :trace="trace.trace"
@@ -1337,11 +1339,30 @@ main > * {
  * Trace beside the table. The summaries used to need a third column; they now sit
  * in the table's own corners, which is both tighter and closer to the cards.
  */
+/*
+ * One column by default, two only when there is actually a trace to put beside
+ * the table.
+ *
+ * The two-column rule used to be unconditional, and the trace column is
+ * `v-if="trace"` — so with no cards played the table dropped into the *first*
+ * track and was handed the 350px meant for the trace. The compass is a fixed
+ * 665px and `.table-col` centres it, so it overflowed 139px each side, and
+ * because centred overflow is not scrollable the left half simply could not be
+ * reached. "Play it yourself" on a fresh hand is exactly that state, which is
+ * how it was found.
+ *
+ * Defaulting to one column means the table can only ever be narrowed by a trace
+ * that is really there.
+ */
 .layout {
   display: grid;
-  grid-template-columns: minmax(320px, 350px) minmax(0, 1fr);
+  grid-template-columns: minmax(0, 1fr);
   gap: 22px;
   align-items: start;
+}
+
+.layout.with-trace {
+  grid-template-columns: minmax(320px, 350px) minmax(0, 1fr);
 }
 
 .trace-col {
@@ -1360,13 +1381,20 @@ main > * {
 }
 
 /*
- * The table with its corners measures 665px and the trace column 350px, so the two
- * fit side by side from about 1060px. The previous 1240px breakpoint collapsed them
- * on an iPad in landscape (1180px) — the one case the corner layout exists for —
- * which pushed the trace below the fold and made the page over two screens tall.
+ * The table with its corners measures 665px and the trace column 350px. With the
+ * 22px gap and the page's own 2x18px padding that needs 1073px, so the pair only
+ * genuinely fits from there — the old 1060px was about thirteen pixels short, and
+ * in that sliver the compass overflowed its column and lost its edges the same
+ * unscrollable way described above. Rounded up to 1080 for a little slack.
+ *
+ * Not raised further: the previous 1240px breakpoint collapsed the columns on an
+ * iPad in landscape (1180px), which is the one case the corner layout exists
+ * for, and that pushed the trace below the fold and made the page over two
+ * screens tall.
  */
-@media (max-width: 1060px) {
-  .layout {
+@media (max-width: 1080px) {
+  .layout,
+  .layout.with-trace {
     grid-template-columns: minmax(0, 1fr);
   }
 
