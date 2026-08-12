@@ -23,3 +23,6 @@ web/src/wasm/
 .dev.vars
 # `wrangler pages dev` keeps its local KV and cache state here.
 .wrangler/
+
+# Copyright derivation audit — local working document, not part of the project.
+derivation-audit.md
