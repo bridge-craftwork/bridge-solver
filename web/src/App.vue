@@ -1137,8 +1137,9 @@ watch(boardIndex, loadBoard)
   <footer v-if="!embed" class="wrap">
     <p>
       Built on
-      <a href="https://github.com/bridge-craftwork/bridge-solver">bridge-solver</a>,
-      compiled to WebAssembly. Unlicense.
+      <a href="https://github.com/bridge-craftwork/bridge-solver">bridge-solver</a>
+      (a Rust port of macroxue/bridge-solver),
+      compiled to WebAssembly. GPL-2.0.
     </p>
   </footer>
   </div>
