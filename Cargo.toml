@@ -1,6 +1,6 @@
 [package]
 name = "bridge-solver"
-version = "0.4.0"
+version = "0.5.0"
 edition = "2021"
 license = "GPL-2.0-only"
 description = "Bridge Double-Dummy Solver - Port of macroxue/bridge-solver"
@@ -41,6 +41,11 @@ required-features = ["cli"]
 [[example]]
 name = "bench_fixtures"
 path = "examples/bench_fixtures.rs"
+required-features = ["play-analysis"]
+
+[[example]]
+name = "time_optimal_line"
+path = "examples/time_optimal_line.rs"
 required-features = ["play-analysis"]
 
 [dependencies]

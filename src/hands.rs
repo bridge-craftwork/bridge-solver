@@ -59,6 +59,17 @@ impl Hands {
         self.hands[WEST].size()
     }
 
+    /// True only when all four seats hold a full 13-card hand.
+    ///
+    /// PBN files legitimately carry placeholder deals — BridgeComposer writes
+    /// `[Deal "N:... ... ... ..."]` for auction-only teaching boards — and those
+    /// parse successfully into empty hands. Solving one yields an all-zero
+    /// table, so callers that annotate files must skip incomplete deals rather
+    /// than record a fabricated result.
+    pub fn is_complete(&self) -> bool {
+        self.hands.iter().all(|h| h.size() == 13)
+    }
+
     /// Parse from PBN-style deal string
     /// Format: "N:AKQT3.J6.KJ42.95 652.AK42.AQ87.T4 J74.QT95.T.AK863 98.873.9653.QJ72"
     /// Order after first seat: rotates clockwise (N E S W or W N E S, etc.)
