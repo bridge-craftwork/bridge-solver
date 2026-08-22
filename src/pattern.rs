@@ -14,6 +14,12 @@ use super::types::*;
 /// Pack bits: extract bits from source where mask has 1s, compress them to low bits
 /// Example: PackBits(0b10100, 0b11100) = 0b101 (extracts bits 2,3,4 and packs to 0,1,2)
 #[inline]
+// `m & m.wrapping_neg()` is the classic isolate-lowest-set-bit idiom. Clippy
+// (since the toolchain that stabilized it) wants `m.isolate_lowest_one()`, but
+// that method is still unstable on older compilers, so adopting it would raise
+// this crate's minimum Rust version for no benefit in a hot path. `unknown_lints`
+// keeps compilers that predate the lint quiet about the allow itself.
+#[allow(unknown_lints, clippy::manual_isolate_lowest_one)]
 pub fn pack_bits(source: u64, mask: u64) -> u64 {
     #[cfg(target_feature = "bmi2")]
     {
@@ -43,6 +49,12 @@ pub fn pack_bits(source: u64, mask: u64) -> u64 {
 /// Unpack bits: scatter source bits to positions where mask has 1s
 /// Example: UnpackBits(0b101, 0b11100) = 0b10100 (scatters bits 0,1,2 to positions 2,3,4)
 #[inline]
+// `m & m.wrapping_neg()` is the classic isolate-lowest-set-bit idiom. Clippy
+// (since the toolchain that stabilized it) wants `m.isolate_lowest_one()`, but
+// that method is still unstable on older compilers, so adopting it would raise
+// this crate's minimum Rust version for no benefit in a hot path. `unknown_lints`
+// keeps compilers that predate the lint quiet about the allow itself.
+#[allow(unknown_lints, clippy::manual_isolate_lowest_one)]
 pub fn unpack_bits(source: u64, mask: u64) -> u64 {
     #[cfg(target_feature = "bmi2")]
     {
