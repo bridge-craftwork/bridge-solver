@@ -55,8 +55,16 @@ designed to be safe to run over source material:
   rather than stamped with a fabricated all-zero table.
 - **`--mark-verified`** sets bit `0x00080000` ("double-dummy data has been
   verified") in each annotated board's `[BCFlags]`, adding the tag if absent and
-  preserving every bit already there. This records provenance only — no
-  documented BCFlags bit controls whether the DD table is *displayed*, and
-  Bridge Composer does not set this bit itself when it computes a table.
+  preserving every bit already there. This records provenance only, and is not
+  needed to make the analysis appear (see below).
 - **Re-runs are no-ops.** Unchanged files are not rewritten, so mtimes do not
   churn. In-place writes go through a temporary file and a rename.
+
+Bridge Composer displays double-dummy analysis whenever the tags are present.
+There is no per-board flag to enable it: which parts appear is its report-level
+**DDA format** setting (Makeable contracts, Grid (2 rows), Grid (4 rows), Grid
+(4 rows, no par), Grid (4 rows, in diagram)). Par is included in every format
+except the last two, and "Makeable contracts" and "Grid (4 rows)" show the par
+contract as well — which is why `OptimumScore` and `ParContract` are written
+alongside the table rather than the table alone.
+
