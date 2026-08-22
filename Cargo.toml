@@ -43,6 +43,11 @@ name = "bench_fixtures"
 path = "examples/bench_fixtures.rs"
 required-features = ["play-analysis"]
 
+[[example]]
+name = "time_optimal_line"
+path = "examples/time_optimal_line.rs"
+required-features = ["play-analysis"]
+
 [dependencies]
 bridge-types = { git = "https://github.com/bridge-craftwork/bridge-types" }
 clap = { version = "4", features = ["derive"], optional = true }
