@@ -53,5 +53,10 @@ designed to be safe to run over source material:
 - **Incomplete deals are skipped.** Auction-only teaching boards, written as
   `[Deal "N:... ... ... ..."]`, parse into empty hands; they are left alone
   rather than stamped with a fabricated all-zero table.
+- **`--mark-verified`** sets bit `0x00080000` ("double-dummy data has been
+  verified") in each annotated board's `[BCFlags]`, adding the tag if absent and
+  preserving every bit already there. This records provenance only — no
+  documented BCFlags bit controls whether the DD table is *displayed*, and
+  Bridge Composer does not set this bit itself when it computes a table.
 - **Re-runs are no-ops.** Unchanged files are not rewritten, so mtimes do not
   churn. In-place writes go through a temporary file and a rename.

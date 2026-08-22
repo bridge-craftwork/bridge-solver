@@ -42,6 +42,12 @@ struct Args {
     #[arg(short = 'w', long = "in-place")]
     in_place: bool,
 
+    /// Set the "double-dummy data has been verified" bit (0x00080000) in each
+    /// annotated board's [BCFlags], adding the tag if absent. Note this marks
+    /// provenance; it does not make Bridge Composer display the DD table.
+    #[arg(long = "mark-verified")]
+    mark_verified: bool,
+
     /// Recompute analysis for boards that already carry it. By default a board
     /// with a [DoubleDummyTricks] tag is left exactly as found, so annotating a
     /// collection only fills in what is missing.
@@ -129,7 +135,7 @@ fn main() {
         if args.verbose {
             eprintln!("Processing {}...", path.display());
         }
-        let result = process_pbn(&content, args.verbose, args.recalculate);
+        let result = process_pbn(&content, args.verbose, args.recalculate, args.mark_verified);
 
         if args.in_place {
             // Unchanged files are left untouched so a re-run is a true no-op
@@ -212,8 +218,26 @@ fn write_atomically(path: &Path, contents: &str) -> io::Result<()> {
     fs::rename(&tmp, path)
 }
 
+/// Bridge Composer's [BCFlags] bit meaning "double-dummy data has been
+/// verified". Note this records provenance only: no documented BCFlags bit
+/// controls whether the DD table is *displayed*, and Bridge Composer does not
+/// set this one itself when it computes a table.
+const BC_FLAG_DD_VERIFIED: u64 = 0x0008_0000;
+
+/// Return a `[BCFlags]` line with the verified bit set, preserving every other
+/// bit. An unparsable value is replaced rather than propagated, since the tag
+/// is meaningless if it is not hex.
+fn with_verified_bit(line: &str) -> String {
+    let current = line
+        .split('"')
+        .nth(1)
+        .and_then(|v| u64::from_str_radix(v.trim(), 16).ok())
+        .unwrap_or(0);
+    format!("[BCFlags \"{:x}\"]", current | BC_FLAG_DD_VERIFIED)
+}
+
 /// Process a PBN file: find deals, solve them, insert/replace DD tags
-fn process_pbn(content: &str, verbose: bool, recalculate: bool) -> String {
+fn process_pbn(content: &str, verbose: bool, recalculate: bool, mark_verified: bool) -> String {
     // Split into deal blocks (separated by blank lines outside of brace comments)
     let mut result = String::new();
     let mut deal_count = 0;
@@ -263,7 +287,13 @@ fn process_pbn(content: &str, verbose: bool, recalculate: bool) -> String {
 
         // Process this block
         let block_lines = &lines[block_start..block_end];
-        let processed = process_deal_block(block_lines, &mut deal_count, verbose, recalculate);
+        let processed = process_deal_block(
+            block_lines,
+            &mut deal_count,
+            verbose,
+            recalculate,
+            mark_verified,
+        );
         result.push_str(&processed);
     }
 
@@ -280,6 +310,7 @@ fn process_deal_block(
     deal_count: &mut usize,
     verbose: bool,
     recalculate: bool,
+    mark_verified: bool,
 ) -> String {
     // Find the Deal tag to extract hands
     let mut deal_str: Option<&str> = None;
@@ -361,6 +392,7 @@ fn process_deal_block(
     // 2. Insert our new DD tags in the right place
 
     let mut output_lines: Vec<String> = Vec::new();
+    let mut saw_bcflags = false;
     let mut found_dd_tag = false;
     let mut skipping_optimum_data = false;
     let mut insertion_point: Option<usize> = None;
@@ -375,6 +407,14 @@ fn process_deal_block(
 
     for line in lines {
         let trimmed = line.trim();
+
+        // Fold the verified bit into an existing [BCFlags], keeping every other
+        // bit the board already carried.
+        if mark_verified && extract_tag_name(trimmed) == Some("BCFlags") {
+            saw_bcflags = true;
+            output_lines.push(with_verified_bit(trimmed));
+            continue;
+        }
 
         // Check if this is one of our DD tags
         if let Some(tag_name) = extract_tag_name(trimmed) {
@@ -425,6 +465,13 @@ fn process_deal_block(
 
     // Build the output
     let mut result = String::new();
+    // A board with no [BCFlags] of its own still needs one to carry the bit.
+    let dd_tags = if mark_verified && !saw_bcflags {
+        format!("[BCFlags \"{:x}\"]\n{dd_tags}", BC_FLAG_DD_VERIFIED)
+    } else {
+        dd_tags
+    };
+
     let insert_at = insertion_point.unwrap_or(output_lines.len());
 
     for (idx, line) in output_lines.iter().enumerate() {
@@ -708,7 +755,7 @@ mod tests {
 [Deal "N:AKQT3.J6.KJ42.95 652.AK42.AQ87.T4 J74.QT95.T.AK863 98.873.9653.QJ72"]
 [Dealer "N"]
 "#;
-        let result = process_pbn(pbn, false, false);
+        let result = process_pbn(pbn, false, false, false);
         assert!(result.contains("[DoubleDummyTricks"));
         assert!(result.contains("[OptimumResultTable"));
         assert!(result.contains("N NT"));
@@ -745,7 +792,7 @@ W  D  0
 W  C  0
 [Dealer "N"]
 "#;
-        let result = process_pbn(pbn, false, true);
+        let result = process_pbn(pbn, false, true, false);
         // Each tag we generate must appear exactly once: the stale copy is
         // stripped and replaced, not duplicated. `Vulnerable` is present, so
         // the par tags are generated too.
@@ -771,10 +818,10 @@ W  C  0
 [DoubleDummyTricks "00000000000000000000"]
 [Dealer "N"]
 "#;
-        let kept = process_pbn(pbn, false, false);
+        let kept = process_pbn(pbn, false, false, false);
         assert_eq!(kept, pbn, "default must not touch an analyzed board");
 
-        let redone = process_pbn(pbn, false, true);
+        let redone = process_pbn(pbn, false, true, false);
         assert!(redone.contains(r#"[DoubleDummyTricks "9a8789a8784346543465"]"#));
     }
 
@@ -788,9 +835,48 @@ W  C  0
 [OptimumScore "NS 9999"]
 [Dealer "N"]
 "#;
-        let result = process_pbn(pbn, false, false);
+        let result = process_pbn(pbn, false, false, false);
         assert_eq!(result.matches("[DoubleDummyTricks").count(), 1);
         assert!(!result.contains("NS 9999"));
+    }
+
+    /// --mark-verified folds bit 0x00080000 into the board's existing BCFlags
+    /// without disturbing the bits it already carried.
+    #[test]
+    fn test_mark_verified_preserves_other_bcflags_bits() {
+        let pbn = r#"[Event "Test"]
+[Vulnerable "None"]
+[Deal "N:AKQT3.J6.KJ42.95 652.AK42.AQ87.T4 J74.QT95.T.AK863 98.873.9653.QJ72"]
+[BCFlags "40001f"]
+"#;
+        let result = process_pbn(pbn, false, false, true);
+        // 0x40001f | 0x80000 == 0x48001f — every original bit survives.
+        assert!(
+            result.contains(r#"[BCFlags "48001f"]"#),
+            "got:
+{result}"
+        );
+        assert_eq!(result.matches("[BCFlags").count(), 1);
+
+        // Without the flag the tag is left exactly as written.
+        let plain = process_pbn(pbn, false, false, false);
+        assert!(plain.contains(r#"[BCFlags "40001f"]"#));
+    }
+
+    /// A board with no BCFlags of its own gets one carrying just that bit.
+    #[test]
+    fn test_mark_verified_adds_bcflags_when_absent() {
+        let pbn = r#"[Event "Test"]
+[Vulnerable "None"]
+[Deal "N:AKQT3.J6.KJ42.95 652.AK42.AQ87.T4 J74.QT95.T.AK863 98.873.9653.QJ72"]
+"#;
+        let result = process_pbn(pbn, false, false, true);
+        assert!(
+            result.contains(r#"[BCFlags "80000"]"#),
+            "got:
+{result}"
+        );
+        assert_eq!(result.matches("[BCFlags").count(), 1);
     }
 
     /// A board with no cards must be left exactly as found. BridgeComposer
@@ -806,7 +892,7 @@ W  C  0
 [Auction "N"]
 1S Pass 2S AP
 "#;
-        let result = process_pbn(pbn, false, false);
+        let result = process_pbn(pbn, false, false, false);
         assert_eq!(result, pbn, "placeholder board must be byte-identical");
         assert!(!result.contains("DoubleDummyTricks"));
         assert!(!result.contains("OptimumScore"));
@@ -825,7 +911,7 @@ W  C  0
 [Vulnerable "None"]
 [Deal "N:AKQT3.J6.KJ42.95 652.AK42.AQ87.T4 J74.QT95.T.AK863 98.873.9653.QJ72"]
 "#;
-        let result = process_pbn(pbn, false, false);
+        let result = process_pbn(pbn, false, false, false);
         assert_eq!(result.matches("[DoubleDummyTricks").count(), 1);
         assert!(!result.contains("\"00000000000000000000\""));
     }
@@ -840,7 +926,7 @@ W  C  0
 [ParContract "NS Pass"]
 [Dealer "N"]
 "#;
-        let result = process_pbn(pbn, false, false);
+        let result = process_pbn(pbn, false, false, false);
         assert_eq!(result.matches("[DoubleDummyTricks").count(), 1);
         assert_eq!(result.matches("[OptimumScore").count(), 0);
         assert_eq!(result.matches("[ParContract").count(), 0);
