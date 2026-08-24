@@ -70,10 +70,7 @@ jobs:
           mkdir -p dist
           cp target/${{ matrix.target }}/release/bridge-solver${{ matrix.artifact_suffix }} dist/bridge-solver-${{ matrix.asset_suffix }}${{ matrix.artifact_suffix }}
           cp target/${{ matrix.target }}/release/solver-diag${{ matrix.artifact_suffix }} dist/solver-diag-${{ matrix.asset_suffix }}${{ matrix.artifact_suffix }}
-          cp LICENSE dist/
-          if [ -f README.md ]; then
-            cp README.md dist/
-          fi
+          cp LICENSE-MIT LICENSE-APACHE README.md dist/
 
       - name: Create tarball (Linux and macOS)
         if: matrix.os != 'windows-latest'
@@ -83,8 +80,9 @@ jobs:
           tar -czf bridge-solver-${{ matrix.asset_suffix }}.tar.gz \
             bridge-solver-${{ matrix.asset_suffix }} \
             solver-diag-${{ matrix.asset_suffix }} \
-            LICENSE \
-            $([ -f README.md ] && echo README.md)
+            LICENSE-MIT \
+            LICENSE-APACHE \
+            README.md
 
       - name: Create zip (Windows)
         if: matrix.os == 'windows-latest'
@@ -94,8 +92,9 @@ jobs:
           7z a bridge-solver-${{ matrix.asset_suffix }}.zip \
             bridge-solver-${{ matrix.asset_suffix }}.exe \
             solver-diag-${{ matrix.asset_suffix }}.exe \
-            LICENSE \
-            $([ -f README.md ] && echo README.md)
+            LICENSE-MIT \
+            LICENSE-APACHE \
+            README.md
 
       - name: Upload Release Assets
         uses: softprops/action-gh-release@v2
