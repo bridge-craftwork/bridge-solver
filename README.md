@@ -6,16 +6,21 @@ analysis, PBN file processing, and a WebAssembly build for the browser.
 ## Attribution and License
 
 The double-dummy solver core is a Rust reimplementation of
-[macroxue/bridge-solver](https://github.com/macroxue/bridge-solver), which is
-licensed GPL-2.0. Copyright in that work is held by its authors. This work is
-therefore GPL-2.0-only — see [LICENSE](LICENSE).
+[macroxue/bridge-solver](https://github.com/macroxue/bridge-solver) by Hanhong
+Xue, which is licensed MIT OR Apache-2.0. This project follows suit and is
+licensed under either of:
 
-GPL-2.0-only rather than "or later": upstream ships a bare copy of the GPL-2.0
-text with no "or (at your option) any later version" notice applied to the work,
-so there is no or-later grant to pass on.
+- [Apache License, Version 2.0](LICENSE-APACHE)
+- [MIT license](LICENSE-MIT)
+
+at your option. Both files retain Hanhong Xue's copyright notice alongside the
+Rust implementation's, as those licences require.
 
 The search engine corresponds to upstream commit
-[`75b4619`](https://github.com/macroxue/bridge-solver/commit/75b4619).
+[`75b4619`](https://github.com/macroxue/bridge-solver/commit/75b4619), which
+predates upstream's relicensing in
+[`dc2d4df`](https://github.com/macroxue/bridge-solver/commit/dc2d4df)
+(2026-08-14, GPL-2.0 to MIT OR Apache-2.0).
 
 ### Not derived from upstream
 

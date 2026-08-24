@@ -1139,7 +1139,7 @@ watch(boardIndex, loadBoard)
       Built on
       <a href="https://github.com/bridge-craftwork/bridge-solver">bridge-solver</a>
       (a Rust port of macroxue/bridge-solver),
-      compiled to WebAssembly. GPL-2.0.
+      compiled to WebAssembly. MIT OR Apache-2.0.
     </p>
   </footer>
   </div>
