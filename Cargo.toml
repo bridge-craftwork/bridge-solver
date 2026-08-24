@@ -1,8 +1,8 @@
 [package]
 name = "bridge-solver"
-version = "0.5.0"
+version = "1.0.0"
 edition = "2021"
-license = "GPL-2.0-only"
+license = "MIT OR Apache-2.0"
 description = "Bridge Double-Dummy Solver - Port of macroxue/bridge-solver"
 repository = "https://github.com/bridge-craftwork/bridge-solver"
 keywords = ["bridge", "double-dummy", "solver", "cards"]
