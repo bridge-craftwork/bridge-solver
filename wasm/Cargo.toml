@@ -1,6 +1,6 @@
 [package]
 name = "bridge-solver-wasm"
-version = "0.4.0"
+version = "1.0.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 description = "WebAssembly bindings for bridge-solver: double-dummy tables and cardplay analysis in the browser"

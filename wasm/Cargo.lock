@@ -22,7 +22,7 @@ dependencies = [
 
 [[package]]
 name = "bridge-solver"
-version = "0.4.0"
+version = "1.0.0"
 dependencies = [
  "bridge-types",
  "serde",
@@ -31,7 +31,7 @@ dependencies = [
 
 [[package]]
 name = "bridge-solver-wasm"
-version = "0.4.0"
+version = "1.0.0"
 dependencies = [
  "bridge-encodings",
  "bridge-solver",
@@ -45,7 +45,6 @@ dependencies = [
 [[package]]
 name = "bridge-types"
 version = "0.1.0"
-source = "git+https://github.com/bridge-craftwork/bridge-types#3b26da0c6b2e1f084b0e0b55796f3f19d02947fd"
 
 [[package]]
 name = "bumpalo"
