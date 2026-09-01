@@ -28,8 +28,18 @@ import { capabilities, timings } from './perf.js'
 /** Build-time version, injected by Vite. See `define` in vite.config.js. */
 const APP_VERSION = typeof __APP_VERSION__ === 'string' ? __APP_VERSION__ : 'dev'
 
-/** Where the ingest Function lives. Same-origin, which `connect-src 'self'` requires. */
-const ENDPOINT = '/t'
+/**
+ * Where the ingest Function lives. Same-origin, which `connect-src 'self'`
+ * requires.
+ *
+ * RELATIVE, not `/t`. The site is served both from this project's own root and
+ * mounted under a path at bridge-craftwork.com/bridge-solver/, and an absolute
+ * `/t` resolved to the apex there rather than to the tool — so every beacon
+ * 404'd, silently, while the solver itself kept working. Relative matches how
+ * the rest of the build already addresses its assets (`base: './'` in the Vite
+ * config), so it is correct from either address.
+ */
+const ENDPOINT = './t'
 
 /**
  * Which site embedded us, or `''` when we are top-level.
