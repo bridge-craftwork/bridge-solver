@@ -10,6 +10,7 @@
 
 use std::ffi::c_char;
 use std::os::raw::c_int;
+use std::sync::atomic::{AtomicIsize, Ordering};
 
 const DDS_STRAINS: usize = 5;
 const DDS_HANDS: usize = 4;
@@ -72,6 +73,16 @@ extern "C" {
 /// Process-global in DDS, so call it once per configuration and never from
 /// two threads at a time.
 pub fn set_threads(threads: usize) {
+    // Re-setting the same value is not a no-op inside DDS, and not a harmless
+    // one: `SetResources` tears the thread memory down with
+    // `memory.Resize(0, ...)` before building it up again, and on this build
+    // the rebuild does not always happen -- the next solve then hits
+    // `Memory::GetPtr: 0 vs. 0` and DDS calls `exit(1)`, taking the harness
+    // with it. Skipping the redundant call avoids the window entirely.
+    static LAST: AtomicIsize = AtomicIsize::new(-1);
+    if LAST.swap(threads as isize, Ordering::Relaxed) == threads as isize {
+        return;
+    }
     // SAFETY: `SetResources` takes two integers by value and stores them in
     // DDS's own globals. It allocates and cannot fail; there is no pointer or
     // lifetime involved.

@@ -10,7 +10,7 @@ reference for threading, and because `node-counter-before.json` /
 `node-counter-after.json` are a clean before-and-after for the node-counter
 change on the same corpus and machine.
 
-**For current per-board costs use `cache-fix.json`.**
+**For current per-board costs use `release-profile.json`; see `release-profile.md`.**
 
 ```
 results   : node-counter-after.json
@@ -75,9 +75,9 @@ regression rather than saturation.
 
 ## Known gaps
 
-- **No external reference.** DDS is not measured here. The cross-comparison
-  lives in dealer3's `scripts/bench-dds.py`, which already works; issue #13
-  records DDS at roughly 1.5x cheaper per core, and that gap is untouched by
-  this change and remains open work.
+- **No external reference.** DDS is not measured here. It is now measured in
+  `release-profile.md`, where we come out at 1.06x DDS per core; issue #13's
+  figure of roughly 1.5x cheaper predates both the bounds-cache fix and the
+  release profile.
 - **One machine.** Every number above is an M4 Pro. The 8-thread knee is a
   property of 8P+4E silicon, not of the solver.

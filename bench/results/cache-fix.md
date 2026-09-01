@@ -91,3 +91,9 @@ noise of the threaded rows.
 The search tree is now marginally smaller than the reference's, and the whole
 remaining single-core gap is 12% of per-node execution cost. There is no
 algorithmic deficit left to close.
+
+---
+
+**Follow-up.** The 1.120x per-node figure above was not an irreducible cost. It
+was Cargo's release defaults — `codegen-units = 16` with LTO off. See
+`release-profile.md`.
