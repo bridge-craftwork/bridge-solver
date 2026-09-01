@@ -14,7 +14,7 @@ use std::sync::atomic::Ordering;
 
 // Re-export atomic counters from bridge_solver module
 use super::bridge_solver::{
-    xray_should_log, NODE_COUNT, NO_PRUNING, NO_RANK_SKIP, NO_TT, XRAY_COUNT, XRAY_LIMIT,
+    xray_should_log, NO_PRUNING, NO_RANK_SKIP, NO_TT, XRAY_COUNT, XRAY_LIMIT,
 };
 
 /// Search result - NS tricks and rank winners (cards whose rank affected the outcome)
@@ -281,6 +281,19 @@ pub struct Search<'a> {
 
     // Starting depth for mid-trick positions (0 for normal positions)
     start_depth: usize,
+
+    // Nodes already visited by earlier MTD(f) iterations of the same solve.
+    // The xray `iter=` field must count the whole solve, because that is what
+    // the C++ reference's `g_iteration_count` does and the two traces are
+    // meant to be diffed line for line.
+    nodes_base: u64,
+
+    // Nodes visited by this search. Deliberately a plain field rather than the
+    // process-wide atomic it used to be: incremented once per node, a shared
+    // counter is a single cache line read-modify-written by every thread in the
+    // program, and it capped concurrent solves at 1.6x on eight cores where
+    // this scales to 6.3x. `Solver` sums it across MTD(f) iterations.
+    nodes: u64,
 }
 
 impl<'a> Search<'a> {
@@ -408,7 +421,20 @@ impl<'a> Search<'a> {
             cutoff_cache,
             pattern_cache,
             start_depth,
+            nodes_base: 0,
+            nodes: 0,
         }
+    }
+
+    /// Seed the xray iteration counter from earlier MTD(f) iterations, so the
+    /// trace numbers the whole solve rather than restarting each iteration.
+    pub fn set_nodes_base(&mut self, base: u64) {
+        self.nodes_base = base;
+    }
+
+    /// Nodes visited so far by this search.
+    pub fn nodes(&self) -> u64 {
+        self.nodes
     }
 
     /// Format the play sequence up to (but not including) the given depth
@@ -611,7 +637,7 @@ impl<'a> Search<'a> {
                 // Use relative beta for cutoff check (bounds are stored relative to ns_tricks_won)
                 if let Some((matched_hands, bounds)) = entry.lookup(&new_pattern, rel_beta) {
                     // Compute rank_winners from matched pattern (matching C++ GetRankWinners)
-                    let matched_pattern = Pattern::new(*matched_hands, bounds);
+                    let matched_pattern = Pattern::new(matched_hands, bounds);
                     let rank_winners = matched_pattern.get_rank_winners(all_cards);
 
                     let adj_lower = bounds.lower + ns_tricks_won as i8;
@@ -622,8 +648,10 @@ impl<'a> Search<'a> {
                                 "PATTERN_HIT: depth={} seat={} beta={} ns_tricks_won={} bounds=[{},{}] adj_lower={} LOWER_CUT shape={:x} hands=[{:x},{:x},{:x},{:x}]",
                                 depth, seat_to_play, beta, ns_tricks_won, bounds.lower, bounds.upper, adj_lower,
                                 shape_value,
-                                new_pattern.hands[WEST].value(), new_pattern.hands[NORTH].value(),
-                                new_pattern.hands[EAST].value(), new_pattern.hands[SOUTH].value()
+                                matched_pattern.hands[WEST].value(),
+                                matched_pattern.hands[NORTH].value(),
+                                matched_pattern.hands[EAST].value(),
+                                matched_pattern.hands[SOUTH].value()
                             );
                         }
                         return SearchResult {
@@ -712,6 +740,21 @@ impl<'a> Search<'a> {
                 );
             }
 
+            // A zero fast-trick count is upgraded from the side to play's own
+            // perspective before the fast cuts, matching the C++ reference.
+            //
+            // Omitting this is not merely a lost prune. The cut it enables
+            // returns a different `rank_winners` set, and the bounds cache
+            // keys its entries on exactly those cards — so without it the
+            // search stores over-general patterns that later match positions
+            // the bound does not hold for, and the cached bound is then wrong.
+            // That is the mechanism behind the wrong tables in #14.
+            let (fast, fast_rank_winners) = if fast == 0 && self.trump != NOTRUMP {
+                self.slow_trump_tricks_own(depth)
+            } else {
+                (fast, fast_rank_winners)
+            };
+
             if is_ns(seat_to_play) && ns_tricks_won as usize + fast >= beta as usize {
                 return SearchResult {
                     ns_tricks: (ns_tricks_won as usize + fast) as u8,
@@ -779,7 +822,7 @@ impl<'a> Search<'a> {
     /// EvaluatePlayableCards - main card evaluation loop
     /// Matches C++ Play::EvaluatePlayableCards
     fn evaluate_playable_cards(&mut self, depth: usize, beta: i8) -> SearchResult {
-        NODE_COUNT.fetch_add(1, Ordering::Relaxed);
+        self.nodes += 1;
 
         let trick_idx = depth / 4;
         let card_in_trick = depth & 3;
@@ -850,7 +893,7 @@ impl<'a> Search<'a> {
         };
 
         // CUTOFF_INDEX logging
-        let iter_count = NODE_COUNT.load(Ordering::Relaxed);
+        let iter_count = self.nodes_base + self.nodes;
         if xray_should_log() {
             eprintln!(
                 "CUTOFF_INDEX: iter={} depth={} key0={:x} key1={:x} seat={}",
@@ -859,7 +902,7 @@ impl<'a> Search<'a> {
         }
 
         // MOVE_ORDER logging BEFORE update
-        let iter_count = NODE_COUNT.load(Ordering::Relaxed);
+        let iter_count = self.nodes_base + self.nodes;
         if xray_should_log() {
             let mut playable_str = String::new();
             for card in playable.iter() {
@@ -1684,20 +1727,59 @@ impl<'a> Search<'a> {
     /// Slow trump tricks for opponents - detects finesse positions
     /// Returns (1, rank_winners) if opponents have a guaranteed slow trump trick via finesse
     /// Returns (count, rank_winners) matching C++ SlowTrumpTricks
+    /// `SlowTrumpTricks` from the opponents' perspective, for slow-trick
+    /// pruning. `leading` is false, matching the C++ call site.
     fn slow_trump_tricks_opponent(&self, depth: usize) -> (usize, Cards) {
-        let seat_to_play = self.plays[depth].seat_to_play;
+        let s = self.plays[depth].seat_to_play;
+        self.slow_trump_tricks_roles(
+            depth,
+            left_hand_opp(s),
+            right_hand_opp(s),
+            partner(s),
+            s,
+            false,
+        )
+    }
+
+    /// `SlowTrumpTricks` from the perspective of the side to play, used to
+    /// upgrade a zero fast-trick count. `leading` is true, matching the C++.
+    fn slow_trump_tricks_own(&self, depth: usize) -> (usize, Cards) {
+        let s = self.plays[depth].seat_to_play;
+        self.slow_trump_tricks_roles(
+            depth,
+            s,
+            partner(s),
+            left_hand_opp(s),
+            right_hand_opp(s),
+            true,
+        )
+    }
+
+    /// `SlowTrumpTricks` with its four roles given explicitly.
+    ///
+    /// The C++ calls this two ways and the role mapping is the entire
+    /// difference between them, so it is a parameter here rather than baked
+    /// into the body.
+    #[allow(clippy::too_many_arguments)]
+    fn slow_trump_tricks_roles(
+        &self,
+        depth: usize,
+        my: Seat,
+        pd: Seat,
+        lho: Seat,
+        rho: Seat,
+        leading: bool,
+    ) -> (usize, Cards) {
         let all_trumps = self.hands.all_cards().suit(self.trump);
 
         if all_trumps.size() < 3 {
             return (0, Cards::new());
         }
 
-        // From opponent's perspective (LHO = "my", RHO = "pd")
-        // Their LHO = our partner, their RHO = us
-        let my_trumps = self.hands[left_hand_opp(seat_to_play)].suit(self.trump);
-        let pd_trumps = self.hands[right_hand_opp(seat_to_play)].suit(self.trump);
-        let lho_trumps = self.hands[partner(seat_to_play)].suit(self.trump);
-        let rho_trumps = self.hands[seat_to_play].suit(self.trump);
+        let my_trumps = self.hands[my].suit(self.trump);
+        let pd_trumps = self.hands[pd].suit(self.trump);
+        let lho_trumps = self.hands[lho].suit(self.trump);
+        let rho_trumps = self.hands[rho].suit(self.trump);
 
         // Get top 3 trumps (A, K, Q)
         let a = all_trumps.top();
@@ -1727,9 +1809,6 @@ impl<'a> Search<'a> {
         let my_has_k_strictly = my_trumps.have(k) && my_trumps.size() > 1;
         let lho_has_a = lho_trumps.have(a);
         let rho_has_a = rho_trumps.have(a);
-
-        // leading=false in the call from SearchAtTrickStart for slow tricks
-        let leading = false;
 
         if (pd_has_k_strictly && lho_has_a)
             || (my_has_k_strictly && rho_has_a && (!leading || num_tricks >= 3))

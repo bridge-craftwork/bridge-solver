@@ -322,17 +322,33 @@ impl ShapeEntry {
         self.pattern.reset();
     }
 
-    /// Look up a matching pattern that causes a cutoff
-    pub fn lookup(&self, new_pattern: &Pattern, beta: i8) -> Option<(&Hands, Bounds)> {
-        // First check root pattern
+    /// Look up a matching pattern that causes a cutoff.
+    ///
+    /// Takes `&mut self` because a hit on a child is *promoted* into the root
+    /// slot, matching the C++ reference's `ShapeEntry::Lookup`. That promotion
+    /// is not merely a most-recently-used speed-up: `Pattern::update` compares
+    /// candidates against the root's hands and bounds, so a root left stale
+    /// grows a differently-shaped tree, and the generalisations it then stores
+    /// are not the reference's. Omitting it is what produced the wrong tables
+    /// in #14.
+    ///
+    /// Returns the matched hands by value; the caller only reads them, and
+    /// borrowing would conflict with the promotion.
+    pub fn lookup(&mut self, new_pattern: &Pattern, beta: i8) -> Option<(Hands, Bounds)> {
+        // Root fast path.
         if self.pattern.bounds.cutoff(beta) && new_pattern.is_subset_of(&self.pattern) {
-            return Some((&self.pattern.hands, self.pattern.bounds));
+            return Some((self.pattern.hands, self.pattern.bounds));
         }
-        // Then search children
-        if let Some(matched) = self.pattern.lookup(new_pattern, beta) {
-            return Some((&matched.hands, matched.bounds));
+        // Otherwise search the children, and promote whatever matched.
+        let found = self
+            .pattern
+            .lookup(new_pattern, beta)
+            .map(|matched| (matched.hands, matched.bounds));
+        if let Some((hands, bounds)) = found {
+            self.pattern.hands = hands;
+            self.pattern.bounds = bounds;
         }
-        None
+        found
     }
 }
 
@@ -369,10 +385,14 @@ impl PatternCache {
         (hash >> (64 - (self.mask + 1).trailing_zeros())) as usize & self.mask
     }
 
-    /// Look up a shape entry
-    pub fn lookup(&self, shape: u64, seat_to_play: Seat) -> Option<&ShapeEntry> {
+    /// Look up a shape entry.
+    ///
+    /// Mutable because a lookup promotes the matched pattern into the entry's
+    /// root slot; see [`ShapeEntry::lookup`].
+    pub fn lookup(&mut self, shape: u64, seat_to_play: Seat) -> Option<&mut ShapeEntry> {
         let hash = Self::hash(shape, seat_to_play);
-        let entry = &self.entries[self.index(hash)];
+        let idx = self.index(hash);
+        let entry = &mut self.entries[idx];
         if entry.hash == hash {
             Some(entry)
         } else {
@@ -463,15 +483,19 @@ pub fn compute_pattern_hands(
                     let above = suit_value >> shift;
                     actual_rel_bottom += above.trailing_ones() as usize;
                 }
-                // If it's the suit bottom, extend upward
+                // If it's the suit bottom, extend upward: to its highest
+                // equivalent card, and then one rank higher.
+                //
+                // The reference counts the *run* of consecutive cards held at
+                // and below this one, stopping at the first gap. Taking the
+                // position of the highest card below it instead — which is
+                // what this did — over-subtracts whenever that run is broken,
+                // producing a pattern that retains cards the reference drops.
                 let all_rel = relative_hands.all_cards().suit(suit);
                 if actual_rel_bottom == all_rel.bottom() {
                     let idx = actual_rel_bottom - suit * NUM_RANKS;
-                    if idx > 0 {
-                        let mask = (1u64 << idx) - 1;
-                        let below = suit_value & mask;
-                        actual_rel_bottom -= (64 - below.leading_zeros()) as usize;
-                    }
+                    let run = (!(suit_value << (63 - idx))).leading_zeros() as usize;
+                    actual_rel_bottom = actual_rel_bottom.saturating_sub(run);
                 }
                 break;
             }

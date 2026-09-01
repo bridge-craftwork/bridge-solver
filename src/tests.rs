@@ -1029,3 +1029,82 @@ fn test_hands_parsing() {
     assert_eq!(hands[WEST].size(), 13);
     assert_eq!(hands.all_cards().size(), 52);
 }
+
+/// Concurrent solves must not interfere with one another.
+///
+/// `dealer3` drives this library from a rayon pool, one deal per worker, so
+/// several solves are always in flight at once. Nothing in the search is
+/// shared between them — the caches are owned per call — and these tests exist
+/// to keep it that way. Deliberately no timing assertion: scaling depends on
+/// what else the machine is doing, and a speedup threshold would be flaky.
+#[cfg(test)]
+mod concurrency {
+    use crate::{get_node_count, solve_dd_table};
+    use bridge_types::Deal;
+
+    const DEALS: &[&str] = &[
+        "N:AQT94.T53.KQ8.T9 63.J98.J53.K8654 K72.6.AT9762.AJ7 J85.AKQ742.4.Q32",
+        "E:7.AKJ6543.3.AK93 642.8.KQT9.T8752 AKQJ5.Q97.52.QJ6 T983.T2.AJ8764.4",
+        "S:AJ83.7.T9653.A62 Q4.QJT984.4.T853 T762.K3.KQ2.KQJ4 K95.A652.AJ87.97",
+        "W:87.9.T9642.AK942 AQJ53.QJ873.QJ5. 94.A652.K83.QJ75 KT62.KT4.A7.T863",
+    ];
+
+    fn deals() -> Vec<Deal> {
+        DEALS
+            .iter()
+            .map(|s| Deal::from_pbn(s).expect("deal parses"))
+            .collect()
+    }
+
+    fn solve_all_concurrently(deals: &[Deal]) -> Vec<[[u8; 5]; 4]> {
+        std::thread::scope(|scope| {
+            let handles: Vec<_> = deals
+                .iter()
+                .map(|deal| scope.spawn(move || solve_dd_table(deal).tricks))
+                .collect();
+            handles
+                .into_iter()
+                .map(|h| h.join().expect("solver thread panicked"))
+                .collect()
+        })
+    }
+
+    #[test]
+    fn concurrent_solves_agree_with_serial() {
+        let deals = deals();
+        let serial: Vec<_> = deals.iter().map(|d| solve_dd_table(d).tricks).collect();
+        assert_eq!(serial, solve_all_concurrently(&deals));
+    }
+
+    #[test]
+    fn concurrent_solves_are_deterministic() {
+        let deals = deals();
+        let first = solve_all_concurrently(&deals);
+        for _ in 0..2 {
+            assert_eq!(first, solve_all_concurrently(&deals));
+        }
+    }
+
+    /// The node count reports this thread's own last solve. It used to be a
+    /// process-wide atomic, which both made the number meaningless under
+    /// concurrency and — being incremented once per node — serialised the
+    /// search on one cache line.
+    #[test]
+    fn node_count_is_per_thread() {
+        let deals = deals();
+        let _ = solve_dd_table(&deals[0]);
+        let ours = get_node_count();
+        assert!(ours > 0, "no nodes recorded");
+
+        std::thread::scope(|scope| {
+            for deal in &deals[1..] {
+                scope.spawn(move || {
+                    let _ = solve_dd_table(deal);
+                    assert!(get_node_count() > 0, "worker recorded no nodes");
+                });
+            }
+        });
+
+        assert_eq!(ours, get_node_count(), "another thread clobbered the count");
+    }
+}

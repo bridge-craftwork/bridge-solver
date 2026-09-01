@@ -502,8 +502,17 @@ pub struct Solver {
     num_tricks: usize,
 }
 
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-pub(crate) static NODE_COUNT: AtomicU64 = AtomicU64::new(0);
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+thread_local! {
+    /// Nodes visited by the last solve *on this thread*.
+    ///
+    /// Per-thread rather than global so that concurrent solves — several
+    /// threads each solving their own deal, which is how `dealer3` drives the
+    /// library — report their own work instead of overwriting one another's.
+    static LAST_SOLVE_NODES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
 pub(crate) static XRAY_COUNT: AtomicUsize = AtomicUsize::new(0);
 pub(crate) static XRAY_LIMIT: AtomicUsize = AtomicUsize::new(0);
 pub(crate) static NO_PRUNING: AtomicBool = AtomicBool::new(false);
@@ -511,9 +520,9 @@ pub(crate) static NO_TT: AtomicBool = AtomicBool::new(false);
 pub(crate) static NO_RANK_SKIP: AtomicBool = AtomicBool::new(false);
 pub(crate) static SHOW_PERF: AtomicBool = AtomicBool::new(false);
 
-/// Get the node count from the last solve (for profiling)
+/// Get the node count from the last solve on this thread (for profiling)
 pub fn get_node_count() -> u64 {
-    NODE_COUNT.load(Ordering::Relaxed)
+    LAST_SOLVE_NODES.with(|n| n.get())
 }
 
 /// Set xray tracing limit (0 = disabled)
@@ -638,7 +647,6 @@ impl Solver {
         pattern_cache: &mut super::pattern::PatternCache,
         partial_trick: Option<&PartialTrick>,
     ) -> u8 {
-        NODE_COUNT.store(0, Ordering::Relaxed);
         XRAY_COUNT.store(0, Ordering::Relaxed);
 
         // The clock is only wanted for the optional [PERF] line below, so read
@@ -657,18 +665,19 @@ impl Solver {
 
         let num_tricks = self.num_tricks;
         let guess = self.guess_tricks();
-        let result = self.mtdf_search_with_caches_and_partial(
+        let (result, nodes) = self.mtdf_search_with_caches_and_partial(
             num_tricks,
             guess,
             cutoff_cache,
             pattern_cache,
             partial_trick,
         );
+        LAST_SOLVE_NODES.with(|n| n.set(nodes));
 
         #[cfg(not(target_arch = "wasm32"))]
         if let Some(start) = start {
             let elapsed = start.elapsed();
-            let iterations = NODE_COUNT.load(Ordering::Relaxed);
+            let iterations = nodes;
             let ns_per_iter = if iterations > 0 {
                 elapsed.as_nanos() as f64 / iterations as f64
             } else {
@@ -693,9 +702,12 @@ impl Solver {
         cutoff_cache: &mut search::CutoffCache,
         pattern_cache: &mut super::pattern::PatternCache,
         partial_trick: Option<&PartialTrick>,
-    ) -> u8 {
+    ) -> (u8, u64) {
         let mut hands = self.hands;
 
+        // Each MTD(f) iteration builds a fresh `Search`, so the per-search node
+        // counts are summed here to give the whole solve's total.
+        let mut nodes = 0u64;
         let mut lower = 0i8;
         let mut upper = num_tricks as i8;
         let mut ns_tricks = guess as i8;
@@ -715,7 +727,9 @@ impl Solver {
                 pattern_cache,
                 partial_trick,
             );
+            searcher.set_nodes_base(nodes);
             ns_tricks = searcher.search(beta) as i8;
+            nodes += searcher.nodes();
 
             if ns_tricks < beta {
                 upper = ns_tricks;
@@ -724,7 +738,7 @@ impl Solver {
             }
         }
 
-        lower as u8
+        (lower as u8, nodes)
     }
 
     /// Estimate starting tricks for MTD(f)
