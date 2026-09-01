@@ -1,0 +1,261 @@
+{
+  "corpus_version": "corpus-v1",
+  "revision": "v1.0.0-2-gc534fd6-dirty",
+  "machine": "Apple M4 Pro",
+  "logical_cpus": 12,
+  "runs": 3,
+  "boards": {
+    "1": {
+      "best": {
+        "wall_ms": 35.080833,
+        "cpu_ms": 35.007000000000005
+      },
+      "median_wall_ms": 35.255292,
+      "spread": 0.25990688419513874,
+      "runs": 3
+    },
+    "10": {
+      "best": {
+        "wall_ms": 301.820334,
+        "cpu_ms": 301.45
+      },
+      "median_wall_ms": 303.277458,
+      "spread": 0.01824498345429571,
+      "runs": 3
+    },
+    "2": {
+      "best": {
+        "wall_ms": 74.464959,
+        "cpu_ms": 74.428
+      },
+      "median_wall_ms": 74.497,
+      "spread": 0.01851819994958971,
+      "runs": 3
+    },
+    "3": {
+      "best": {
+        "wall_ms": 225.698125,
+        "cpu_ms": 225.481
+      },
+      "median_wall_ms": 227.67154200000002,
+      "spread": 0.013458981991985973,
+      "runs": 3
+    },
+    "4": {
+      "best": {
+        "wall_ms": 101.754375,
+        "cpu_ms": 101.52799999999999
+      },
+      "median_wall_ms": 102.324291,
+      "spread": 0.02057446669983477,
+      "runs": 3
+    },
+    "5": {
+      "best": {
+        "wall_ms": 144.13104199999998,
+        "cpu_ms": 143.877
+      },
+      "median_wall_ms": 145.4745,
+      "spread": 0.011070939180471775,
+      "runs": 3
+    },
+    "6": {
+      "best": {
+        "wall_ms": 113.976709,
+        "cpu_ms": 113.83600000000001
+      },
+      "median_wall_ms": 114.50937499999999,
+      "spread": 0.007935463376118407,
+      "runs": 3
+    },
+    "7": {
+      "best": {
+        "wall_ms": 88.16825,
+        "cpu_ms": 88.089
+      },
+      "median_wall_ms": 88.258084,
+      "spread": 0.012104697552690467,
+      "runs": 3
+    },
+    "8": {
+      "best": {
+        "wall_ms": 16.5325,
+        "cpu_ms": 16.492
+      },
+      "median_wall_ms": 16.556375000000003,
+      "spread": 0.04214928171782862,
+      "runs": 3
+    },
+    "9": {
+      "best": {
+        "wall_ms": 24.172834,
+        "cpu_ms": 24.142
+      },
+      "median_wall_ms": 24.278000000000002,
+      "spread": 0.009745774947198922,
+      "runs": 3
+    }
+  },
+  "sweep": {
+    "board": 4,
+    "solves_per_thread": 7,
+    "points": [
+      {
+        "threads": 1,
+        "measured": {
+          "best": {
+            "wall_ms": 713.536958,
+            "cpu_ms": 712.266
+          },
+          "median_wall_ms": 715.012,
+          "spread": 0.0032108820353492573,
+          "runs": 3
+        },
+        "speedup": 1.0
+      },
+      {
+        "threads": 2,
+        "measured": {
+          "best": {
+            "wall_ms": 736.475541,
+            "cpu_ms": 1469.988
+          },
+          "median_wall_ms": 744.224,
+          "spread": 0.016404935842940584,
+          "runs": 3
+        },
+        "speedup": 1.9377071424018955
+      },
+      {
+        "threads": 3,
+        "measured": {
+          "best": {
+            "wall_ms": 757.505167,
+            "cpu_ms": 2267.853
+          },
+          "median_wall_ms": 758.527375,
+          "spread": 0.004405304604344698,
+          "runs": 3
+        },
+        "speedup": 2.825869666972186
+      },
+      {
+        "threads": 4,
+        "measured": {
+          "best": {
+            "wall_ms": 760.977666,
+            "cpu_ms": 3036.9190000000003
+          },
+          "median_wall_ms": 768.309833,
+          "spread": 0.09642283640949853,
+          "runs": 3
+        },
+        "speedup": 3.7506328497162493
+      },
+      {
+        "threads": 5,
+        "measured": {
+          "best": {
+            "wall_ms": 773.064333,
+            "cpu_ms": 3851.062
+          },
+          "median_wall_ms": 794.577291,
+          "spread": 0.0468498098462912,
+          "runs": 3
+        },
+        "speedup": 4.614990806981131
+      },
+      {
+        "threads": 6,
+        "measured": {
+          "best": {
+            "wall_ms": 770.524041,
+            "cpu_ms": 4609.647
+          },
+          "median_wall_ms": 772.761625,
+          "spread": 0.00892720360947173,
+          "runs": 3
+        },
+        "speedup": 5.5562468141081665
+      },
+      {
+        "threads": 7,
+        "measured": {
+          "best": {
+            "wall_ms": 768.6928330000001,
+            "cpu_ms": 5363.559
+          },
+          "median_wall_ms": 771.716459,
+          "spread": 0.0064470381240042856,
+          "runs": 3
+        },
+        "speedup": 6.497730291704176
+      },
+      {
+        "threads": 8,
+        "measured": {
+          "best": {
+            "wall_ms": 801.834583,
+            "cpu_ms": 6302.809
+          },
+          "median_wall_ms": 810.394709,
+          "spread": 0.1925314513405069,
+          "runs": 3
+        },
+        "speedup": 7.119043983664148
+      },
+      {
+        "threads": 9,
+        "measured": {
+          "best": {
+            "wall_ms": 841.220041,
+            "cpu_ms": 7369.979
+          },
+          "median_wall_ms": 847.286917,
+          "spread": 0.016367350192504397,
+          "runs": 3
+        },
+        "speedup": 7.633951057996726
+      },
+      {
+        "threads": 10,
+        "measured": {
+          "best": {
+            "wall_ms": 901.577584,
+            "cpu_ms": 8623.207
+          },
+          "median_wall_ms": 939.8257920000001,
+          "spread": 0.08723468106988778,
+          "runs": 3
+        },
+        "speedup": 7.914315646960451
+      },
+      {
+        "threads": 11,
+        "measured": {
+          "best": {
+            "wall_ms": 959.853667,
+            "cpu_ms": 9803.146999999999
+          },
+          "median_wall_ms": 978.261083,
+          "spread": 0.06143757640090376,
+          "runs": 3
+        },
+        "speedup": 8.177190761307994
+      },
+      {
+        "threads": 12,
+        "measured": {
+          "best": {
+            "wall_ms": 1061.03825,
+            "cpu_ms": 11029.028
+          },
+          "median_wall_ms": 1177.923959,
+          "spread": 0.17126138006806058,
+          "runs": 3
+        },
+        "speedup": 8.06987259507374
+      }
+    ]
+  }
+}
