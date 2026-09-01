@@ -616,7 +616,30 @@ impl Solver {
         cutoff_cache: &mut search::CutoffCache,
         pattern_cache: &mut super::pattern::PatternCache,
     ) -> u8 {
-        self.solve_with_caches_and_partial(cutoff_cache, pattern_cache, None)
+        self.solve_with_caches_and_partial(cutoff_cache, pattern_cache, None, None)
+    }
+
+    /// Solve with external caches, seeding the MTD(f) search from `guess`.
+    ///
+    /// A caller filling several cells of a double-dummy table can pass the
+    /// previous cell's answer, which is usually close to this one's, so the
+    /// search converges in fewer iterations. The seed cannot affect the
+    /// result: MTD(f) converges to the same value from any starting point, so
+    /// a poor guess costs iterations and nothing else.
+    ///
+    /// Pass `Solver::seed_from(previous_ns_tricks)` to build the guess.
+    pub fn solve_with_caches_seeded(
+        &self,
+        cutoff_cache: &mut search::CutoffCache,
+        pattern_cache: &mut super::pattern::PatternCache,
+        guess: usize,
+    ) -> u8 {
+        self.solve_with_caches_and_partial(cutoff_cache, pattern_cache, None, Some(guess))
+    }
+
+    /// The MTD(f) seed to use for the next cell, given this cell's NS tricks.
+    pub fn seed_from(ns_tricks: u8) -> usize {
+        (ns_tricks as usize + 1).min(TOTAL_TRICKS)
     }
 
     /// Solve from a mid-trick position with external caches
@@ -637,7 +660,7 @@ impl Solver {
         pattern_cache: &mut super::pattern::PatternCache,
         partial_trick: &PartialTrick,
     ) -> u8 {
-        self.solve_with_caches_and_partial(cutoff_cache, pattern_cache, Some(partial_trick))
+        self.solve_with_caches_and_partial(cutoff_cache, pattern_cache, Some(partial_trick), None)
     }
 
     /// Internal solve implementation that handles both normal and mid-trick positions
@@ -646,6 +669,7 @@ impl Solver {
         cutoff_cache: &mut search::CutoffCache,
         pattern_cache: &mut super::pattern::PatternCache,
         partial_trick: Option<&PartialTrick>,
+        seed: Option<usize>,
     ) -> u8 {
         XRAY_COUNT.store(0, Ordering::Relaxed);
 
@@ -664,7 +688,7 @@ impl Solver {
             .then(std::time::Instant::now);
 
         let num_tricks = self.num_tricks;
-        let guess = self.guess_tricks();
+        let guess = seed.unwrap_or_else(|| self.guess_tricks());
         let (result, nodes) = self.mtdf_search_with_caches_and_partial(
             num_tricks,
             guess,

@@ -75,10 +75,19 @@ pub fn solve_dd_table(deal: &Deal) -> DdTricks {
         let trump = strain_trump(strain);
         let mut cutoff = CutoffCache::new(16);
         let mut pattern = PatternCache::new(16);
+        // The four declarers in a strain give similar counts, so each cell
+        // seeds the next one's MTD(f) search. The seed cannot change an
+        // answer, only how many iterations reaching it takes.
+        let mut seed: Option<usize> = None;
         for dir in DIRECTIONS {
             let seat = direction_to_seat(dir);
             let leader = (seat + 1) % 4;
-            let ns = Solver::new(hands, trump, leader).solve_with_caches(&mut cutoff, &mut pattern);
+            let solver = Solver::new(hands, trump, leader);
+            let ns = match seed {
+                Some(g) => solver.solve_with_caches_seeded(&mut cutoff, &mut pattern, g),
+                None => solver.solve_with_caches(&mut cutoff, &mut pattern),
+            };
+            seed = Some(Solver::seed_from(ns));
             let declarer_tricks = if matches!(dir, Direction::North | Direction::South) {
                 ns
             } else {

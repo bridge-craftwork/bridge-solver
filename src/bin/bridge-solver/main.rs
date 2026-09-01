@@ -588,13 +588,21 @@ fn solve_deal(hands: &Hands) -> DdResults {
         // Create fresh caches for each trump contract
         let mut cutoff_cache = CutoffCache::new(16);
         let mut pattern_cache = PatternCache::new(16);
+        // Each cell seeds the next one's MTD(f) search; see `Solver::seed_from`.
+        let mut seed: Option<usize> = None;
 
         for (decl_idx, declarer_seat) in declarers.iter().enumerate() {
             // The leader is to the left of declarer
             let leader = (*declarer_seat + 1) % 4;
 
             let solver = Solver::new(*hands, *trump, leader);
-            let ns_tricks = solver.solve_with_caches(&mut cutoff_cache, &mut pattern_cache);
+            let ns_tricks = match seed {
+                Some(g) => {
+                    solver.solve_with_caches_seeded(&mut cutoff_cache, &mut pattern_cache, g)
+                }
+                None => solver.solve_with_caches(&mut cutoff_cache, &mut pattern_cache),
+            };
+            seed = Some(Solver::seed_from(ns_tricks));
 
             // Convert to declarer's tricks
             let declarer_tricks = if *declarer_seat == NORTH || *declarer_seat == SOUTH {

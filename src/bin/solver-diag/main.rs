@@ -181,10 +181,17 @@ fn main() {
             let mut results = Vec::new();
             let mut total_time = 0.0;
 
+            let mut seed: Option<usize> = None;
             for &l in &leaders {
                 let start = Instant::now();
                 let solver = Solver::new(hands, t, l);
-                let ns_tricks = solver.solve_with_caches(&mut cutoff_cache, &mut pattern_cache);
+                let ns_tricks = match seed {
+                    Some(g) => {
+                        solver.solve_with_caches_seeded(&mut cutoff_cache, &mut pattern_cache, g)
+                    }
+                    None => solver.solve_with_caches(&mut cutoff_cache, &mut pattern_cache),
+                };
+                seed = Some(Solver::seed_from(ns_tricks));
                 let elapsed = start.elapsed();
                 // Match C++ output: when N/S leads, show total - ns_tricks
                 let result = if l == NORTH || l == SOUTH {
