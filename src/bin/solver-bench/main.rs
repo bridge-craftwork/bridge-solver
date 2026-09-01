@@ -736,7 +736,13 @@ fn reference(args: &ReferenceArgs) -> Result<(), String> {
     // DDS allocates its per-thread working memory when resources are set, and
     // faults with "Memory::GetPtr" if a solve is attempted before that. It is
     // process-global state, so it is set here once before any call.
-    dds::set_threads(1);
+    //
+    // Set it to the *first* configuration we will measure rather than to 1, so
+    // that a single-valued `--dds-threads` needs only one `SetResources` for
+    // the whole run. DDS cannot survive a second one -- it tears its thread
+    // memory down before rebuilding it, and the rebuild does not always
+    // happen -- so measuring several thread counts means one process each.
+    dds::set_threads(args.dds_threads.first().copied().unwrap_or(1));
 
     // Agreement first: a timing comparison between two solvers that disagree
     // is meaningless.

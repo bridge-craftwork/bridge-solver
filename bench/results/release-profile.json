@@ -1,114 +1,114 @@
 {
   "corpus_version": "corpus-v1",
-  "revision": "v1.0.0-6-g0dab947-dirty",
+  "revision": "v1.0.0-7-gc1d337b-dirty",
   "machine": "Apple M4 Pro",
   "logical_cpus": 12,
   "runs": 5,
   "boards": {
     "1": {
       "best": {
-        "wall_ms": 26.564666,
-        "cpu_ms": 26.502000000000002
+        "wall_ms": 28.423750000000002,
+        "cpu_ms": 28.417
       },
-      "median_wall_ms": 28.5065,
-      "spread": 0.5388454724030788,
+      "median_wall_ms": 28.515666,
+      "spread": 0.36446633537094836,
       "runs": 5
     },
     "10": {
       "best": {
-        "wall_ms": 242.892292,
-        "cpu_ms": 242.7
+        "wall_ms": 258.753375,
+        "cpu_ms": 258.71
       },
-      "median_wall_ms": 246.991416,
-      "spread": 0.024447733401107664,
+      "median_wall_ms": 260.777542,
+      "spread": 0.020271395493875223,
       "runs": 5
     },
     "2": {
       "best": {
-        "wall_ms": 64.91425000000001,
-        "cpu_ms": 64.219
+        "wall_ms": 63.922542,
+        "cpu_ms": 63.914
       },
-      "median_wall_ms": 66.745209,
-      "spread": 0.03777483372294981,
+      "median_wall_ms": 64.646625,
+      "spread": 0.04153853893983113,
       "runs": 5
     },
     "3": {
       "best": {
-        "wall_ms": 182.669042,
-        "cpu_ms": 182.584
+        "wall_ms": 195.313416,
+        "cpu_ms": 195.271
       },
-      "median_wall_ms": 194.146125,
-      "spread": 0.09303916423889728,
+      "median_wall_ms": 202.487417,
+      "spread": 0.08075333135333625,
       "runs": 5
     },
     "4": {
       "best": {
-        "wall_ms": 85.061208,
-        "cpu_ms": 84.903
+        "wall_ms": 86.966792,
+        "cpu_ms": 86.94300000000001
       },
-      "median_wall_ms": 88.605,
-      "spread": 0.1670429486494009,
+      "median_wall_ms": 87.25895799999999,
+      "spread": 0.006971051663030216,
       "runs": 5
     },
     "5": {
       "best": {
-        "wall_ms": 124.650375,
-        "cpu_ms": 124.41199999999999
+        "wall_ms": 125.11520900000001,
+        "cpu_ms": 125.09400000000001
       },
-      "median_wall_ms": 126.46758399999999,
-      "spread": 0.13060630583742727,
+      "median_wall_ms": 125.68950000000001,
+      "spread": 0.013449268186092428,
       "runs": 5
     },
     "6": {
       "best": {
-        "wall_ms": 103.986666,
-        "cpu_ms": 103.95400000000001
+        "wall_ms": 110.231417,
+        "cpu_ms": 110.221
       },
-      "median_wall_ms": 108.177916,
-      "spread": 0.0554546291540879,
+      "median_wall_ms": 110.691958,
+      "spread": 0.00781953115961488,
       "runs": 5
     },
     "7": {
       "best": {
-        "wall_ms": 73.298084,
-        "cpu_ms": 73.286
+        "wall_ms": 79.01441700000001,
+        "cpu_ms": 78.998
       },
-      "median_wall_ms": 74.254166,
-      "spread": 0.048490339802060835,
+      "median_wall_ms": 79.48454100000001,
+      "spread": 0.010110484014581587,
       "runs": 5
     },
     "8": {
       "best": {
-        "wall_ms": 13.925625,
-        "cpu_ms": 13.925999999999998
+        "wall_ms": 14.232667,
+        "cpu_ms": 14.222
       },
-      "median_wall_ms": 13.994708999999999,
-      "spread": 0.01130110856783807,
+      "median_wall_ms": 14.428583999999999,
+      "spread": 0.023314885397093855,
       "runs": 5
     },
     "9": {
       "best": {
-        "wall_ms": 19.929334,
-        "cpu_ms": 19.93
+        "wall_ms": 21.140958,
+        "cpu_ms": 21.138
       },
-      "median_wall_ms": 19.974667,
-      "spread": 0.0515194837920825,
+      "median_wall_ms": 21.237291,
+      "spread": 0.017117294306152008,
       "runs": 5
     }
   },
   "sweep": {
-    "board": 7,
+    "board": 4,
     "solves_per_thread": 14,
     "points": [
       {
         "threads": 1,
         "measured": {
           "best": {
-            "wall_ms": 1078.018542,
-            "cpu_ms": 1076.705
+            "wall_ms": 1223.581166,
+            "cpu_ms": 1222.9099999999999
           },
-          "median_wall_ms": 1096.538416,
-          "spread": 0.1113183923324391,
+          "median_wall_ms": 1227.095209,
+          "spread": 0.03737985944121669,
           "runs": 5
         },
         "speedup": 1.0
@@ -117,144 +117,144 @@
         "threads": 2,
         "measured": {
           "best": {
-            "wall_ms": 1128.430375,
-            "cpu_ms": 2250.412
+            "wall_ms": 1266.19075,
+            "cpu_ms": 2528.2219999999998
           },
-          "median_wall_ms": 1131.692959,
-          "spread": 0.11306494386062597,
+          "median_wall_ms": 1268.5379580000001,
+          "spread": 0.027803802073265837,
           "runs": 5
         },
-        "speedup": 1.9106514072700322
+        "speedup": 1.9326964219253693
       },
       {
         "threads": 3,
         "measured": {
           "best": {
-            "wall_ms": 1175.569166,
-            "cpu_ms": 3522.7270000000003
+            "wall_ms": 1303.449125,
+            "cpu_ms": 3905.451
           },
-          "median_wall_ms": 1179.046334,
-          "spread": 0.009190619584522284,
+          "median_wall_ms": 1305.030625,
+          "spread": 0.009823999076296698,
           "runs": 5
         },
-        "speedup": 2.7510551650518535
+        "speedup": 2.8161770395142964
       },
       {
         "threads": 4,
         "measured": {
           "best": {
-            "wall_ms": 1218.752667,
-            "cpu_ms": 4862.938
+            "wall_ms": 1324.318333,
+            "cpu_ms": 5284.276
           },
-          "median_wall_ms": 1225.3583749999998,
-          "spread": 0.1232081061776253,
+          "median_wall_ms": 1326.676416,
+          "spread": 0.011742204734697972,
           "runs": 5
         },
-        "speedup": 3.5381043953850897
+        "speedup": 3.6957312619185796
       },
       {
         "threads": 5,
         "measured": {
           "best": {
-            "wall_ms": 1234.205708,
-            "cpu_ms": 6152.76
+            "wall_ms": 1326.7289170000001,
+            "cpu_ms": 6624.2
           },
-          "median_wall_ms": 1237.945916,
-          "spread": 0.021944849893693857,
+          "median_wall_ms": 1329.6729579999999,
+          "spread": 0.0071114437012002076,
           "runs": 5
         },
-        "speedup": 4.367256345568611
+        "speedup": 4.61127043483292
       },
       {
         "threads": 6,
         "measured": {
           "best": {
-            "wall_ms": 1238.123667,
-            "cpu_ms": 7414.055
+            "wall_ms": 1334.0069999999998,
+            "cpu_ms": 7984.563999999999
           },
-          "median_wall_ms": 1289.434209,
-          "spread": 0.1619124069292182,
+          "median_wall_ms": 1334.3553749999999,
+          "spread": 0.0673292006713609,
           "runs": 5
         },
-        "speedup": 5.224123748213594
+        "speedup": 5.5033346871493185
       },
       {
         "threads": 7,
         "measured": {
           "best": {
-            "wall_ms": 1242.79875,
-            "cpu_ms": 8653.912999999999
+            "wall_ms": 1348.533125,
+            "cpu_ms": 9391.112
           },
-          "median_wall_ms": 1253.886958,
-          "spread": 0.14758084685875325,
+          "median_wall_ms": 1352.6803329999998,
+          "spread": 0.11647257459841802,
           "runs": 5
         },
-        "speedup": 6.071883958685991
+        "speedup": 6.351396197256927
       },
       {
         "threads": 8,
         "measured": {
           "best": {
-            "wall_ms": 1308.829542,
-            "cpu_ms": 10182.839
+            "wall_ms": 1350.234709,
+            "cpu_ms": 10739.743
           },
-          "median_wall_ms": 1415.0563750000001,
-          "spread": 0.33029603483690323,
+          "median_wall_ms": 1367.268959,
+          "spread": 0.06273798135639526,
           "runs": 5
         },
-        "speedup": 6.5892066608013655
+        "speedup": 7.24959095093148
       },
       {
         "threads": 9,
         "measured": {
           "best": {
-            "wall_ms": 1455.055333,
-            "cpu_ms": 12398.602
+            "wall_ms": 1479.359667,
+            "cpu_ms": 13066.2
           },
-          "median_wall_ms": 1686.531833,
-          "spread": 0.42672675596454446,
+          "median_wall_ms": 1486.8819580000002,
+          "spread": 0.08131102373767768,
           "runs": 5
         },
-        "speedup": 6.667902352549228
+        "speedup": 7.443916945722706
       },
       {
         "threads": 10,
         "measured": {
           "best": {
-            "wall_ms": 1531.0174160000001,
-            "cpu_ms": 14054.75
+            "wall_ms": 1591.725584,
+            "cpu_ms": 15377.387999999999
           },
-          "median_wall_ms": 1694.8130409999999,
-          "spread": 0.24173516651883717,
+          "median_wall_ms": 1633.598375,
+          "spread": 0.130085000882916,
           "runs": 5
         },
-        "speedup": 7.041190588259121
+        "speedup": 7.687136390213351
       },
       {
         "threads": 11,
         "measured": {
           "best": {
-            "wall_ms": 1771.749875,
-            "cpu_ms": 16051.258
+            "wall_ms": 1739.8670410000002,
+            "cpu_ms": 17753.472999999998
           },
-          "median_wall_ms": 2025.899167,
-          "spread": 0.27962120386772976,
+          "median_wall_ms": 1745.9317909999997,
+          "spread": 0.11760841269939297,
           "runs": 5
         },
-        "speedup": 6.692933426621521
+        "speedup": 7.735874356389971
       },
       {
         "threads": 12,
         "measured": {
           "best": {
-            "wall_ms": 1947.863541,
-            "cpu_ms": 17309.826
+            "wall_ms": 1842.5970419999999,
+            "cpu_ms": 19552.196
           },
-          "median_wall_ms": 2022.575459,
-          "spread": 0.13724301645009324,
+          "median_wall_ms": 1916.9754169999999,
+          "spread": 0.1542753887694564,
           "runs": 5
         },
-        "speedup": 6.641236530028569
+        "speedup": 7.968629959409215
       }
     ]
   }
