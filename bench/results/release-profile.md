@@ -127,48 +127,85 @@ only in aggregate.
 DDS's threading backend here is GCD, which `IsIMPL()` does not cover, so
 `thrMax = min(1, ncores) = 1` and the column is genuinely single-threaded.
 
-## Against DDS across threads — not yet a fair comparison
+## Against DDS across threads
 
-DDS's own scaling, corpus total, best of 5, one process per thread count:
+Deal-level throughput: 240 distinct generated deals, both solvers given the same
+list at the same thread count, best of 3. `solver-bench reference
+--dds-threads N --throughput-deals 240`, one process per point.
 
-| DDS threads | corpus ms | speedup |
-|---|---|---|
-| 1 | 816.0 | 1.00x |
-| 2 | 474.0 | 1.72x |
-| 3 | 254.1 | 3.21x |
-| 4 | 221.0 | 3.69x |
-| 6 | 298.6 | 2.73x |
-| 8 | 276.6 | 2.95x |
-| 10 | 193.9 | 4.21x |
-| 12 | 297.6 | 2.74x |
+| threads | ours ms | cores | dds ms | cores | ours/dds |
+|---|---|---|---|---|---|
+| 1 | 28885 | 1.00 | 25806 | 1.00 | 1.12x |
+| 2 | 15051 | 1.99 | 13186 | 1.99 | 1.14x |
+| 4 | 8094 | 3.93 | 6883 | 3.94 | 1.18x |
+| 6 | 5637 | 5.75 | 4775 | 5.74 | 1.18x |
+| 8 | 4499 | 7.53 | 4012 | 7.45 | 1.12x |
+| 10 | 4099 | 9.23 | 3693 | 8.80 | 1.11x |
+| 12 | 3825 | 10.34 | 3484 | 9.77 | **1.10x** |
 
-The curve is erratic and non-monotonic. That is DDS, not the machine: our own
-single-threaded anchor, measured in the same eight runs, held between 991 and
-1005 ms — 1.4% — so conditions were stable throughout.
+**Threading is a wash.** The two solvers put almost exactly the same number of
+cores to work at every point, and the ratio stays between 1.10x and 1.18x from
+one thread to twelve. Whatever gap remains is per-node cost, not parallelism,
+and it does not grow with core count — which is the thing worth knowing before
+telling anyone to run this on their own machine.
 
-**Do not read this as "we scale to 8x and DDS only manages 4x".** The two
-numbers measure different work. `dds.rs` calls `CalcAllTablesPBN` with
-`no_of_tables = 1`, so DDS is parallelising *within* one twenty-entry table
-whose entries have very unequal cost; wall time is set by the slowest chunk and
-by scheduling luck, which is exactly why the curve jumps around. Our sweep gives
-our solver N *independent* deals, which is an embarrassingly parallel workload
-by comparison.
+Note the ratio on random deals (1.12x at one thread) is worse than on the
+curated corpus (1.06x geometric mean). The corpus was selected to span a range
+of difficulty, not to be representative; random deals are the better model of a
+real file, and the honest headline number.
 
-DDS has a batch API — the same call takes up to 40 tables at once — and given
-ten boards it would parallelise across them and almost certainly scale far
-better than this. **A fair deal-throughput comparison needs the harness to pass
-the whole corpus in one `CalcAllTablesPBN` call.** Until it does, the honest
-claim is limited to the single-threaded column above.
+Getting to this table took three corrections, each of which would have produced
+a confidently wrong published figure.
 
-### A note on measuring DDS at more than one thread count
+**One deal per call gave DDS five work items.** `dds.rs` called
+`CalcAllTablesPBN` with `no_of_tables = 1`. `CalcAllTables` flattens the request
+into one item per (deal, strain) pair before scheduling, so a single deal offers
+five items no matter how many threads are configured — most idle, wall time set
+by the slowest strain. The old measurement showed DDS jumping between 2.7x and
+4.2x; that was load imbalance, not scaling. `solve_tables` now batches, chunked
+at forty (DDS enforces `count * noOfTables <= 200`, and all five strains means
+forty deals).
+
+**Repeating the corpus handed DDS a free win.** The first throughput workload
+was the ten-board corpus repeated eight times, and it measured DDS at **4.70x
+our speed**. That number was entirely an artefact: `DetectCalcDuplicates` and
+`CopyCalcSingle` de-duplicate identical deals inside a batch and copy the
+result rather than solving again, so DDS solved ten deals per chunk while we
+solved eighty. The workload is now distinct deals from a seeded generator, and
+five of them are checked against DDS before timing — a generator emitting
+well-formed but wrongly ordered deals would otherwise produce plausible
+timings for work nobody did.
+
+**DDS's macOS default pins it to the efficiency cores.** With the batch fixed,
+DDS still flatlined at 3.97 cores and an identical wall time from four threads
+up, while reporting twelve threads made. The cause is in `System.cpp`:
+
+```c
+dispatch_apply(numThreads,
+  dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_BACKGROUND, 0), ...)
+```
+
+Background QoS on Apple Silicon is confined to the efficiency cores, of which
+an M4 Pro has exactly four. DDS's GCD backend therefore cannot exceed four
+cores on this machine however it is configured. That is a property of how DDS
+is packaged on macOS, not of DDS's scaling, and building a comparison on it
+would have been indefensible. `reference` now calls `SetThreading(5)` — DDS's
+STL backend, plain `std::thread` at default QoS, scheduled across all cores
+like ours — and `--dds-threading 3` restores GCD for anyone who wants to see
+the difference.
+
+Worth flagging separately, because it is not our problem to fix but it is real:
+**a Mac user driving DDS through its default GCD path gets four cores.**
+
+### Measuring DDS at more than one thread count
 
 DDS cannot survive a second `SetResources`: it tears its per-thread memory down
 with `memory.Resize(0, ...)` before rebuilding, and the rebuild does not always
 happen — the next solve then hits `Memory::GetPtr: 0 vs. 0` and DDS calls
-`exit(1)`, taking the harness with it. `dds.rs` now skips redundant calls and
-`main.rs` seeds the initial call with the first thread count to be measured, so
-a single-valued `--dds-threads` needs exactly one. **Several thread counts means
-one process each**; a multi-valued `--dds-threads` still dies.
+`exit(1)`, taking the harness with it. `reference` now seeds the initial call
+with the thread count it will measure and rejects a multi-valued
+`--dds-threads` with an explanation rather than dying. **A curve means one
+process per point.**
 
 ## Three things that looked wrong and were not
 
@@ -199,9 +236,9 @@ Already clean, and worth not re-checking: there is **no per-node allocation**
 
 ## Still open
 
-- **A fair threaded comparison against DDS**, via its batch API. This is the
-  one that matters for "how do we stack up on someone else's machine".
-- **The per-board spread** against both references, above.
+- **The per-board spread** against DDS, above: 0.73x to 1.76x on the curated
+  corpus. Not noise, and not uniform overhead. Worth checking whether node
+  counts track DDS per board rather than only in aggregate.
 - **39 `panic_bounds_check` sites** in the two hot functions. One concrete
   instance: `CutoffCache::lookup` and `store` index
   `self.entries[(base_index + d) & self.mask]`, and LLVM cannot prove

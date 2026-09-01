@@ -354,10 +354,24 @@ struct ReferenceArgs {
     #[arg(long, default_value_t = 3)]
     runs: usize,
 
-    /// Thread counts to measure DDS at. DDS parallelises *within* one table,
-    /// so this is its intra-solve scaling, not deal-level throughput.
-    #[arg(long, value_delimiter = ',', default_values_t = [1usize, 4, 12])]
+    /// Thread count to measure at. Both solvers get the same one.
+    ///
+    /// Exactly one value: DDS cannot survive a second `SetResources`, so
+    /// measuring a curve means one process per thread count.
+    #[arg(long, value_delimiter = ',', default_values_t = [1usize])]
     dds_threads: Vec<usize>,
+
+    /// DDS threading backend: 3 = GCD, 5 = STL. GCD is DDS's own default on
+    /// macOS and dispatches at background priority, which Apple Silicon
+    /// confines to the efficiency cores; STL is the like-for-like choice.
+    #[arg(long, default_value_t = 5)]
+    dds_threading: usize,
+
+    /// Distinct deals to generate for the throughput measurement. Ten boards
+    /// is not enough work to keep twelve threads busy, and the corpus cannot
+    /// simply be repeated -- see `generated_deals`.
+    #[arg(long, default_value_t = 120)]
+    throughput_deals: usize,
 }
 
 #[derive(Args, Clone)]
@@ -742,14 +756,33 @@ fn reference(args: &ReferenceArgs) -> Result<(), String> {
     // the whole run. DDS cannot survive a second one -- it tears its thread
     // memory down before rebuilding it, and the rebuild does not always
     // happen -- so measuring several thread counts means one process each.
-    dds::set_threads(args.dds_threads.first().copied().unwrap_or(1));
+    if args.dds_threads.len() > 1 {
+        return Err(
+            "--dds-threads takes one value. DDS tears its thread memory down on a \n\
+             second SetResources and does not always rebuild it, so a thread-count \n\
+             curve means one process per point."
+                .into(),
+        );
+    }
+    let threads = args.dds_threads.first().copied().unwrap_or(1);
+    dds::set_backend(args.dds_threading as i32)?;
+    dds::set_threads(threads);
+    let (backend, dds_cores, dds_threads) = dds::info();
+    println!(
+        "dds      : {backend} threading, {dds_cores} cores seen, {dds_threads} threads made\n"
+    );
 
     // Agreement first: a timing comparison between two solvers that disagree
     // is meaningless.
+    // Solved as one batch, so this doubles as the check on the batched result
+    // indexing that the throughput measurement below depends on.
+    let all_pbns: Vec<&str> = corpus.boards.iter().map(|b| b.pbn.as_str()).collect();
+    let dds_tables = dds::solve_tables(&all_pbns)?;
+
     let mut disagreements = 0;
-    for (board, deal) in corpus.boards.iter().zip(&deals) {
+    for ((board, deal), dds_table) in corpus.boards.iter().zip(&deals).zip(&dds_tables) {
         let ours = encode_ddtricks(&solve_dd_table(deal).tricks);
-        let theirs = encode_ddtricks(&dds::solve_table(&board.pbn)?);
+        let theirs = encode_ddtricks(dds_table);
         if ours != theirs {
             println!(
                 "board {}: DISAGREEMENT\n  ours {ours}\n  dds  {theirs}",
@@ -812,7 +845,158 @@ fn reference(args: &ReferenceArgs) -> Result<(), String> {
             ratios.len()
         );
     }
+
+    throughput(args, threads)
+}
+
+/// Deal-level throughput: the whole corpus, both solvers, at the same thread
+/// count, over one shared work list.
+///
+/// This is the comparison someone choosing a solver for their own machine
+/// actually cares about, and it is the one the per-board table above cannot
+/// answer. It is only honest because DDS gets the deals in a batch: given one
+/// deal at a time it has five work items to spread over N threads and the
+/// result measures load imbalance rather than scaling.
+///
+/// Each solver parallelises however it likes. Ours takes deals off a shared
+/// cursor, which is work-stealing in all but name and so tolerates the 18x
+/// spread in board cost. DDS is handed the list in chunks of forty and
+/// schedules the (deal, strain) pairs itself.
+#[cfg(feature = "dds-reference")]
+fn throughput(args: &ReferenceArgs, threads: usize) -> Result<(), String> {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let generated = generated_deals(args.throughput_deals.max(1))?;
+    let pbns: Vec<&str> = generated.iter().map(|(p, _)| p.as_str()).collect();
+    let work: Vec<&Deal> = generated.iter().map(|(_, d)| d).collect();
+
+    // Check a sample before timing. A generator that emitted well-formed but
+    // wrongly ordered deals would still parse, still solve, and still produce
+    // plausible timings -- of a workload that is not the one being reported.
+    let sample = work.len().min(5);
+    for (i, (pbn, deal)) in generated.iter().take(sample).enumerate() {
+        let ours = encode_ddtricks(&solve_dd_table(deal).tricks);
+        let theirs = encode_ddtricks(&dds::solve_table(pbn)?);
+        if ours != theirs {
+            return Err(format!(
+                "generated deal {i} disagrees, so the throughput workload is not \n\
+                 the same work for both solvers\n  ours {ours}\n  dds  {theirs}\n  {pbn}"
+            ));
+        }
+    }
+
+    println!(
+        "\ndeal-level throughput: {} generated deals ({sample} checked), \
+         {threads} thread(s), best of {}",
+        work.len(),
+        args.runs
+    );
+
+    let ours = best_of(args.runs, || {
+        let cursor = AtomicUsize::new(0);
+        std::thread::scope(|scope| {
+            for _ in 0..threads {
+                scope.spawn(|| loop {
+                    let i = cursor.fetch_add(1, Ordering::Relaxed);
+                    let Some(deal) = work.get(i) else { break };
+                    let _ = solve_dd_table(deal);
+                });
+            }
+        });
+    });
+
+    let mut err = None;
+    let dds = best_of(args.runs, || {
+        if let Err(e) = dds::solve_tables(&pbns) {
+            err = Some(e);
+        }
+    });
+    if let Some(e) = err {
+        return Err(e);
+    }
+
+    println!(
+        "{:>8}  {:>10}  {:>10}  {:>7}  {:>11}",
+        "", "wall ms", "cpu ms", "cores", "deals/sec"
+    );
+    for (name, m) in [("ours", &ours), ("dds", &dds)] {
+        println!(
+            "{:>8}  {:>10.1}  {:>10.1}  {:>7.2}  {:>11.1}",
+            name,
+            m.best.wall_ms,
+            m.best.cpu_ms,
+            m.best.cpu_ms / m.best.wall_ms,
+            work.len() as f64 * 1000.0 / m.best.wall_ms,
+        );
+    }
+    let ratio = ours.best.wall_ms / dds.best.wall_ms;
+    println!("\nOn {threads} thread(s) we take {ratio:.2}x DDS's wall clock for the same deals.");
     Ok(())
+}
+
+/// Deterministic pseudo-random deals for the throughput measurement.
+///
+/// The corpus cannot be used for this, and neither can repeats of it. DDS
+/// de-duplicates identical deals inside a batch -- `DetectCalcDuplicates` and
+/// `CopyCalcSingle` -- and copies a result rather than solving again. Eight
+/// copies of the ten-board corpus is eighty solves for us and ten for DDS,
+/// which measured as a 4.7x win for DDS that was entirely an artefact of the
+/// workload. Distinct deals are the only honest comparison; generating them
+/// from a fixed seed keeps runs comparable without committing a large fixture.
+///
+/// Random deals are also the better workload here on their own merits: the
+/// corpus was curated to span 16 ms to 300 ms, which is what makes it a good
+/// per-board fixture and a poor model of a real file.
+#[cfg(feature = "dds-reference")]
+fn generated_deals(count: usize) -> Result<Vec<(String, Deal)>, String> {
+    // Index 0 is the ace, so sorting ascending yields PBN's descending ranks.
+    const RANK_CHARS: [u8; 13] = *b"AKQJT98765432";
+
+    let mut state: u64 = 0x2545_f491_4f6c_dd1d;
+    let mut rand = move || {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        state
+    };
+
+    let mut out = Vec::with_capacity(count);
+    for _ in 0..count {
+        let mut deck: [usize; 52] = std::array::from_fn(|i| i);
+        for i in (1..52).rev() {
+            let j = (rand() % (i as u64 + 1)) as usize;
+            deck.swap(i, j);
+        }
+
+        // Thirteen cards per seat in PBN's N,E,S,W order; card = suit * 13 +
+        // rank, with suit 0 spades so the suit loop emits S.H.D.C as PBN wants.
+        let mut pbn = String::from("N:");
+        for seat in 0..4 {
+            if seat > 0 {
+                pbn.push(' ');
+            }
+            let hand = &deck[seat * 13..seat * 13 + 13];
+            for suit in 0..4 {
+                if suit > 0 {
+                    pbn.push('.');
+                }
+                let mut ranks: Vec<usize> = hand
+                    .iter()
+                    .filter(|c| *c / 13 == suit)
+                    .map(|c| c % 13)
+                    .collect();
+                ranks.sort_unstable();
+                for r in ranks {
+                    pbn.push(RANK_CHARS[r] as char);
+                }
+            }
+        }
+
+        let deal =
+            Deal::from_pbn(&pbn).ok_or_else(|| format!("generated an unparseable deal: {pbn}"))?;
+        out.push((pbn, deal));
+    }
+    Ok(out)
 }
 
 /// Index of the median-cost board, chosen deterministically so that two
