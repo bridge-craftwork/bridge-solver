@@ -515,6 +515,8 @@ thread_local! {
 
 pub(crate) static XRAY_COUNT: AtomicUsize = AtomicUsize::new(0);
 pub(crate) static XRAY_LIMIT: AtomicUsize = AtomicUsize::new(0);
+/// Emit a cache digest every N xray iterations; 0 disables it.
+pub(crate) static XRAY_CACHE_INTERVAL: AtomicUsize = AtomicUsize::new(0);
 pub(crate) static NO_PRUNING: AtomicBool = AtomicBool::new(false);
 pub(crate) static NO_TT: AtomicBool = AtomicBool::new(false);
 pub(crate) static NO_RANK_SKIP: AtomicBool = AtomicBool::new(false);
@@ -535,6 +537,18 @@ pub fn set_xray_limit(limit: usize) {
 pub(crate) fn xray_should_log() -> bool {
     let limit = XRAY_LIMIT.load(Ordering::Relaxed);
     limit > 0 && XRAY_COUNT.load(Ordering::Relaxed) <= limit
+}
+
+/// Emit a cache content digest every `n` xray iterations (0 = never).
+///
+/// The trace records what the search *did*; this records what its caches
+/// *hold*. Those diverge at different moments: two searches can take the same
+/// decisions for a long time while their caches drift apart through different
+/// eviction, resizing or pattern-tree shape, and the first visible symptom is
+/// then a lookup that hits on one side and misses on the other -- far too late
+/// to say why. Digesting on an interval and bisecting finds the drift instead.
+pub fn set_xray_cache_interval(n: usize) {
+    XRAY_CACHE_INTERVAL.store(n, Ordering::Relaxed);
 }
 
 /// Set no-pruning mode (disables fast/slow tricks pruning for debugging)

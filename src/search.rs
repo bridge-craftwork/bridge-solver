@@ -14,7 +14,7 @@ use std::sync::atomic::Ordering;
 
 // Re-export atomic counters from bridge_solver module
 use super::bridge_solver::{
-    xray_should_log, NO_PRUNING, NO_RANK_SKIP, NO_TT, XRAY_COUNT, XRAY_LIMIT,
+    xray_should_log, NO_PRUNING, NO_RANK_SKIP, NO_TT, XRAY_CACHE_INTERVAL, XRAY_COUNT, XRAY_LIMIT,
 };
 
 /// Search result - NS tricks and rank winners (cards whose rank affected the outcome)
@@ -67,6 +67,34 @@ pub struct CutoffCache {
 }
 
 impl CutoffCache {
+    /// Live entries, and a digest of their contents. See
+    /// `pattern::PatternCache::digest` for the rules the value obeys.
+    pub fn digest(&self) -> (usize, u64) {
+        let mut count = 0;
+        let mut digest = 0u64;
+        for entry in self.entries.iter() {
+            if entry.hash == 0 {
+                continue;
+            }
+            count += 1;
+            let mut h = super::pattern::mix_for_digest(entry.hash);
+            for (i, card) in entry.card.iter().enumerate() {
+                // "No card" is 255 here and TOTAL_CARDS in the C++ reference,
+                // so canonicalise it or the digests could never agree.
+                let c = if (*card as usize) < TOTAL_CARDS {
+                    *card as u64
+                } else {
+                    64
+                };
+                h = super::pattern::mix_for_digest(
+                    h ^ super::pattern::mix_for_digest((c << 8) | i as u64),
+                );
+            }
+            digest ^= h;
+        }
+        (count, digest)
+    }
+
     pub fn new(bits: usize) -> Self {
         let size = 1 << bits;
         let default_entry = CutoffEntry {
@@ -493,6 +521,14 @@ impl<'a> Search<'a> {
             let count = XRAY_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
             if count == limit + 1 {
                 eprintln!("XRAY_LIMIT_REACHED: {} iterations", limit);
+            }
+            let interval = XRAY_CACHE_INTERVAL.load(Ordering::Relaxed);
+            if interval > 0 && count <= limit && count.is_multiple_of(interval) {
+                let (cutoff_n, cutoff_h) = self.cutoff_cache.digest();
+                let (pattern_n, pattern_h) = self.pattern_cache.digest();
+                eprintln!(
+                    "CACHE: iter={count} cutoff={cutoff_n}/{cutoff_h:016x} pattern={pattern_n}/{pattern_h:016x}"
+                );
             }
         }
 

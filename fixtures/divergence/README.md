@@ -13,7 +13,7 @@ the remaining gap is extra work rather than slower work.
 ## Running them
 
 ```bash
-UPSTREAM=~/src/bridge-solver XRAY=~/src/bridge-solver-xray/xray/solver-xray \
+XRAY=~/src/bridge-solver-xray/xray/solver-xray \
   fixtures/divergence/first-divergence.sh
 ```
 
@@ -27,16 +27,14 @@ Build the reference's instrumented solver with:
 clang++ -std=c++17 -O3 -o solver-xray xray/bridge-solver.cc
 ```
 
-## Why the deals are named and not committed
+## Provenance of the deals
 
-`1k_deals` belongs to `macroxue/bridge-solver`, which is GPL-2.0; this repo is
-MIT OR Apache-2.0. Randomly generated deals are almost certainly uncopyrightable
-data rather than authorship, so vendoring them is very likely fine — but that is
-a call to make deliberately, not one to inherit from a fixture directory. The
-manifest names them instead and the script reads them from a checkout.
-
-Regenerating equivalent positions from `solver-bench`'s own seeded generator
-would make the set self-contained and moot the question.
+The seven deals come from `1k_deals` in `macroxue/bridge-solver`, whose code is
+GPL-2.0 while this repo is MIT OR Apache-2.0. That is not a conflict here: a
+bridge deal is a random arrangement of cards, not authorship, and carries no
+copyright of its own. (Analysis *of* a deal — commentary, a bidding sequence, a
+play write-up — can be; the deal cannot.) They are committed here verbatim, with
+the trump and opening leader appended.
 
 ## What each position isolates
 
@@ -59,12 +57,40 @@ relative position, so we promote `D9` into a higher-priority bucket than
 
 **`PATTERN_HIT` (deal.38)** — at depth 16 the reference reports
 `bounds=[0,7] adj_upper=10 UPPER_CUT` and prunes; we miss and go on to compute
-fast tricks and store. Every preceding line is identical, so both caches hold
-the same entries and our lookup is the narrower one.
+fast tricks and store. Every preceding trace line is identical, which reads as
+a narrower lookup on our side — and is not: the cache digests show the two
+caches had already parted company 445 iterations earlier. See below.
 
 All three fail safely. A low fast-trick estimate, a worse move order and a
 missed pattern hit can only fail to prune — none can return a wrong answer,
 which is why the correctness suite stays green while node counts do not.
+
+## Two indicators, and why you want both
+
+`-C <n>` on both solvers emits a content digest of the cutoff and pattern caches
+every `n` iterations. The trace shows the first difference in what was
+*computed*; the digest shows the first difference in what was *kept*, and
+neither comes first reliably:
+
+| deal | trace differs at | caches differ at |
+|---|---|---|
+| `deal.134` | iter 9 | iter 20 |
+| `deal.1` | iter 29 | iter 40 |
+| `deal.72` | iter 28 | iter 1170 |
+| `deal.38` | iter 1635 | **iter 1190** |
+
+`deal.72`'s trace fires at 28 on a fast-trick estimate that both sides then cap
+to the same number — visible, but nothing behavioural has happened, and the
+caches agree for another eleven hundred iterations. `deal.38` is the reverse,
+and it corrected a wrong conclusion: the pattern-cache miss at 1635 looked like
+a narrower lookup because every preceding trace line matched, when in fact the
+caches had drifted apart 445 iterations earlier.
+
+The digest is comparable across the two implementations because it XORs across
+live slots — table size, hash function and probe order all differ and must not
+matter — and walks each pattern tree pre-order, since the tree's shape is what
+decides whether a lookup matches. It is splitmix64 on both sides, and the
+"no card" sentinel is canonicalised (255 here, `TOTAL_CARDS` there).
 
 ## Determinism
 

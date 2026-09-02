@@ -251,8 +251,38 @@ difference, in `order_leads`.
 
 **Pattern cache** (`deal.38`, depth 16): the reference reports
 `PATTERN_HIT ... bounds=[0,7] adj_upper=10 UPPER_CUT` and prunes. We miss, and
-go on to compute fast tricks and store. Everything before that line is
-identical, so both caches hold the same entries and our *lookup* is narrower.
+go on to compute fast tricks and store.
+
+Every preceding trace line is identical, which first read as "both caches hold
+the same entries, so our lookup is narrower". **That was wrong.** Digesting the
+cache contents shows they had already parted company 445 iterations earlier, at
+1190 against the miss at 1635. The miss is a consequence of cache drift the
+trace could not see, not a lookup bug, and the thing to find is the write that
+differs around iteration 1190.
+
+### Digesting the caches, not just the trace
+
+The trace records what the search *computed*; it says nothing about what the
+caches *kept*. Those diverge at different moments, so `solver-diag -C <n>` (and
+the same flag on the instrumented reference) emits a content digest of both
+caches every `n` iterations. It XORs across live slots -- table size, hash
+function and probe order all differ between the two and must not matter -- and
+walks each pattern tree pre-order, because the tree's shape is what decides
+whether `lookup` matches.
+
+Neither indicator dominates:
+
+| deal | trace differs at | caches differ at |
+|---|---|---|
+| `deal.134` | iter 9 | iter 20 |
+| `deal.1` | iter 29 | iter 40 |
+| `deal.72` | iter 28 | **iter 1170** |
+| `deal.38` | iter 1635 | **iter 1190** |
+
+`deal.72`'s trace fires at 28 on a fast-trick estimate both sides then cap to
+the same value: a visible difference that changes nothing, and the caches
+rightly agree for another eleven hundred iterations. `deal.38` is the reverse,
+and is why the pattern-cache conclusion above had to be withdrawn.
 
 All three are safe and all three cost nodes. A low fast-trick estimate, a missed
 pattern hit and a worse move order can only fail to prune, never return a wrong

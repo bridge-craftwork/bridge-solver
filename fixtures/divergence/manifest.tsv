@@ -1,20 +1,31 @@
 # Positions where our search diverges from the C++ reference.
 #
-# deal    the deal's name in macroxue/bridge-solver's 1k_deals corpus
-# trump   trump suit for the single search (N = notrump)
+# deal    the deal, in the reference's own file format, with trump and opening
+#         leader appended so both solvers do exactly one search
+# trump   trump suit for that search (N = notrump)
 # lead    opening leader
 # line    xray trace line of the first divergence, with `remaining=[...]`
 #         normalised out (the two solvers format that field differently)
+# iter    xray iteration of that line
+# cache   xray iteration at which the cache digests first differ (-C 10)
 # mech    the trace record type where they part company
 #
 # Every row is one search from a cold cache, so it reproduces standalone: no
 # preceding cells, no shared cache state, no ordering to set up.
 #
-# deal	trump	lead	line	mech
-deal.72	N	W	208	FAST_TRICKS
-deal.134	N	W	69	MOVE_ORDER_AFTER
-deal.1	N	W	219	MOVE_ORDER_AFTER
-deal.38	N	W	13132	PATTERN_HIT
-deal.12	N	W	16347	FAST_TRICKS
-deal.10	N	W	31330	FAST_TRICKS
-deal.4	N	W	37590	FAST_TRICKS
+# The two indicators answer different questions and neither dominates. The
+# trace shows the first difference in what was *computed*; the digest shows the
+# first difference in what was *kept*. On deal.72 the trace fires at iteration
+# 28 on a fast-trick estimate that both sides then cap to the same value, so
+# nothing behavioural has happened yet and the caches agree until 1170. On
+# deal.38 it is the other way round: the caches part at 1190 and the trace shows
+# nothing until 1635.
+#
+# deal	trump	lead	line	iter	cache	mech
+deal.134	N	W	69	9	20	MOVE_ORDER_AFTER
+deal.1	N	W	219	29	40	MOVE_ORDER_AFTER
+deal.72	N	W	208	28	1170	FAST_TRICKS
+deal.38	N	W	13132	1635	1190	PATTERN_HIT
+deal.12	N	W	16347	-	-	FAST_TRICKS
+deal.10	N	W	31330	-	-	FAST_TRICKS
+deal.4	N	W	37590	-	-	FAST_TRICKS

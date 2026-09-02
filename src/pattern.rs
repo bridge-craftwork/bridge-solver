@@ -534,3 +534,61 @@ fn card_of(suit: Suit, rank: usize) -> usize {
 }
 
 const ACE: usize = 12;
+
+/// A content digest of a cache, for finding where two solvers' caches part
+/// company.
+///
+/// Two rules make the value comparable across independent implementations:
+///
+///  * **Order-independent across slots.** The digest XORs each live slot's
+///    contribution, so table size, hash function and probe order -- all of
+///    which differ between us and the C++ reference -- cannot affect it.
+///  * **Structure-sensitive within a pattern.** A pattern is a tree and its
+///    shape decides what `lookup` will match, so the walk is pre-order and
+///    mixes each child's index. Two caches holding the same patterns in a
+///    different tree shape are genuinely different caches and must not
+///    collide.
+///
+/// `splitmix64`, so a reimplementation has something exact to match.
+#[inline]
+pub(crate) fn mix_for_digest(x: u64) -> u64 {
+    mix(x)
+}
+
+#[inline]
+fn mix(mut x: u64) -> u64 {
+    x = x.wrapping_add(0x9e37_79b9_7f4a_7c15);
+    let mut z = x;
+    z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+    z ^ (z >> 31)
+}
+
+fn pattern_digest(p: &Pattern, depth: u64) -> u64 {
+    let mut h = mix(depth);
+    for seat in 0..NUM_SEATS {
+        h = mix(h ^ mix(p.hands[seat].value()));
+    }
+    h = mix(h ^ mix(p.bounds.lower as i64 as u64));
+    h = mix(h ^ mix(p.bounds.upper as i64 as u64));
+    for (i, child) in p.children.iter().enumerate() {
+        h = mix(h ^ mix(pattern_digest(child, depth + 1) ^ (i as u64)));
+    }
+    h
+}
+
+impl PatternCache {
+    /// Live entries, and a digest of their contents.
+    pub fn digest(&self) -> (usize, u64) {
+        let mut count = 0;
+        let mut digest = 0u64;
+        for entry in self.entries.iter() {
+            if entry.hash == 0 {
+                continue;
+            }
+            count += 1;
+            digest ^= mix(entry.hash) ^ pattern_digest(&entry.pattern, 0);
+        }
+        (count, digest)
+    }
+}

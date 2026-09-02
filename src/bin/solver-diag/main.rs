@@ -12,9 +12,9 @@
 use bridge_solver::cards::card_of;
 use bridge_solver::types::rank_name;
 use bridge_solver::{
-    set_no_pruning, set_no_rank_skip, set_no_tt, set_show_perf, set_xray_limit, Cards, CutoffCache,
-    Hands, PatternCache, Solver, CLUB, DIAMOND, EAST, HEART, NORTH, NOTRUMP, NUM_RANKS, SOUTH,
-    SPADE, WEST,
+    set_no_pruning, set_no_rank_skip, set_no_tt, set_show_perf, set_xray_cache_interval,
+    set_xray_limit, Cards, CutoffCache, Hands, PatternCache, Solver, CLUB, DIAMOND, EAST, HEART,
+    NORTH, NOTRUMP, NUM_RANKS, SOUTH, SPADE, WEST,
 };
 use std::env;
 use std::fs;
@@ -26,6 +26,7 @@ fn main() {
     // Parse arguments
     let mut file_path = None;
     let mut xray_iterations = 0usize;
+    let mut cache_interval = 0usize;
     let mut no_pruning = false;
     let mut no_tt = false;
     let mut no_rank_skip = false;
@@ -37,6 +38,9 @@ fn main() {
             i += 2;
         } else if args[i] == "-X" && i + 1 < args.len() {
             xray_iterations = args[i + 1].parse().unwrap_or(0);
+            i += 2;
+        } else if args[i] == "-C" && i + 1 < args.len() {
+            cache_interval = args[i + 1].parse().unwrap_or(0);
             i += 2;
         } else if args[i] == "-P" {
             no_pruning = true;
@@ -58,7 +62,9 @@ fn main() {
     let file_path = match file_path {
         Some(p) => p,
         None => {
-            eprintln!("Usage: solver -f <file> [-X <iterations>] [-P] [-T] [-R] [-V]");
+            eprintln!(
+                "Usage: solver -f <file> [-X <iterations>] [-C <interval>] [-P] [-T] [-R] [-V]"
+            );
             std::process::exit(1);
         }
     };
@@ -66,6 +72,12 @@ fn main() {
     // Set xray limit if specified
     if xray_iterations > 0 {
         set_xray_limit(xray_iterations);
+    }
+
+    // Digest the caches every N iterations, for locating cache drift that the
+    // decision trace does not show.
+    if cache_interval > 0 {
+        set_xray_cache_interval(cache_interval);
     }
 
     // Set no-pruning mode if specified
