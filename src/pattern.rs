@@ -389,7 +389,6 @@ impl ShapeEntry {
 pub struct PatternCache {
     entries: Box<[ShapeEntry]>,
     bits: usize,
-    mask: usize,
     probe_distance: usize,
     load_count: usize,
 }
@@ -404,7 +403,6 @@ impl PatternCache {
         PatternCache {
             entries: entries.into_boxed_slice(),
             bits,
-            mask: size - 1,
             probe_distance: 0,
             load_count: 0,
         }
@@ -430,8 +428,11 @@ impl PatternCache {
 
     #[inline]
     fn index(&self, hash: u64) -> usize {
-        // Use top bits for index (like C++)
-        (hash >> (64 - self.bits)) as usize & self.mask
+        // Use top bits for index (like C++). The mask is derived from the
+        // length rather than stored beside it so that LLVM can see
+        // `idx <= len - 1` and drop the bounds check on the probes below;
+        // from a separate field it cannot know the two agree.
+        (hash >> (64 - self.bits)) as usize & (self.entries.len() - 1)
     }
 
     /// Look up a shape entry.
@@ -440,11 +441,12 @@ impl PatternCache {
     /// root slot; see [`ShapeEntry::lookup`].
     pub fn lookup(&mut self, hash: u64) -> Option<&mut ShapeEntry> {
         let base = self.index(hash);
+        let mask = self.entries.len() - 1;
         let mut found = None;
         // Only as far as anything has ever been placed; an empty slot means
         // the entry cannot be further along, because insertion never skips one.
         for d in 0..self.probe_distance {
-            let idx = (base + d) & self.mask;
+            let idx = (base + d) & mask;
             let h = self.entries[idx].hash;
             if h == hash {
                 found = Some(idx);
@@ -459,15 +461,17 @@ impl PatternCache {
 
     /// Get or create a shape entry for update
     pub fn get_or_create(&mut self, hash: u64) -> &mut ShapeEntry {
-        let size = self.mask + 1;
+        let size = self.entries.len();
         if self.load_count >= size / 4 * 3 {
             self.resize();
         }
 
         let base = self.index(hash);
+        // See `index` for why the mask comes from the length.
+        let mask = self.entries.len() - 1;
         let mut d = 0;
         let slot = loop {
-            let idx = (base + d) & self.mask;
+            let idx = (base + d) & mask;
             let h = self.entries[idx].hash;
             if h == hash {
                 break idx;
@@ -496,7 +500,6 @@ impl PatternCache {
             entries.push(ShapeEntry::default());
         }
         self.entries = entries.into_boxed_slice();
-        self.mask = new_size - 1;
         self.probe_distance = 0;
         self.load_count = 0;
 
@@ -506,9 +509,10 @@ impl PatternCache {
                 continue;
             }
             let base = self.index(entry.hash);
+            let mask = self.entries.len() - 1;
             let mut d = 0;
             loop {
-                let idx = (base + d) & self.mask;
+                let idx = (base + d) & mask;
                 if self.entries[idx].hash == 0 {
                     self.probe_distance = self.probe_distance.max(d + 1);
                     self.load_count += 1;

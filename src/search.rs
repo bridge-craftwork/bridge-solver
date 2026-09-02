@@ -62,7 +62,6 @@ struct CutoffEntry {
 pub struct CutoffCache {
     entries: Box<[CutoffEntry]>,
     bits: usize,
-    mask: usize,
     probe_distance: usize,
     load_count: usize,
 }
@@ -105,7 +104,6 @@ impl CutoffCache {
         CutoffCache {
             entries: vec![default_entry; size].into_boxed_slice(),
             bits,
-            mask: size - 1,
             probe_distance: 0,
             load_count: 0,
         }
@@ -121,9 +119,13 @@ impl CutoffCache {
     #[inline]
     pub fn lookup(&self, hash: u64, seat: Seat) -> Option<usize> {
         let base_index = self.index(hash);
+        // The mask is derived from the length rather than stored beside it so
+        // that LLVM can see `idx <= len - 1` and drop the bounds check on the
+        // probe; from a separate field it cannot know the two agree.
+        let mask = self.entries.len() - 1;
         // Linear probing like C++
         for d in 0..self.probe_distance {
-            let entry = &self.entries[(base_index + d) & self.mask];
+            let entry = &self.entries[(base_index + d) & mask];
             if entry.hash == hash {
                 if entry.card[seat] != 255 {
                     return Some(entry.card[seat] as usize);
@@ -141,15 +143,17 @@ impl CutoffCache {
     #[inline]
     pub fn store(&mut self, hash: u64, seat: Seat, card: usize) {
         // Resize if needed (at 75% load)
-        let size = self.mask + 1;
+        let size = self.entries.len();
         if self.load_count >= size * 3 / 4 {
             self.resize();
         }
 
         let base_index = self.index(hash);
+        // See `lookup` for why the mask comes from the length.
+        let mask = self.entries.len() - 1;
         // Linear probing to find or create entry
         for d in 0.. {
-            let idx = (base_index + d) & self.mask;
+            let idx = (base_index + d) & mask;
             let entry = &mut self.entries[idx];
             if entry.hash == hash {
                 // Found existing entry for this hash
@@ -178,7 +182,6 @@ impl CutoffCache {
         };
         self.entries = vec![default_entry; new_size].into_boxed_slice();
         self.bits = new_bits;
-        self.mask = new_size - 1;
         self.probe_distance = 0;
         self.load_count = 0;
 
