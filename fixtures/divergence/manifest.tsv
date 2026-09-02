@@ -13,19 +13,20 @@
 # Every row is one search from a cold cache, so it reproduces standalone: no
 # preceding cells, no shared cache state, no ordering to set up.
 #
-# The two indicators answer different questions and neither dominates. The
-# trace shows the first difference in what was *computed*; the digest shows the
-# first difference in what was *kept*. On deal.72 the trace fires at iteration
-# 28 on a fast-trick estimate that both sides then cap to the same value, so
-# nothing behavioural has happened yet and the caches agree until 1170. On
-# deal.38 it is the other way round: the caches part at 1190 and the trace shows
-# nothing until 1635.
+# READ `mech` WITH CARE. It names the first *visible* difference, which is not
+# always the first real one. On deal.10 and deal.4 the caches part company
+# thousands of iterations before the trace shows anything, so their FAST_TRICKS
+# label is a downstream symptom, not the cause. Where `cache` is much lower
+# than `iter`, bisect the cache first.
 #
 # deal	trump	lead	line	iter	cache	mech
 deal.134	N	W	69	9	20	MOVE_ORDER_AFTER
 deal.1	N	W	219	29	40	MOVE_ORDER_AFTER
-deal.72	N	W	208	28	1170	FAST_TRICKS
-deal.38	N	W	13132	1635	1190	PATTERN_HIT
-deal.12	N	W	16347	-	-	FAST_TRICKS
-deal.10	N	W	31330	-	-	FAST_TRICKS
-deal.4	N	W	37590	-	-	FAST_TRICKS
+deal.72	N	W	208	28	4550	FAST_TRICKS
+deal.12	N	W	16347	1930	4260	FAST_TRICKS
+deal.10	N	W	31330	3716	890	PATTERN_CONTENT
+deal.4	N	W	37590	4507	1410	PATTERN_CONTENT
+# deal.38 had a PATTERN_HIT divergence at iteration 1635, caused by cache drift
+# at 1189. Fixed by giving PatternCache the linear probing the reference has.
+# Kept as a regression case: it must report `none`.
+deal.38	N	W	-	-	-	FIXED

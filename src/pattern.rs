@@ -353,9 +353,19 @@ impl ShapeEntry {
 }
 
 /// The common bounds cache - hash table of ShapeEntries
+///
+/// Open-addressed with linear probing, like the C++ reference's `Cache` and
+/// like [`CutoffCache`](crate::CutoffCache). This was direct-mapped once --
+/// one slot per hash, evicting whatever was there on a collision -- which
+/// silently threw away entries the reference keeps and cost cutoffs later.
+/// Because collisions get more frequent as the table fills, the loss grew with
+/// the length of the search.
 pub struct PatternCache {
     entries: Box<[ShapeEntry]>,
+    bits: usize,
     mask: usize,
+    probe_distance: usize,
+    load_count: usize,
 }
 
 impl PatternCache {
@@ -367,7 +377,10 @@ impl PatternCache {
         }
         PatternCache {
             entries: entries.into_boxed_slice(),
+            bits,
             mask: size - 1,
+            probe_distance: 0,
+            load_count: 0,
         }
     }
 
@@ -382,7 +395,7 @@ impl PatternCache {
     #[inline]
     fn index(&self, hash: u64) -> usize {
         // Use top bits for index (like C++)
-        (hash >> (64 - (self.mask + 1).trailing_zeros())) as usize & self.mask
+        (hash >> (64 - self.bits)) as usize & self.mask
     }
 
     /// Look up a shape entry.
@@ -391,23 +404,86 @@ impl PatternCache {
     /// root slot; see [`ShapeEntry::lookup`].
     pub fn lookup(&mut self, shape: u64, seat_to_play: Seat) -> Option<&mut ShapeEntry> {
         let hash = Self::hash(shape, seat_to_play);
-        let idx = self.index(hash);
-        let entry = &mut self.entries[idx];
-        if entry.hash == hash {
-            Some(entry)
-        } else {
-            None
+        let base = self.index(hash);
+        let mut found = None;
+        // Only as far as anything has ever been placed; an empty slot means
+        // the entry cannot be further along, because insertion never skips one.
+        for d in 0..self.probe_distance {
+            let idx = (base + d) & self.mask;
+            let h = self.entries[idx].hash;
+            if h == hash {
+                found = Some(idx);
+                break;
+            }
+            if h == 0 {
+                break;
+            }
         }
+        found.map(move |idx| &mut self.entries[idx])
     }
 
     /// Get or create a shape entry for update
     pub fn get_or_create(&mut self, shape: u64, seat_to_play: Seat) -> &mut ShapeEntry {
-        let hash = Self::hash(shape, seat_to_play);
-        let idx = self.index(hash);
-        if self.entries[idx].hash != hash {
-            self.entries[idx].reset(hash);
+        let size = self.mask + 1;
+        if self.load_count >= size / 4 * 3 {
+            self.resize();
         }
-        &mut self.entries[idx]
+
+        let hash = Self::hash(shape, seat_to_play);
+        let base = self.index(hash);
+        let mut d = 0;
+        let slot = loop {
+            let idx = (base + d) & self.mask;
+            let h = self.entries[idx].hash;
+            if h == hash {
+                break idx;
+            }
+            if h == 0 {
+                self.probe_distance = self.probe_distance.max(d + 1);
+                self.load_count += 1;
+                self.entries[idx].reset(hash);
+                break idx;
+            }
+            d += 1;
+        };
+        &mut self.entries[slot]
+    }
+
+    /// Double the table and re-place every entry.
+    ///
+    /// Kept at three quarters full so the probe in `get_or_create` always finds
+    /// an empty slot and terminates.
+    fn resize(&mut self) {
+        let old = std::mem::take(&mut self.entries);
+        self.bits += 1;
+        let new_size = 1 << self.bits;
+        let mut entries = Vec::with_capacity(new_size);
+        for _ in 0..new_size {
+            entries.push(ShapeEntry::default());
+        }
+        self.entries = entries.into_boxed_slice();
+        self.mask = new_size - 1;
+        self.probe_distance = 0;
+        self.load_count = 0;
+
+        // Moved, not cloned: a ShapeEntry owns a pattern tree.
+        for entry in old.into_vec() {
+            if entry.hash == 0 {
+                continue;
+            }
+            let base = self.index(entry.hash);
+            let mut d = 0;
+            loop {
+                let idx = (base + d) & self.mask;
+                if self.entries[idx].hash == 0 {
+                    self.probe_distance = self.probe_distance.max(d + 1);
+                    self.load_count += 1;
+                    self.entries[idx] = entry;
+                    break;
+                }
+                d += 1;
+            }
+        }
     }
 }
 

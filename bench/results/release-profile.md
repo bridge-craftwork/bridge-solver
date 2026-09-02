@@ -272,17 +272,28 @@ whether `lookup` matches.
 
 Neither indicator dominates:
 
+Across all seven fixtures, after the probing fix (`cutoff_cache` and
+`pattern_cache` are the only caches the search holds -- `plays[]` and `tricks[]`
+are per-node scratch rebuilt from the path -- so the digest covers all of it):
+
 | deal | trace differs at | caches differ at |
 |---|---|---|
 | `deal.134` | iter 9 | iter 20 |
 | `deal.1` | iter 29 | iter 40 |
-| `deal.72` | iter 28 | **iter 1170** |
-| `deal.38` | iter 1635 | **iter 1190** |
+| `deal.72` | iter 28 | iter 4550 |
+| `deal.12` | iter 1930 | iter 4260 |
+| `deal.10` | iter 3716 | **iter 890** |
+| `deal.4` | iter 4507 | **iter 1410** |
+| `deal.38` | none | none |
 
-`deal.72`'s trace fires at 28 on a fast-trick estimate both sides then cap to
-the same value: a visible difference that changes nothing, and the caches
-rightly agree for another eleven hundred iterations. `deal.38` is the reverse,
-and is why the pattern-cache conclusion above had to be withdrawn.
+An earlier version of this table covered four deals and concluded the trace
+usually fires first. With all seven it is four to two, and where the caches win
+they win by thousands of iterations. **`deal.10` and `deal.4` are labelled
+`FAST_TRICKS` by the trace and that label is a downstream symptom**: bisecting
+their cache divergence shows the pattern caches holding the *same number* of
+entries with different digests, so it is the tree contents that differ, not the
+slot allocation the probing fix addressed. A fourth mechanism, in
+`Pattern::update`.
 
 ### Root cause of the pattern-cache divergence: no probing
 
@@ -336,8 +347,36 @@ the 1.019x to 1.083x trend by deal size, and why the reference's advantage over
 DDS widens on hard deals while ours narrows. `CutoffCache` already probes and
 resizes; the pattern cache is the one that did not get it.
 
-Fixing it means giving `PatternCache` the same linear probing and 75% resize.
-Unmeasured, but it is the strongest candidate for the ~3.8% node excess.
+### Fixed, and it closed the node gap without buying any time
+
+`PatternCache` now linear-probes and resizes at 75% load, like `CutoffCache`
+and like the reference. Over the same 200 deals:
+
+| | nodes | vs C++ |
+|---|---|---|
+| C++ reference | 296,689,028 | — |
+| ours, direct-mapped | 307,943,054 | 1.0379x |
+| ours, probing | **294,034,361** | **0.9911x** |
+
+**The node excess is gone** -- 4.5% fewer, and now marginally below the
+reference. `deal.38` reports no divergence at all in 6,000 iterations and is
+kept in the fixture set as a regression case.
+
+**It bought no time.** Interleaved best-of-15, alternating binaries:
+81.6 / 81.1 / 81.7 ms direct-mapped against 81.6 / 81.3 / 81.8 ms probing. Flat
+to within 0.3%, and the 200-deal figure did not move either.
+
+So the trade is exact: 4.5% fewer nodes for 4.5% more cost per node, and our
+per-node figure against the reference goes from 1.120x to roughly 1.17x. The
+likely reason is that our entry is far heavier than the reference's -- a
+`Pattern` holds a `Vec<Pattern>` where the reference has a packed, custom
+`Vector`, so a table that grows instead of evicting costs us more than it costs
+them.
+
+It is worth keeping anyway, on two grounds that are not speed: it is what the
+reference does, and it makes node counts a trustworthy signal again for the
+divergences that remain. But it does mean the whole remaining gap is now
+per-node cost, and making `ShapeEntry` cheaper is the obvious next lever.
 
 All three are safe and all three cost nodes. A low fast-trick estimate, a missed
 pattern hit and a worse move order can only fail to prune, never return a wrong

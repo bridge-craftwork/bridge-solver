@@ -1,0 +1,19 @@
+{
+  "corpus_version": "corpus-v1",
+  "revision": "v1.0.0-17-g2e21c93-dirty",
+  "machine": "Apple M4 Pro",
+  "logical_cpus": 12,
+  "runs": 15,
+  "boards": {
+    "4": {
+      "best": {
+        "wall_ms": 81.922833,
+        "cpu_ms": 81.807
+      },
+      "median_wall_ms": 82.763042,
+      "spread": 0.06161642383631925,
+      "runs": 15
+    }
+  },
+  "sweep": null
+}
