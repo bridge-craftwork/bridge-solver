@@ -231,6 +231,53 @@ NT case above, so the cause is still to be found by instrumenting the per-suit
    value truncates the suit harder and under-counts. Latent, and in the same
    direction as the symptom.
 
+### Three mechanisms, not one
+
+Tracing the same cell (notrump, lead West) on sixteen deals, first 6,000 xray
+iterations, and classifying where each trace first parts company:
+
+| first divergence | deals | what differs |
+|---|---|---|
+| none in the traced prefix | 8 | — |
+| `FAST_TRICKS` | 4 (`.4`, `.10`, `.12`, `.72`) | our raw estimate is lower |
+| `MOVE_ORDER_AFTER` | 2 (`.1`, `.134`) | same playable set, different order |
+| `PATTERN_HIT` | 1 (`.38`) | the reference hits, we miss |
+
+**Move ordering** (`deal.1`, depth 28): identical `playable=[H2 D9 CT C9 C6 C2]`
+and no cutoff card, and the reference orders `[CT C2 H2 D9 C9 C6]` while we put
+`D9` first. Relative order is otherwise preserved, so we are promoting `D9` into
+a higher-priority bucket than the reference does — a lead-classification
+difference, in `order_leads`.
+
+**Pattern cache** (`deal.38`, depth 16): the reference reports
+`PATTERN_HIT ... bounds=[0,7] adj_upper=10 UPPER_CUT` and prunes. We miss, and
+go on to compute fast tricks and store. Everything before that line is
+identical, so both caches hold the same entries and our *lookup* is narrower.
+
+All three are safe and all three cost nodes. A low fast-trick estimate, a missed
+pattern hit and a worse move order can only fail to prune, never return a wrong
+answer, which is exactly why every correctness test passes while node counts do
+not.
+
+### Are they hand-specific? Is the order relevant?
+
+**The mechanisms are deterministic properties of the code, not of particular
+hands** — but which deals hit them varies enormously. Half the sample never
+diverged in 6,000 iterations, and on `deal.72` the fast-tricks estimate differs
+on 7.1% of calls against 1.3% on `deal.10` and 0.1% on `deal.4`.
+
+**They are order-independent.** `fast_tricks_from_seat` and the lead ordering
+are pure functions of the position — hands, trump, seat to play — and read no
+cache, so a given position always diverges the same way however the search
+reached it and whatever order the twenty cells are solved in. The traces
+reproduce exactly, run to run.
+
+**Their cost is not.** How many nodes a divergence ends up costing depends
+entirely on the order, because caches are shared across a strain and the MTD(f)
+seed chains from cell to cell. `deal.10` went from 1.36x to 1.02x purely from
+solving declarers in the reference's order, with no estimator touched. So the
+bugs are order-independent and the damage is not.
+
 The ~12% per-node cost remains the larger half of the gap, and the 39
 `panic_bounds_check` sites below are the only concrete lead on that half.
 
