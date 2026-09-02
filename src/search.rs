@@ -674,10 +674,12 @@ impl<'a> Search<'a> {
 
         // Pattern cache lookup (matching C++ common_bounds_cache)
         let shape_value = self.tricks[trick_idx].shape.value();
+        // Hashed once for both the lookup below and the store further down.
+        let pattern_hash = PatternCache::hash_for(shape_value, seat_to_play);
         let mut pattern_cutoff = false;
         let rel_beta = beta - ns_tricks_won as i8;
         if !NO_TT.load(Ordering::Relaxed) {
-            if let Some(entry) = self.pattern_cache.lookup(shape_value, seat_to_play) {
+            if let Some(entry) = self.pattern_cache.lookup(pattern_hash) {
                 // Create pattern from current relative hands for lookup
                 let new_pattern = Pattern::new(
                     self.tricks[trick_idx].relative_hands.hands,
@@ -756,7 +758,7 @@ impl<'a> Search<'a> {
                     result.rank_winners.value()
                 );
             }
-            let entry = self.pattern_cache.get_or_create(shape_value, seat_to_play);
+            let entry = self.pattern_cache.get_or_create(pattern_hash);
             entry.pattern.update(new_pattern);
 
             // Return with extended_rank_winners instead of raw rank_winners

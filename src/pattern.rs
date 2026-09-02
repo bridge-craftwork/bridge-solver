@@ -411,6 +411,16 @@ impl PatternCache {
     }
 
     /// Hash function matching C++ Cache template
+    /// The slot key for a shape and seat.
+    ///
+    /// Public because callers hash once and pass the result to both
+    /// [`Self::lookup`] and, on a miss, [`Self::get_or_create`]. The two used
+    /// to hash independently, and the recursion between them puts the second
+    /// call beyond anything the compiler could common up.
+    pub fn hash_for(shape: u64, seat_to_play: Seat) -> u64 {
+        Self::hash(shape, seat_to_play)
+    }
+
     fn hash(shape: u64, seat_to_play: Seat) -> u64 {
         const HASH_RAND: [u64; 2] = [0x9b8b4567327b23c7, 0x643c986966334873];
         let key0 = shape.wrapping_add(HASH_RAND[0]);
@@ -428,8 +438,7 @@ impl PatternCache {
     ///
     /// Mutable because a lookup promotes the matched pattern into the entry's
     /// root slot; see [`ShapeEntry::lookup`].
-    pub fn lookup(&mut self, shape: u64, seat_to_play: Seat) -> Option<&mut ShapeEntry> {
-        let hash = Self::hash(shape, seat_to_play);
+    pub fn lookup(&mut self, hash: u64) -> Option<&mut ShapeEntry> {
         let base = self.index(hash);
         let mut found = None;
         // Only as far as anything has ever been placed; an empty slot means
@@ -449,13 +458,12 @@ impl PatternCache {
     }
 
     /// Get or create a shape entry for update
-    pub fn get_or_create(&mut self, shape: u64, seat_to_play: Seat) -> &mut ShapeEntry {
+    pub fn get_or_create(&mut self, hash: u64) -> &mut ShapeEntry {
         let size = self.mask + 1;
         if self.load_count >= size / 4 * 3 {
             self.resize();
         }
 
-        let hash = Self::hash(shape, seat_to_play);
         let base = self.index(hash);
         let mut d = 0;
         let slot = loop {
