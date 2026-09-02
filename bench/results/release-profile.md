@@ -173,18 +173,63 @@ aggregate, are the signature of chaotic sensitivity: a tie broken differently in
 move ordering changes which cutoff fires, and the subtree either collapses or
 does not. It is not a missing prune and it is not strain-specific.
 
-### The trace target
+### Traced: the fast-tricks estimate under-counts
 
-`deal.72`, notrump, declarer South. The reference takes 78,779 nodes and we take
-151,962 -- 1.93x -- and it is the **first cell of its strain in both**, so the
-caches are cold and the MTD(f) guess comes from `GuessTricks`, whose logic is
-identical in the two (points, and for suits trump length). Same inputs, same
-cold state, twice the tree.
+`deal.72`, notrump, declarer South is the cleanest possible target -- the first
+cell of its strain in both, so cold caches and an identical `GuessTricks` seed,
+78,779 nodes against our 151,962, while the deal's four suit strains agree
+within 1%.
 
-That makes it the cleanest possible xray target: any divergence in the trace is
-the search itself, with no accumulated cache state to explain it away. The whole
-deal is 1.38x and its four suit strains are all within 1%, so notrump on this
-deal isolates the problem almost perfectly.
+Both solvers trace that one cell with a five-line deal file (the deal, then `N`,
+then `W`), which `solver-diag -f` and the instrumented C++ both read as an
+explicit trump and lead:
+
+```
+solver-xray -f deal72.ntw -m0 -X 40000     # xray/bridge-solver.cc
+solver-diag -f deal72.ntw -X 40000
+```
+
+The traces agree line for line -- once `remaining=[...]`, which the two format
+differently, is normalised out -- until **line 208**:
+
+```
+C++ :  FAST_TRICKS: depth=20 seat=1 raw=9 capped=8 trump=4
+ours:  FAST_TRICKS: depth=20 seat=1 raw=8 capped=8 trump=4
+```
+
+**Our fast-tricks estimate is low.** Over the aligned prefix it differs on 7.1%
+of calls and is *never* high: 20 cases of -1 and 4 of -2. The cap hides it every
+time in that prefix, which is why the searches stay identical for another
+hundred-odd records, and then the traces lose structural alignment.
+
+That is the whole shape of the problem, and it explains every symptom:
+
+- **It cannot produce a wrong answer.** A low fast-trick count is a conservative
+  estimate; it only fails to prune. Correctness tests pass, node counts do not.
+- **It is chaotic.** `min(fast_tricks, remaining)` masks the difference most of
+  the time. When it does not, a beta cut that the reference takes is missed and
+  a whole subtree is searched — or the reverse, once cache contents diverge,
+  which is why we are sometimes far *below* the reference (`deal.7` NT East,
+  2,267 nodes against 56,343).
+- **It compounds with depth**, matching the 1.019x → 1.083x trend by deal size.
+
+The estimator is `fast_tricks_from_seat` in `search.rs`, against `FastTricks`
+in the reference. Reading them side by side, the structure matches — the
+`SuitFastTricks` cases, the `pd_entry` handling and the argument swap on the
+second call are all faithful. Two differences are visible and neither is the
+NT case above, so the cause is still to be found by instrumenting the per-suit
+`my_tricks`/`pd_tricks` at this position:
+
+1. `for card in all_suit.iter()` walks `self.hands.all_cards()`, the *live*
+   remaining cards, where the reference walks `trick->all_cards`, the snapshot
+   taken at the start of the trick. These agree at a trick boundary, which
+   depth 20 is, so this is not the divergence above — but they part company
+   mid-trick, and that is worth fixing regardless.
+2. `max_suit_winners` starts at `self.num_tricks` where the reference uses
+   `TOTAL_TRICKS`. Equal for a full deal, since `num_tricks` is the largest hand
+   at construction, but not for `new_mid_trick` or `analyse_play`, and a smaller
+   value truncates the suit harder and under-counts. Latent, and in the same
+   direction as the symptom.
 
 The ~12% per-node cost remains the larger half of the gap, and the 39
 `panic_bounds_check` sites below are the only concrete lead on that half.
