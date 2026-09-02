@@ -201,7 +201,7 @@ peak for its lifetime. `drain_pool()` is public for that boundary and is worth
 wiring into the wasm build, where holding 1.3 GB after one hard deal on a page
 that stays open would be fatal.
 
-## Lock-step, and what the timing then means## Lock-step, and what the timing then means
+## Lock-step, and what the timing then means
 
 All 200 deals of the reference's own corpus search the same tree: **296,689,028
 nodes against 296,689,028, exactly**. Eight fixtures in `fixtures/divergence`
@@ -914,6 +914,50 @@ The ~254 MB the pool holds never showed up in this profile: `pool_alloc`,
 `pool_free` and `reserve_exact_class` together are under 0.6%, and
 `PatternCache::new` another 0.7%. Retention is worth fixing for memory, but
 nothing here suggests it is costing time.
+
+## Where the three solvers stand, measured together
+
+2026-09-02, M4 Pro, single-threaded, the reference's own 200 deals. All three
+re-measured in one sitting, because the previous standing had been carried
+forward by scaling an older figure and the three numbers had not been taken
+together.
+
+| | 200 deals | vs reference | |
+|---|---|---|---|
+| C++ reference | **21.98 s** | 1.000x | `macroxue/bridge-solver` at `75b4619`, `clang++ -std=c++17 -O3` |
+| **this port** | **22.42 s** | **1.020x** | |
+| this port, before `convert_suit` | 23.39 s | 1.064x | |
+| DDS 2.9 | **20.25 s** | 1.085x faster | in-process, STL threading, 1 thread |
+
+Node counts are identical between the first two — 296,689,028 either way — so
+the 1.020x is per-node cost with nothing else in it. The `convert_suit` change
+is what moved it from 1.064x, and that is the whole of the movement: nothing
+else about the search changed.
+
+**Method.** Five interleaved rounds, best of five, alternating within each
+round rather than run in blocks; the machine was not idle, and the ordering is
+what makes the ratio stand up. The port was timed through `solver-bench nodes`
+and cross-checked against the exact committed binary, which agreed to 0.03 s.
+DDS is the odd one out and is measured differently on purpose: `solver-bench
+reference --throughput-pbn` links it in-process so both solvers are timed by
+the same code on the same deals, which is worth more than putting it in the
+same table as an external process.
+
+**Two asymmetries, both small and in opposite directions.** The reference
+solves one deal per process, so its 21.98 s includes 200 process startups —
+measured separately at 0.39 s with `-o`, which solves nothing. Net of that it
+is 21.59 s and the port is 1.038x. Against that, the port's figure is taken
+from the node-counting path, which the reference is not paying for (`-S` was
+off). So the honest range is **1.02x to 1.04x**, and it is not worth pretending
+to more precision than that.
+
+**Reproducing the reference.** `solver.cc` was untouched upstream from
+2025-09-01 to 2026-01-31, so `75b4619` *is* the 2026-01-31 state this port
+lock-steps against; 27 commits have touched it since. The reference reads one
+deal per file in its own layout — North, West, East, South, one hand per line,
+suits space-separated, a void written `-`. Converting `lockstep-200.pbn` to it
+round-trips exactly on all 200 deals, 30 of which contain a void, and deal 1's
+table reproduces the reference's own pinned `1k_deals/RESULTS` entry.
 
 ## Two ways the harness used to mislead you
 

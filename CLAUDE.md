@@ -99,16 +99,18 @@ was tried and found worthless, and where the remaining gap is.
 
 ## Performance work
 
-Current standing, single-threaded over those 200 deals: the reference 21,630 ms,
-this port ~22,720 ms, DDS 2.9 20,200 ms. With identical node counts, **~1.05x is
-pure per-node cost** with nothing else mixed in.
+Current standing, single-threaded over those 200 deals, all three measured in
+one sitting on 2026-09-02, best of five interleaved rounds: the reference
+**21,980 ms**, this port **22,420 ms**, DDS 2.9 **20,250 ms**. With identical
+node counts, **1.02x is pure per-node cost** with nothing else mixed in.
 
-The port's figure is the 23,480 ms recorded on 2026-09-01 scaled by the 0.968
-measured for the `convert_suit` change (2026-09-02, alternating whole runs on a
-busier machine: 23.90 s against 23.13 s, best of four rounds each). It is not a
-fresh absolute measurement, and the three numbers were not taken in one
-sitting — re-measure all three together before quoting the ratio anywhere it
-matters.
+Charge the reference for the 200 process startups its one-deal-per-process model
+costs it (0.39 s, measured) and the port is 1.04x. Against that, the port's
+figure comes from the node-counting path and the reference's `-S` was off, so
+the two asymmetries pull opposite ways: **the honest range is 1.02x to 1.04x.**
+See "Where the three solvers stand, measured together" in `release-profile.md`
+for the method and for how to rebuild the reference (`75b4619`, which is the
+2026-01-31 state, plus the PBN-to-reference-format conversion).
 
 Before optimising, read the "tried and found worthless" list in
 `release-profile.md`. Hoisting the per-node atomics, deleting ~4,000
