@@ -43,7 +43,44 @@ overall wall: 0.914x (-8.6%)
 overall cpu : 0.915x (-8.5%)
 ```
 
-## Against the C++ reference, measured
+## Lock-step, and what the timing then means
+
+All 200 deals of the reference's own corpus search the same tree: **296,689,028
+nodes against 296,689,028, exactly**. Eight fixtures in `fixtures/divergence`
+hold that in place, identical in trace and cache digests to 100,000 iterations,
+and `first-divergence.sh` fails if any of them moves.
+
+That is what makes the timing below a measurement rather than a mixture. Three
+interleaved rounds, best of three, same 200 deals, single-threaded:
+
+| | best of 3 | |
+|---|---|---|
+| C++ reference | 21,940 ms | — |
+| ours | 24,731 ms | **1.127x the reference**, 1.187x DDS |
+| DDS 2.9 | 20,836 ms | reference is 1.053x DDS |
+
+**The 1.127x is pure per-node cost.** Identical trees, identical node counts, so
+there is nothing else left in it: no search-size difference, no pruning
+difference, no cache-hit difference. Rounds agreed to within 1.7%.
+
+It also matches the decomposition made before lock-step -- 1.162x wall over
+1.038x nodes implied 1.120x per node -- which is a decent check that the
+decomposition was sound.
+
+Worth noting separately: on this machine the C++ reference is **5% slower than
+DDS**, against its README's claim of being 1.28x faster. See the note on that
+claim below.
+
+### What is left
+
+One thing, and it is now the only thing: a node costs us about 13% more than it
+costs the reference. The most likely culprit is entry weight -- a `Pattern`
+holds a `Vec<Pattern>` where the reference has a packed, custom `Vector`, and
+`ShapeEntry` is correspondingly fatter, so every pattern-cache probe touches
+more memory. The 39 `panic_bounds_check` sites in the two hottest functions are
+the other lead.
+
+## Against the C++ reference, measured## Against the C++ reference, measured
 
 The 1.120x per-node figure in `cache-fix.md` was the last soft number here, and
 the arithmetic that turned it into "~1.03x after the release profile" was
