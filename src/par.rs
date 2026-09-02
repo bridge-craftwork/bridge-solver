@@ -79,10 +79,28 @@ pub fn solve_dd_table(deal: &Deal) -> DdTricks {
 /// reference is only meaningful if the count covers exactly the work the
 /// timing covers, cache reuse and MTD(f) seeding included.
 pub fn solve_dd_table_with_nodes(deal: &Deal) -> (DdTricks, u64) {
+    let mut nodes = 0;
+    let tricks = solve_table_inner(deal, |_, _, n| nodes += n);
+    (tricks, nodes)
+}
+
+/// Solve the full table, reporting each cell's nodes as it is finished.
+///
+/// For localising a divergence against the C++ reference: a whole-table count
+/// says the trees differ, a per-cell one says *which* search to trace.
+pub fn solve_dd_table_cells(deal: &Deal) -> (DdTricks, Vec<(Strain, Direction, u64)>) {
+    let mut cells = Vec::with_capacity(20);
+    let tricks = solve_table_inner(deal, |s, d, n| cells.push((s, d, n)));
+    (tricks, cells)
+}
+
+/// The one table-solving loop. `on_cell` sees each cell's node count; passing a
+/// closure that ignores it compiles the reporting away entirely, so
+/// [`solve_dd_table`] pays nothing for the instrumentation.
+fn solve_table_inner(deal: &Deal, mut on_cell: impl FnMut(Strain, Direction, u64)) -> DdTricks {
     let hands = Hands::from_deal(deal);
     let total = hands.num_tricks() as u8;
     let mut tricks = [[0u8; 5]; 4];
-    let mut nodes = 0u64;
     for strain in STRAINS {
         let trump = strain_trump(strain);
         let mut cutoff = CutoffCache::new(16);
@@ -99,7 +117,7 @@ pub fn solve_dd_table_with_nodes(deal: &Deal) -> (DdTricks, u64) {
                 Some(g) => solver.solve_with_caches_seeded(&mut cutoff, &mut pattern, g),
                 None => solver.solve_with_caches(&mut cutoff, &mut pattern),
             };
-            nodes += get_node_count();
+            on_cell(strain, dir, get_node_count());
             seed = Some(Solver::seed_from(ns));
             let declarer_tricks = if matches!(dir, Direction::North | Direction::South) {
                 ns
@@ -109,7 +127,7 @@ pub fn solve_dd_table_with_nodes(deal: &Deal) -> (DdTricks, u64) {
             tricks[dir_index(dir)][strain_index(strain)] = declarer_tricks;
         }
     }
-    (DdTricks { tricks }, nodes)
+    DdTricks { tricks }
 }
 
 fn strain_trump(strain: Strain) -> usize {

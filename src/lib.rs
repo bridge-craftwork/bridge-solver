@@ -45,7 +45,8 @@ pub use cards::Cards;
 pub use convert::{direction_to_seat, seat_to_direction};
 pub use hands::Hands;
 pub use par::{
-    par, solve_dd_table, solve_dd_table_with_nodes, DdTricks, ParContract, ParResult, Side,
+    par, solve_dd_table, solve_dd_table_cells, solve_dd_table_with_nodes, DdTricks, ParContract,
+    ParResult, Side,
 };
 pub use pattern::PatternCache;
 pub use search::{slow_trump_tricks_opponent, CutoffCache};

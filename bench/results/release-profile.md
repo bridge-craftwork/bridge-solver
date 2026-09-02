@@ -149,9 +149,45 @@ Matching the reference's order took 310.4M nodes to 307.9M -- **0.8% fewer, for
 a two-line change**, with all ten corpus tables unchanged. It is the ordering
 the reference chose on purpose.
 
-That leaves ~3.8% of node excess unexplained, and the ~12% per-node cost as the
-larger half of the gap. The per-node half is now the thing to chase, and the
-39 `panic_bounds_check` sites below are the only concrete lead on it.
+### The rest is chaotic, not systematic
+
+Per-cell counts over the first 50 deals (`solver-bench nodes --per-cell` against
+the reference's `-S1` output, which prints one block per cell):
+
+| strain | C++ nodes | ours | ratio |
+|---|---|---|---|
+| NT | 13,561,599 | 13,745,262 | 1.014x |
+| spades | 16,127,483 | 18,942,747 | 1.175x |
+| hearts | 11,613,030 | 12,023,012 | 1.035x |
+| diamonds | 16,935,775 | 17,305,948 | 1.022x |
+| clubs | 14,232,095 | 14,534,830 | 1.021x |
+
+Spades looks like a systematic outlier and is not: `deal.8` alone supplies about
+three quarters of that excess.
+
+The individual cells say what is really going on. The worst are 1.6x to 2.5x
+(`deal.1` NT East, 34,811 against 85,732) and the best are far more extreme in
+our favour -- `deal.7` NT East is 56,343 nodes for the reference and **2,267**
+for us, 0.04x. Deviations that large in both directions, cancelling to 1.056x in
+aggregate, are the signature of chaotic sensitivity: a tie broken differently in
+move ordering changes which cutoff fires, and the subtree either collapses or
+does not. It is not a missing prune and it is not strain-specific.
+
+### The trace target
+
+`deal.72`, notrump, declarer South. The reference takes 78,779 nodes and we take
+151,962 -- 1.93x -- and it is the **first cell of its strain in both**, so the
+caches are cold and the MTD(f) guess comes from `GuessTricks`, whose logic is
+identical in the two (points, and for suits trump length). Same inputs, same
+cold state, twice the tree.
+
+That makes it the cleanest possible xray target: any divergence in the trace is
+the search itself, with no accumulated cache state to explain it away. The whole
+deal is 1.38x and its four suit strains are all within 1%, so notrump on this
+deal isolates the problem almost perfectly.
+
+The ~12% per-node cost remains the larger half of the gap, and the 39
+`panic_bounds_check` sites below are the only concrete lead on that half.
 
 ## Scaling, one to twelve threads
 

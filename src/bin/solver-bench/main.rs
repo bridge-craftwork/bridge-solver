@@ -33,7 +33,7 @@ use std::time::{Duration, Instant};
 #[cfg(feature = "dds-reference")]
 mod dds;
 
-use bridge_solver::{solve_dd_table, solve_dd_table_with_nodes};
+use bridge_solver::{solve_dd_table, solve_dd_table_cells, solve_dd_table_with_nodes};
 use bridge_types::Deal;
 use clap::{Args, Parser, Subcommand};
 use serde::{Deserialize, Serialize};
@@ -334,6 +334,10 @@ enum Cmd {
     Nodes {
         /// A file of PBN deal strings, one per line.
         pbn: PathBuf,
+        /// Break each deal down by cell (strain and declarer), which is what
+        /// says *which* search to trace when a total diverges.
+        #[arg(long)]
+        per_cell: bool,
     },
     /// Compare two results files.
     Compare {
@@ -1034,7 +1038,7 @@ fn generated_deals(count: usize) -> Result<Vec<(String, Deal)>, String> {
 }
 
 /// Print nodes searched per deal, and the total.
-fn nodes_report(path: &PathBuf) -> Result<(), String> {
+fn nodes_report(path: &PathBuf, per_cell: bool) -> Result<(), String> {
     let text =
         std::fs::read_to_string(path).map_err(|e| format!("reading {}: {e}", path.display()))?;
     let mut total = 0u64;
@@ -1046,8 +1050,17 @@ fn nodes_report(path: &PathBuf) -> Result<(), String> {
         }
         let deal = Deal::from_pbn(line)
             .ok_or_else(|| format!("{}:{}: unparseable deal", path.display(), i + 1))?;
-        let (_, nodes) = solve_dd_table_with_nodes(&deal);
-        println!("{} {nodes}", i + 1);
+        let nodes = if per_cell {
+            let (_, cells) = solve_dd_table_cells(&deal);
+            for (strain, dir, n) in &cells {
+                println!("{} {strain:?} {dir:?} {n}", i + 1);
+            }
+            cells.iter().map(|(_, _, n)| n).sum()
+        } else {
+            let (_, n) = solve_dd_table_with_nodes(&deal);
+            println!("{} {n}", i + 1);
+            n
+        };
         total += nodes;
         count += 1;
     }
@@ -1151,7 +1164,7 @@ fn main() {
         }),
         #[cfg(feature = "dds-reference")]
         Cmd::Reference(args) => reference(args),
-        Cmd::Nodes { pbn } => nodes_report(pbn),
+        Cmd::Nodes { pbn, per_cell } => nodes_report(pbn, *per_cell),
         Cmd::Compare { baseline, current } => compare(baseline, current),
     };
     if let Err(e) = outcome {
