@@ -43,26 +43,74 @@ overall wall: 0.914x (-8.6%)
 overall cpu : 0.915x (-8.5%)
 ```
 
-## Per node, against the C++ reference
+## Against the C++ reference, measured
 
-The change is pure codegen: it cannot alter the search tree, and `verify`
-confirms all ten tables are unchanged. Node counts are therefore identical to
-those in `cache-fix.md`, and the per-node cost scales with the CPU figure:
+The 1.120x per-node figure in `cache-fix.md` was the last soft number here, and
+the arithmetic that turned it into "~1.03x after the release profile" was
+wrong. Measured directly, on the upstream project's own 200 random deals
+(`1k_deals/deal.1` to `deal.200`, converted to PBN and cross-checked cell by
+cell against the C++ solver's own output), single-threaded, best of 3:
 
-| | ours / C++ |
-|---|---|
-| nodes searched | 0.994x (unchanged) |
-| ns per node | 1.120x → **~1.03x** |
+| solver | 200 deals | vs ours |
+|---|---|---|
+| ours | 24.04 s | — |
+| C++ reference (macroxue) | 20.62 s | **1.17x** |
+| DDS 2.9 | 20.24 s | **1.19x** |
 
-That row is **derived, not re-measured** — 1.120 x 0.923 — and should be
-confirmed by a fresh per-cell run before it is quoted as a measurement.
+The build, recorded so the number has provenance — the makefile's own PGO path
+is GCC-specific (`.gcda`) and cannot run under Apple clang:
 
-A caveat on the reference build itself: its makefile specifies profile-guided
-optimisation (`-fprofile-generate`, then `-fprofile-use`), but that flow is
-GCC-specific — it moves a `.gcda` file, which clang does not produce — and on
-macOS `g++` is Apple clang. No built binary or profile data survives in the
-reference tree, so **how the binary behind the 1.120x figure was actually built
-is unknown**. If it was plain `-O3`, PGO is an advantage neither side has taken.
+```
+clang++ -std=c++17 -O3 -march=native -o solver solver.cc
+```
+
+The C++ solver is single-threaded and solves one deal per process, so it is
+timed per invocation from its own internal clock. Startup was measured at
+2.1 ms (`-o`, read-and-exit), 1.6% of a deal, and external wall minus startup
+agreed with the self-reported sum to within 1% across two passes.
+
+**PGO turned out not to matter.** Built the clang way — `-fprofile-generate`,
+train on `hard_deals/deal.8` as the makefile does, `llvm-profdata merge`,
+`-fprofile-use` — it produced identical tables and 20.96 s against 20.62 s, with
+the order reversing on the second pass. Within noise. The earlier speculation
+that PGO explained part of the gap is dead, and the plain `-O3` build above is
+representative.
+
+### Two conclusions
+
+**We are 1.17x the C++ original, not 1.03x.** The old figure was ns-per-node
+over 194 cells truncated at 1000 nodes each — a slice thin enough to be mostly
+cache-cold startup, and it does not predict whole-table cost. This number is
+whole tables on random deals, which is the workload that matters.
+
+**The upstream 1.28x-faster-than-DDS claim does not reproduce on this machine.**
+Here the C++ solver and DDS are within 2% of each other (1.02x). That claim was
+measured on an AMD Ryzen 7 5800H, and DDS carries x86-specific paths, so the
+most likely reading is that it is an x86 result that does not port to ARM — but
+the comparison scripts were never committed (one commit added the README, two
+PNGs and a 50,000-line log, and nothing in that repo invokes DDS), and no DDS
+version or build flags were recorded, so it cannot be checked directly.
+
+Their published log does reproduce *internally*: parsing all 5000 deals gives a
+geometric mean of 1.24x and a median of 1.25x against a claimed 1.28x, and the
+advantage grows with difficulty — 1.23x at 0.05-0.10 s rising to 1.53x above
+half a second. A least-squares fit gives `dds = -32.5 ms + 1.60 x solver`, so a
+fixed per-invocation overhead inflating DDS is ruled out: the intercept is
+negative. Whatever produced their result, it was not measurement overhead.
+
+### What this leaves open
+
+We are 1.17x the reference at the same node counts — or rather, at node counts
+that matched over 194 cells in `cache-fix.md` and have never been checked on
+whole tables. Two things worth doing, in order:
+
+1. **Compare node counts per deal on these 200 deals** (`solver -S` against our
+   own counter). If they match, the whole 1.17x is per-node cost. If they do
+   not, some of it is extra search, and that is a different problem.
+2. **The per-board spread**, below. Ours widens against DDS on the hardest
+   boards, while the C++ original's advantage over DDS *widens* on hard deals.
+   If the original gains where we lose, that is a pointer at where the port's
+   cost diverges.
 
 ## Scaling, one to twelve threads
 

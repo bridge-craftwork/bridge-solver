@@ -367,6 +367,12 @@ struct ReferenceArgs {
     #[arg(long, default_value_t = 5)]
     dds_threading: usize,
 
+    /// Solve these deals instead of generated ones: a file of PBN deal
+    /// strings, one per line. Lets an external solver be measured on exactly
+    /// the same deals.
+    #[arg(long)]
+    throughput_pbn: Option<std::path::PathBuf>,
+
     /// Distinct deals to generate for the throughput measurement. Ten boards
     /// is not enough work to keep twelve threads busy, and the corpus cannot
     /// simply be repeated -- see `generated_deals`.
@@ -866,7 +872,27 @@ fn reference(args: &ReferenceArgs) -> Result<(), String> {
 fn throughput(args: &ReferenceArgs, threads: usize) -> Result<(), String> {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    let generated = generated_deals(args.throughput_deals.max(1))?;
+    let generated = match &args.throughput_pbn {
+        Some(path) => {
+            let text = std::fs::read_to_string(path)
+                .map_err(|e| format!("reading {}: {e}", path.display()))?;
+            let mut v = Vec::new();
+            for (i, line) in text.lines().enumerate() {
+                let line = line.trim();
+                if line.is_empty() {
+                    continue;
+                }
+                let deal = Deal::from_pbn(line)
+                    .ok_or_else(|| format!("{}:{}: unparseable deal", path.display(), i + 1))?;
+                v.push((line.to_string(), deal));
+            }
+            if v.is_empty() {
+                return Err(format!("{} held no deals", path.display()));
+            }
+            v
+        }
+        None => generated_deals(args.throughput_deals.max(1))?,
+    };
     let pbns: Vec<&str> = generated.iter().map(|(p, _)| p.as_str()).collect();
     let work: Vec<&Deal> = generated.iter().map(|(_, d)| d).collect();
 
@@ -886,7 +912,7 @@ fn throughput(args: &ReferenceArgs, threads: usize) -> Result<(), String> {
     }
 
     println!(
-        "\ndeal-level throughput: {} generated deals ({sample} checked), \
+        "\ndeal-level throughput: {} deals ({sample} checked), \
          {threads} thread(s), best of {}",
         work.len(),
         args.runs
