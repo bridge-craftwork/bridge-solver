@@ -16,6 +16,12 @@
 # ALL SEVEN ARE NOW IN LOCK-STEP, trace and caches both, to 200,000 iterations.
 # They are kept as regression cases: every row must report `none`.
 #
+# The freak.* rows come from the reference's own `deals/freak`: distributions
+# with voids in every hand, which the 1k corpus never generates and which its
+# ultra-freakish cache-reset commits exist for. freak.0 and freak.1 are also
+# the two deal files that our parser could not read at all -- one uses suit
+# symbols, the other puts East on its own line.
+#
 # Over the 200-deal corpus, ALL 200 deals now match the reference node for node:
 # 296,689,028 against 296,689,028, exactly. deal.54 is the trump fixture that
 # got the last of it -- diamonds, declarer South -- and the rest are notrump.
@@ -29,3 +35,7 @@ deal.4	N	W	-	-	-	FIXED
 deal.134	N	W	-	-	-	FIXED
 deal.38	N	W	-	-	-	FIXED
 deal.54	D	W	-	-	-	FIXED
+freak.0	N	W	-	-	-	FIXED
+freak.1	S	W	-	-	-	FIXED
+freak.2	N	N	-	-	-	FIXED
+freak.3	N	N	-	-	-	FIXED

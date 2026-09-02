@@ -109,20 +109,43 @@ fn main() {
         std::process::exit(1);
     }
 
-    // Parse hands
+    // Parse hands. West and East may share a line or occupy one each; the
+    // reference decides by looking for a four-space gap in the West line, and
+    // reads another line when there is none. Its `freak` deals use both forms.
     let north_str = lines[0].trim();
-    let west_east_str = lines[1];
-    let south_str = lines[2].trim();
+    let (west_str, east_str, south_index) = match split_west_east(lines[1]) {
+        Some((west, east)) => (west, east, 2),
+        None => {
+            if lines.len() < 4 {
+                eprintln!(
+                    "Error: East is on its own line, so the file needs four hand \
+                     lines (N, W, E, S); '{file_path}' has {}.",
+                    lines.len()
+                );
+                std::process::exit(1);
+            }
+            (lines[1].trim().to_string(), lines[2].trim().to_string(), 3)
+        }
+    };
+    let south_str = lines[south_index].trim();
 
-    // Split west and east from line 2 (they're separated by multiple spaces)
-    let (west_str, east_str) = parse_west_east(west_east_str);
-
-    let hands = Hands::from_solver_format(north_str, &west_str, &east_str, south_str)
-        .expect("Failed to parse hands");
+    let hands = match Hands::from_solver_format(north_str, &west_str, &east_str, south_str) {
+        Some(h) => h,
+        None => {
+            eprintln!(
+                "Error: could not read the hands in '{file_path}'.\n\
+                 Expected four space-separated suits per hand, high to low, \
+                 with '-' for a void:\n\
+                 \x20 AQT62 - Q97 AT832\n\
+                 Suit symbols are accepted and ignored; 'x' wildcards are not."
+            );
+            std::process::exit(1);
+        }
+    };
 
     // Parse optional trump (line 4)
-    let trump: Option<usize> = if lines.len() > 3 {
-        let trump_str = lines[3].trim();
+    let trump: Option<usize> = if lines.len() > south_index + 1 {
+        let trump_str = lines[south_index + 1].trim();
         if !trump_str.is_empty() {
             Some(parse_trump(trump_str.chars().next().unwrap()))
         } else {
@@ -133,8 +156,8 @@ fn main() {
     };
 
     // Parse optional leader (line 5)
-    let leader: Option<usize> = if lines.len() > 4 {
-        let leader_str = lines[4].trim();
+    let leader: Option<usize> = if lines.len() > south_index + 2 {
+        let leader_str = lines[south_index + 2].trim();
         if !leader_str.is_empty() {
             Some(parse_seat(leader_str.chars().next().unwrap()))
         } else {
@@ -224,41 +247,35 @@ fn main() {
 }
 
 /// Parse the West/East line which has both hands separated by 2+ spaces
-fn parse_west_east(line: &str) -> (String, String) {
-    // Find the first run of 2+ spaces (the separator between West and East)
+/// Split a West/East line, or report that East is on the next line.
+///
+/// The reference looks for four consecutive spaces (or a tab) that are not at
+/// the very start of the line: a gap that wide is the space between the two
+/// hands of a diagram, while leading spaces are only indentation. When there is
+/// no such gap the East hand is on a line of its own, and `None` says so.
+fn split_west_east(line: &str) -> Option<(String, String)> {
     let bytes = line.as_bytes();
     let mut i = 0;
     while i < bytes.len() {
+        if bytes[i] == b'\t' && i > 0 {
+            return Some((line[..i].trim().to_string(), line[i..].trim().to_string()));
+        }
         if bytes[i] == b' ' {
             let start = i;
             while i < bytes.len() && bytes[i] == b' ' {
                 i += 1;
             }
-            // If we found 2+ spaces, split here
-            if i - start >= 2 {
-                let west = line[..start].trim().to_string();
-                let east = line[i..].trim().to_string();
-                return (west, east);
+            if start > 0 && i - start >= 4 {
+                return Some((
+                    line[..start].trim().to_string(),
+                    line[i..].trim().to_string(),
+                ));
             }
-        } else {
-            i += 1;
+            continue;
         }
+        i += 1;
     }
-
-    // Fallback: try splitting by tab
-    let trimmed = line.trim();
-    if let Some(pos) = trimmed.find('\t') {
-        let west = trimmed[..pos].trim().to_string();
-        let east = trimmed[pos..].trim().to_string();
-        (west, east)
-    } else {
-        // Last resort: split by whitespace and divide in half
-        let tokens: Vec<&str> = trimmed.split_whitespace().collect();
-        let mid = tokens.len() / 2;
-        let west = tokens[0..mid].join(" ");
-        let east = tokens[mid..].join(" ");
-        (west, east)
-    }
+    None
 }
 
 fn parse_trump(c: char) -> usize {

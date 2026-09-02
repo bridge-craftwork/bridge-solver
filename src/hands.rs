@@ -168,8 +168,24 @@ fn parse_hand(s: &str) -> Option<Cards> {
 /// Parse a single hand from solver format (suits separated by spaces, SHDC order)
 /// Handles fewer than 4 suits by treating missing suits as voids.
 fn parse_hand_spaces(s: &str) -> Option<Cards> {
+    // Discard everything outside the rank alphabet first, exactly as the C++
+    // reference's `ParseHand` does. That is what lets one parser read both the
+    // plain form used by most of its deal files
+    //
+    //     AQT62 - Q97 AT832
+    //
+    // and the pretty form its freak deals use, where a suit symbol precedes
+    // each holding:
+    //
+    //     ♠ AQT62 ♥ - ♦ Q97 ♣ AT832
+    //
+    // Splitting the second on whitespace without filtering yields eight tokens
+    // rather than four, which is why those deals could not be read at all.
+    const RANK_CHARS: &str = "AaKkQqJjTt1098765432Xx- ";
+    let filtered: String = s.chars().filter(|c| RANK_CHARS.contains(*c)).collect();
+
     let mut cards = Cards::new();
-    let suits: Vec<&str> = s.split_whitespace().collect();
+    let suits: Vec<&str> = filtered.split_whitespace().collect();
 
     // Allow 1-4 suits; missing suits are voids
     if suits.is_empty() || suits.len() > 4 {
@@ -180,11 +196,22 @@ fn parse_hand_spaces(s: &str) -> Option<Cards> {
         if *suit_str == "-" {
             continue; // Void
         }
-        for c in suit_str.chars() {
+        let mut chars = suit_str.chars();
+        while let Some(c) = chars.next() {
             if c == '-' {
                 continue;
             }
+            // The reference spells the ten either `T` or `10`; `char_to_rank`
+            // already reads `1` as the ten, so the `0` has to be eaten here.
+            // A wildcard `x` needs the cards already dealt to resolve, which
+            // this parser does not see, so it is rejected rather than guessed.
+            if c == '1' && !chars.as_str().starts_with('0') {
+                return None;
+            }
             let rank = char_to_rank(c)?;
+            if c == '1' {
+                chars.next();
+            }
             cards.add(card_of(suit, rank));
         }
     }
