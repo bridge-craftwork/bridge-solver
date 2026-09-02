@@ -12,41 +12,6 @@ use super::hands::Hands;
 use super::types::*;
 use crate::pattern_vec::PatternVec;
 
-/// Pack bits: extract bits from source where mask has 1s, compress them to low bits
-/// Example: PackBits(0b10100, 0b11100) = 0b101 (extracts bits 2,3,4 and packs to 0,1,2)
-#[inline]
-// `m & m.wrapping_neg()` is the classic isolate-lowest-set-bit idiom. Clippy
-// (since the toolchain that stabilized it) wants `m.isolate_lowest_one()`, but
-// that method is still unstable on older compilers, so adopting it would raise
-// this crate's minimum Rust version for no benefit in a hot path. `unknown_lints`
-// keeps compilers that predate the lint quiet about the allow itself.
-#[allow(unknown_lints, clippy::manual_isolate_lowest_one)]
-pub fn pack_bits(source: u64, mask: u64) -> u64 {
-    #[cfg(target_feature = "bmi2")]
-    {
-        // Use PEXT instruction if available
-        unsafe { core::arch::x86_64::_pext_u64(source, mask) }
-    }
-    #[cfg(not(target_feature = "bmi2"))]
-    {
-        if source == 0 {
-            return 0;
-        }
-        let mut packed = 0u64;
-        let mut bit = 1u64;
-        let mut m = mask;
-        while m != 0 {
-            let lowest = m & m.wrapping_neg(); // isolate lowest bit
-            if source & lowest != 0 {
-                packed |= bit;
-            }
-            bit <<= 1;
-            m &= m - 1; // clear lowest bit
-        }
-        packed
-    }
-}
-
 /// Unpack bits: scatter source bits to positions where mask has 1s
 /// Example: UnpackBits(0b101, 0b11100) = 0b10100 (scatters bits 0,1,2 to positions 2,3,4)
 #[inline]
@@ -534,11 +499,52 @@ pub struct RelativeHands {
 
 impl RelativeHands {
     /// Convert a suit to relative cards
+    ///
+    /// The four hands must partition `all_suit_cards`; every caller derives the
+    /// one from the other, and the `debug_assert` below holds them to it.
+    // `m & m.wrapping_neg()` is the classic isolate-lowest-set-bit idiom; see
+    // [`unpack_bits`] for why the stable-but-unstable method is not used.
+    #[allow(unknown_lints, clippy::manual_isolate_lowest_one)]
     pub fn convert_suit(&mut self, hands: &Hands, suit: Suit, all_suit_cards: Cards) {
         let all_value = all_suit_cards.value();
-        for seat in 0..NUM_SEATS {
-            let hand_suit = hands[seat].suit(suit);
-            let packed = pack_bits(hand_suit.value(), all_value);
+        debug_assert_eq!(
+            all_value,
+            hands.all_cards().suit(suit).value(),
+            "convert_suit needs the four hands to partition all_suit_cards"
+        );
+
+        // One walk of the mask for all four seats rather than one walk each.
+        //
+        // This was four calls to a `pack_bits` that mirrored `unpack_bits`
+        // below. aarch64 has no PEXT, so each was a software compress: one
+        // iteration per card still out in the suit, serially dependent through
+        // `m`. The mask is the same for all four seats, so three of those four
+        // walks were redundant -- and South need not be walked at all, because
+        // the hands partition the suit and South holds exactly the bits the
+        // other three did not claim.
+        //
+        // Worth 3.6% over the bench corpus; see `bench/results/release-profile.md`.
+        // On an x86-64 target built with BMI2 the old form was four independent
+        // `_pext_u64` instructions and would beat this; the reference
+        // implementation kept in the tests below is what to reinstate there.
+        let mut packed = [0u64; NUM_SEATS];
+        let mut m = all_value;
+        let mut bit = 1u64;
+        while m != 0 {
+            let lowest = m & m.wrapping_neg(); // isolate lowest bit
+            for seat in [WEST, NORTH, EAST] {
+                if hands[seat].value() & lowest != 0 {
+                    packed[seat] |= bit;
+                }
+            }
+            bit <<= 1;
+            m &= m - 1; // clear lowest bit
+        }
+        // `bit` is now `1 << (cards in the suit)`, so `bit - 1` is the mask of
+        // occupied relative ranks.
+        packed[SOUTH] = (bit - 1) & !(packed[WEST] | packed[NORTH] | packed[EAST]);
+
+        for (seat, &packed) in packed.iter().enumerate() {
             // Clear the suit and add relative cards
             self.hands[seat] = self.hands[seat].clear_suit(suit);
             let relative = Cards::from_bits(packed << (suit * NUM_RANKS));
@@ -791,4 +797,84 @@ pub fn type_sizes() -> (usize, usize, usize) {
         std::mem::size_of::<PatternVec>(),
         std::mem::size_of::<Hands>(),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The four-calls-per-suit compress that `convert_suit` replaced, kept as
+    /// the oracle for the single mask walk that took its place.
+    ///
+    /// On an x86-64 target with BMI2 this is one `_pext_u64` instruction, which
+    /// is why it is worth keeping written down: there, four of these would beat
+    /// the walk.
+    #[allow(unknown_lints, clippy::manual_isolate_lowest_one)]
+    fn pack_bits(source: u64, mask: u64) -> u64 {
+        if source == 0 {
+            return 0;
+        }
+        let mut packed = 0u64;
+        let mut bit = 1u64;
+        let mut m = mask;
+        while m != 0 {
+            let lowest = m & m.wrapping_neg(); // isolate lowest bit
+            if source & lowest != 0 {
+                packed |= bit;
+            }
+            bit <<= 1;
+            m &= m - 1; // clear lowest bit
+        }
+        packed
+    }
+
+    /// The single mask walk in [`RelativeHands::convert_suit`] must agree, bit
+    /// for bit, with the four independent [`pack_bits`] calls it replaced (see
+    /// the oracle above) --
+    /// including the South value, which it derives as the complement of the
+    /// other three rather than computing.
+    #[test]
+    fn convert_suit_matches_four_pack_bits() {
+        // A deterministic sweep of deals: deal the 13 cards of one suit out to
+        // the four seats in every rotation of a handful of splits, so shapes
+        // from 13-0-0-0 to 4-3-3-3 and every void combination are covered.
+        let mut checked = 0;
+        for suit in 0..NUM_SUITS {
+            for split in 0..(1usize << 13) {
+                // Two-bit-per-card seat assignment is 4^13; instead walk a
+                // 13-bit pattern and derive four seats from it deterministically.
+                let mut hands = Hands::new();
+                let mut all = Cards::new();
+                for rank in 0..NUM_RANKS {
+                    // Drop some cards entirely: those are the ones already played.
+                    if split & (1 << rank) == 0 && rank % 5 != 0 {
+                        continue;
+                    }
+                    let card = suit * NUM_RANKS + rank;
+                    let seat = (split.rotate_right(rank as u32) ^ rank) % NUM_SEATS;
+                    hands[seat].add(card);
+                    all.add(card);
+                }
+
+                let all_suit = all.suit(suit);
+                let mut expected = Hands::new();
+                for seat in 0..NUM_SEATS {
+                    let packed = pack_bits(hands[seat].suit(suit).value(), all_suit.value());
+                    expected[seat] = Cards::from_bits(packed << (suit * NUM_RANKS));
+                }
+
+                let mut actual = RelativeHands::default();
+                actual.convert_suit(&hands, suit, all_suit);
+
+                for seat in 0..NUM_SEATS {
+                    assert_eq!(
+                        actual.hands[seat], expected[seat],
+                        "suit {suit} split {split:#015b} seat {seat}"
+                    );
+                }
+                checked += 1;
+            }
+        }
+        assert_eq!(checked, NUM_SUITS * (1 << 13));
+    }
 }

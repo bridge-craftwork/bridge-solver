@@ -790,7 +790,161 @@ with the thread count it will measure and rejects a multi-valued
 `--dds-threads` with an explanation rather than dying. **A curve means one
 process per point.**
 
-## Three things that looked wrong and were not
+## Where the per-node time actually goes
+
+First sampled profile of the release build. `samply record` at the default
+1 kHz over the 200-deal lock-step corpus, single-threaded on the M4 Pro:
+22,938 samples, 22.6 s of CPU. `perf` does not exist here; `samply` needs
+`--unstable-presymbolicate` to put symbols in a `--save-only` profile, and
+release needs `CARGO_PROFILE_RELEASE_DEBUG=true` to have any. Debug info
+changes no codegen, so the timings stay comparable.
+
+Self time, inlinees folded into their caller:
+
+| | self |
+|---|---|
+| `evaluate_playable_cards` | 26.0% |
+| `search_with_cache` | 16.1% |
+| `Pattern::lookup` | 13.8% |
+| `RelativeHands::convert_suit` | 12.1% |
+| `Pattern::update` | 7.2% |
+| `order_cards_static` | 6.9% |
+| `Pattern::get_rank_winners` | 6.5% |
+| `search_at_trick_start` | 6.2% |
+| `PatternVec::clear` | 2.1% |
+| everything else | < 1% each |
+
+The shape to notice: the search proper is about half, and the pattern tree —
+`lookup`, `convert_suit`, `update`, `get_rank_winners` — is the other 40%.
+Optimisation attention has gone to the search; the arithmetic says the tree is
+the equal partner.
+
+### The two leads the profile actually supported
+
+**`Pattern::lookup` scans children as an array of structs.** 13.8% self, and
+66% of that sits on two instructions — the `ldr x8, [x26], #0x38` that walks
+the children and the loop-back it feeds. `Pattern` is 56 bytes (`Hands` 32,
+`Bounds`, `PatternVec` 16), and the scan streams all 56 per child while the
+rejection test reads only the first 8: `is_subset_of` bails on `hands[0]` for
+most children, which is exactly why those two addresses dominate. At 56 bytes
+a cache line holds barely one child. Splitting the first subset key into its
+own contiguous array beside the children — structure of arrays for the scan
+key only — would cut the streamed footprint about sevenfold on the rejection
+path. It does not reorder children, so lock-step should survive, but that
+needs proving rather than assuming.
+
+**Tried, and it costs 1.1%.** The West hand of each child was split into a
+contiguous `u64` array living after the patterns in the same pooled block, and
+the rejection scan in both `Pattern::lookup` and `Pattern::update` reads that
+array instead of striding the structs. Lock-step survived exactly, as
+predicted — 296,689,028 nodes, `none` on all twelve fixtures, with a
+`debug_assert` in the scan holding the keys to their patterns. It was still a
+loss: full corpus, ABBA-interleaved, geomean of per-board minima **1.011**
+against base, replicated at **1.015** in a second three-way run, and nine of
+the ten boards slower individually.
+
+The mechanism the lead missed is the one it created. A key is 8 bytes on top
+of a 56-byte `Pattern`, so the tree — the very structure the profile names as
+the working set — grows 14%, and the scan now walks two streams where it
+walked one. Narrowing the rejection path does not pay for either. The patch is
+recoverable from this commit's history if a future change makes `Pattern`
+small enough for the arithmetic to flip.
+
+**`pack_bits` is a software PEXT.** `convert_suit` is 12.1%, and its body is
+four `pack_bits` calls, one per seat. aarch64 has no PEXT, so the fallback
+runs a bit at a time over the mask: one iteration per remaining card in the
+suit, a serial dependency chain, four times over the same mask. Two
+independent savings are visible without changing any result:
+
+- The mask is identical across the four seats. A Hacker's-Delight parallel
+  suffix `compress` splits into a mask-dependent setup and a cheap per-source
+  apply; the setup would be paid once instead of four times.
+- The four hands *partition* the suit's remaining cards, so the fourth packed
+  value is the complement of the first three. If `all_cards` really is the
+  union of the four hands at every call site — worth checking, not assuming —
+  that is a quarter of the calls gone for free.
+
+Both are arithmetic identities rather than search changes, so the node count
+should not move.
+
+**Tried, and it is worth 3.6%.** Neither of the two shapes above, as it turns
+out: the parallel-suffix `compress` is the wrong tool, because it costs a
+fixed ~24 operations where the walk costs one iteration per card still out in
+the suit, and by mid-search a suit is three or four cards. What the leads had
+right was that the *mask is shared*. So `convert_suit` now walks the mask once
+and tests all four seats inside that one walk, rather than walking it four
+times:
+
+```rust
+while m != 0 {
+    let lowest = m & m.wrapping_neg();
+    for seat in [WEST, NORTH, EAST] {
+        if hands[seat].value() & lowest != 0 { packed[seat] |= bit; }
+    }
+    bit <<= 1;
+    m &= m - 1;
+}
+packed[SOUTH] = (bit - 1) & !(packed[WEST] | packed[NORTH] | packed[EAST]);
+```
+
+The partition property does hold, and it was checked rather than assumed: all
+three call sites build `all_cards` as `hands.all_cards()` (the third adding the
+partial trick's cards back to both sides of the equation), so South is the
+complement and is never walked. A `debug_assert` now states that precondition
+at the top of `convert_suit`, and the three seats in the loop mean the inner
+tests are independent.
+
+Measured full corpus, ABBA-interleaved, geomean of per-board minima **0.964**
+against base, replicated at **0.961**; all ten boards improved, in a band from
+0.954 to 0.970. On the 200-deal lock-step corpus, alternating whole runs, best
+23.90 s against 23.13 s — **-3.2%**, with c2 ahead in every one of four rounds.
+Both invariants exact: 296,689,028 nodes and `none` on all twelve fixtures.
+
+`pack_bits` had no other caller and is gone from the crate. Its body now lives
+in `pattern.rs`'s test module as the oracle for
+`convert_suit_matches_four_pack_bits`, which checks the walk against four
+independent compresses over 32,768 constructed suit splits — and which fails on
+mutation of either the East term of the loop or the South complement. Keeping
+it written down also records what to reinstate on an x86-64 target built with
+BMI2, where four `_pext_u64` instructions would beat this walk.
+
+### Pooled retention is a footprint question, not a speed one
+
+The ~254 MB the pool holds never showed up in this profile: `pool_alloc`,
+`pool_free` and `reserve_exact_class` together are under 0.6%, and
+`PatternCache::new` another 0.7%. Retention is worth fixing for memory, but
+nothing here suggests it is costing time.
+
+## Two ways the harness will mislead you
+
+Both were hit while measuring the two leads above, and both produced a
+confidently wrong number before being caught.
+
+**`--quick` does not measure the same board twice.** Its doc comment says the
+median-cost board is "chosen deterministically so that two `--quick` runs
+measure the same thing", and `median_board` in `src/bin/solver-bench/main.rs`
+times every board **once**, unrepeated, and takes the median of those timings.
+Boards 4 (~81 ms) and 7 (~76 ms) are adjacent in cost, so on a loaded machine
+the choice flips between them and an A/B mean silently averages two different
+workloads. In the first run of this session it flipped three times in twenty
+runs and made a 1% regression look like a dead heat. **Use the full corpus for
+A/B work.** It is only about 5 s per pass at `--runs 5`, which is cheap enough
+to interleave eight rounds a side, and it gives ten paired ratios instead of
+one — the across-the-board consistency is what separates a result from drift,
+exactly as it did for the LTO change above.
+
+**`first-divergence.sh` will happily check a stale binary.** `XRAY` is
+required, but `DIAG` defaults to `./target/release/solver-diag` and nothing
+rebuilds it. That binary needs `--features cli`, so the obvious
+`./dev-build.sh --ci build --release --bin solver-diag` *fails*, leaves
+whatever was there before, and the script then reports `none` on all twelve
+fixtures — against the previous revision's code. Build it explicitly first:
+
+```bash
+./dev-build.sh --ci build --release --features cli --bin solver-diag
+```
+
+## Four things that looked wrong and were not
 
 Recorded because each is a plausible next guess, and each cost a measurement to
 rule out.
@@ -812,6 +966,29 @@ on this core, and the I-cache never fetches the lines they sit on.
 `aarch64-apple-darwin`, and popcount and bit-scan are ARM64 baseline. This lever
 only matters on x86-64, where the default target lacks `popcnt` and BMI.
 
+**The `panic_bounds_check` sites.** The lead below was right about the
+mechanism and wrong about the size. Taking the mask from `entries.len() - 1`
+at the point of use does elide the check: the `CutoffCache` probe loop loses
+its `cmp`/`b.hs` pair and drops from ten instructions to eight, confirmed in
+the disassembly. It bought **nothing** — ABBA-interleaved over the full
+200-deal corpus, base 23.29 s mean against 23.39 s, which is inside the drift.
+The profile had already said so: those two instructions took 0 of 22,938
+samples, and summing *every* bounds-check guard in the whole binary — all 405
+of them, found by walking the disassembly for conditional branches into a
+`panic_bounds_check` block — accounts for 0.985% of samples in total. That is
+the ceiling on perfect elision everywhere, and the real recovery is less,
+because a predicted compare-and-branch beside a load that is missing cache is
+close to free on this core.
+
+The change was kept anyway, on other grounds: it lets the `mask` field go
+entirely, from both `CutoffCache` and `PatternCache`, leaving the length as
+the single source of truth. Both lock-step invariants hold — 296,689,028 nodes
+and `none` on all twelve fixtures.
+
+The lesson generalises. Counting `panic_bounds_check` call sites counts *cold
+blocks*, which is not the same as counting hot compare-and-branches, and on a
+wide out-of-order core stalled on memory it is nearly uncorrelated with time.
+
 Already clean, and worth not re-checking: there is **no per-node allocation**
 (`OrderedCards` is a fixed `[u8; 13]`, both caches are flat `Box<[T]>`,
 `PartialTrick`'s `Vec` is construction-only) and **no `HashMap`** —
@@ -822,12 +999,13 @@ Already clean, and worth not re-checking: there is **no per-node allocation**
 - **The per-board spread** against DDS, above: 0.73x to 1.76x on the curated
   corpus. Not noise, and not uniform overhead. Worth checking whether node
   counts track DDS per board rather than only in aggregate.
-- **39 `panic_bounds_check` sites** in the two hot functions. One concrete
-  instance: `CutoffCache::lookup` and `store` index
-  `self.entries[(base_index + d) & self.mask]`, and LLVM cannot prove
-  `mask + 1 == entries.len()` because `mask` is a separate field. Taking the
-  mask from `self.entries.len() - 1` at the point of use would elide those
-  checks without any unsafe code. Unmeasured.
+- **A re-profile after the `convert_suit` change.** It removed roughly three
+  quarters of the work in a function that was 12.1% self, so the ranking above
+  is stale at the top; `evaluate_playable_cards` and `search_with_cache` are
+  now a larger share of a smaller total, and the next lead should be drawn
+  from a fresh sample rather than from this table.
+- **`Pattern::get_rank_winners`**, 6.5% self and never examined. It is the one
+  pattern-tree entry in the profile with no lead attached to it.
 - **`panic = "abort"`** was not tried. It would remove the unwind landing pads
   behind those checks, but it changes `cargo test` semantics and needs its own
   profile.

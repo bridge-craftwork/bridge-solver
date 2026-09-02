@@ -100,8 +100,15 @@ was tried and found worthless, and where the remaining gap is.
 ## Performance work
 
 Current standing, single-threaded over those 200 deals: the reference 21,630 ms,
-this port 23,480 ms, DDS 2.9 20,200 ms. With identical node counts, **1.086x is
+this port ~22,720 ms, DDS 2.9 20,200 ms. With identical node counts, **~1.05x is
 pure per-node cost** with nothing else mixed in.
+
+The port's figure is the 23,480 ms recorded on 2026-09-01 scaled by the 0.968
+measured for the `convert_suit` change (2026-09-02, alternating whole runs on a
+busier machine: 23.90 s against 23.13 s, best of four rounds each). It is not a
+fresh absolute measurement, and the three numbers were not taken in one
+sitting — re-measure all three together before quoting the ratio anywhere it
+matters.
 
 Before optimising, read the "tried and found worthless" list in
 `release-profile.md`. Hoisting the per-node atomics, deleting ~4,000
@@ -111,8 +118,14 @@ redundant cache-key hash all measured as exactly nothing.
 Measurement discipline that this repo has learned the hard way:
 
 - On a machine that is not idle, same-binary repeats swing 4–6% on the geometric
-  mean. Build both binaries, keep both, and alternate them A/B/A/B with
-  `run --quick --runs 15`; that holds to ~1% under load. A single before/after
-  pair has produced a confident wrong answer here more than once.
+  mean. Build both binaries, keep both, and alternate them A/B/A/B. A single
+  before/after pair has produced a confident wrong answer here more than once.
+- **Do not use `--quick` for A/B.** Its board choice is itself an unrepeated
+  timing, so under load it flips between two boards of different cost and
+  averages two workloads into one number. Use the full corpus:
+  `run --no-sweep --runs 5` is ~5 s, so eight interleaved rounds a side is a
+  couple of minutes, and the ten paired per-board ratios are what make a result
+  attributable — a real change moves every board by roughly the same fraction.
+  See "Two ways the harness will mislead you" in `release-profile.md`.
 - `perf` does not exist on macOS. Use `samply record`, or Instruments' CPU
   Counters template, for a profile.
