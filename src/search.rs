@@ -1712,11 +1712,11 @@ impl<'a> Search<'a> {
             my_tricks
         };
 
-        // Total fast tricks = trump tricks + side suit tricks, capped by our hand size
-        (
-            (trump_tricks + side_suit_tricks).min(my_hand.size()),
-            rank_winners,
-        )
+        // Uncapped. The reference caps at the call site, and reports the
+        // number from *before* that cap as `raw`; capping here made our `raw`
+        // mean something different from theirs, which read as a divergence in
+        // five of the seven fixtures when the two searches in fact agreed.
+        (trump_tricks + side_suit_tricks, rank_winners)
     }
 
     /// Fast tricks estimation - returns (count, rank_winners)
@@ -1725,14 +1725,18 @@ impl<'a> Search<'a> {
         let all_cards = self.hands.all_cards();
         let trick_idx = depth / 4;
         let max_tricks = self.num_tricks - trick_idx;
-        let (tricks, rank_winners) = self.fast_tricks_from_seat(seat_to_play, all_cards);
-        let result = tricks.min(max_tricks);
+        let (raw, rank_winners) = self.fast_tricks_from_seat(seat_to_play, all_cards);
+        // `min(raw, my_hand.Size())` in the reference. The further clamp to the
+        // tricks left in the deal cannot bite -- a hand never holds more cards
+        // than there are tricks remaining -- but it is kept as a guard.
+        let capped = raw.min(self.hands[seat_to_play].size());
+        let result = capped.min(max_tricks);
 
         // Debug logging when XRAY is enabled and under limit
         if xray_should_log() {
             eprintln!(
                 "FAST_TRICKS: depth={} seat={} raw={} capped={} trump={}",
-                depth, seat_to_play, tricks, result, self.trump
+                depth, seat_to_play, raw, capped, self.trump
             );
         }
         (result, rank_winners)
