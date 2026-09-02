@@ -43,6 +43,54 @@ overall wall: 0.914x (-8.6%)
 overall cpu : 0.915x (-8.5%)
 ```
 
+## How current is the reference we match?
+
+The lock-step below is against `macroxue/bridge-solver` at 2026-01-31. Upstream
+is **49 commits ahead**, to 2026-08-31, **27 of them touching `solver.cc`** --
+including several in exactly the code this work changed: `Bubble up broader
+patterns`, `Tune lead ordering`, `Simpler cutoff cache index`, `ShapeEntry holds
+patterns of four seats`.
+
+Built from `origin/master` and run over the same 200 deals:
+
+| | tables | nodes | wall |
+|---|---|---|---|
+| upstream Jan (what we match) | — | 296,689,028 | 21,940 ms |
+| upstream Aug | **identical on all 200** | 298,896,515 (**+0.74%**) | 20,730 ms (**-5.5%**) |
+
+Three things follow, and the middle one is the surprise.
+
+**No correctness has been missed.** Seven months of upstream work produces the
+same twenty-entry table on every one of the 200 deals. `bac53be`, the one commit
+that reads like a correctness fix, guards `all_cards.Suit(trump)` against
+`trump == NOTRUMP`, where `Suit(4)` extracts a range that is empty in a 52-bit
+mask anyway -- latent UB, not behaviour. Ours is structurally the same and
+equally benign: `mask_of(NOTRUMP)` is `0x1FFF << 52`, which no card bit reaches.
+
+**Upstream's search got slightly bigger, not smaller.** Every one of the 200
+deals changed node count, and the total rose 0.74%. So matching current upstream
+would mean adopting a marginally *worse* tree.
+
+**Its gains are implementation, and they transfer without matching the tree.**
+A free-list pool for `Vector<T>`'s backing storage (`610e9da`), a single 64-bit
+cache index (`8a01aa8`), a narrower hash tag (`448a1f5`), skipping a re-hash
+between lookup and update (`24ecd16`). That first one is aimed squarely at what
+this port's remaining 13% per-node gap looks like.
+
+So the sensible order is not a rebase: keep the January lock-step as the
+correctness anchor, port the implementation commits on their own merits, and
+weigh the behavioural ones individually rather than inheriting a 0.74% larger
+search to get them.
+
+Two smaller notes. The `Have(1)` implicit conversion documented below is
+**still present** in current upstream, so matching it remains right. And
+upstream **relicensed to MIT OR Apache-2.0** in August (`dc2d4df`), the same
+pairing as this repo, which retires the licence question that shaped
+`fixtures/divergence`.
+
+Against current upstream rather than January's, our margin is 24,731 ms against
+20,730 ms -- **1.193x**.
+
 ## Lock-step, and what the timing then means
 
 All 200 deals of the reference's own corpus search the same tree: **296,689,028
