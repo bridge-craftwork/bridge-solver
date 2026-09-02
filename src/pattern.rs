@@ -10,6 +10,7 @@
 use super::cards::{mask_of, suit_of, Cards};
 use super::hands::Hands;
 use super::types::*;
+use crate::pattern_vec::PatternVec;
 
 /// Pack bits: extract bits from source where mask has 1s, compress them to low bits
 /// Example: PackBits(0b10100, 0b11100) = 0b101 (extracts bits 2,3,4 and packs to 0,1,2)
@@ -155,7 +156,7 @@ impl Bounds {
 pub struct Pattern {
     pub hands: Hands,
     pub bounds: Bounds,
-    pub children: Vec<Pattern>,
+    pub children: PatternVec,
 }
 
 impl Default for Pattern {
@@ -163,7 +164,7 @@ impl Default for Pattern {
         Pattern {
             hands: Hands::default(),
             bounds: Bounds::new(0, TOTAL_TRICKS as i8),
-            children: Vec::new(),
+            children: PatternVec::new(),
         }
     }
 }
@@ -173,7 +174,7 @@ impl Pattern {
         Pattern {
             hands,
             bounds,
-            children: Vec::new(),
+            children: PatternVec::new(),
         }
     }
 
@@ -247,13 +248,14 @@ impl Pattern {
                         if self.children[j].bounds != new_pattern.bounds {
                             new_pattern.children.push(self.children.swap_remove(j));
                         } else if new_pattern.children.is_empty() {
-                            let mut old_children = Vec::new();
-                            std::mem::swap(&mut old_children, &mut self.children[j].children);
-                            new_pattern.children = old_children;
+                            std::mem::swap(
+                                &mut new_pattern.children,
+                                &mut self.children[j].children,
+                            );
                             self.children.swap_remove(j);
                         } else {
-                            let removed = self.children.swap_remove(j);
-                            new_pattern.children.extend(removed.children);
+                            let mut removed = self.children.swap_remove(j);
+                            new_pattern.children.append(&mut removed.children);
                         }
                     } else {
                         j += 1;
@@ -291,7 +293,7 @@ impl Pattern {
             // `swap_remove(i)` followed by `extend` does -- leaves the same
             // patterns in a different order, and `Pattern::lookup` returns the
             // first child that matches.
-            let mut subpatterns = Vec::new();
+            let mut subpatterns = PatternVec::new();
             std::mem::swap(&mut subpatterns, &mut self.children[i].children);
             self.children.append(&mut subpatterns);
             self.children.swap_remove(i);
@@ -731,6 +733,27 @@ impl PatternCache {
         }
     }
 
+    /// Table capacity, live entries, and total pattern nodes across them.
+    ///
+    /// For attributing memory: the table is `capacity * size_of::<ShapeEntry>()`
+    /// contiguous bytes, while every pattern node beyond an entry's root owns a
+    /// separate `Vec` allocation, and those are what the C++ reference pools.
+    pub fn footprint(&self) -> (usize, usize, usize, usize) {
+        let live = self.entries.iter().filter(|e| e.hash != 0).count();
+        let nodes: usize = self
+            .entries
+            .iter()
+            .filter(|e| e.hash != 0)
+            .map(|e| pattern_nodes(&e.pattern))
+            .sum();
+        (
+            self.entries.len(),
+            live,
+            nodes,
+            std::mem::size_of::<ShapeEntry>(),
+        )
+    }
+
     /// Live entries, and a digest of their contents.
     pub fn digest(&self) -> (usize, u64) {
         let mut count = 0;
@@ -744,4 +767,16 @@ impl PatternCache {
         }
         (count, digest)
     }
+}
+
+/// Byte sizes of the pattern-tree types, for attributing memory.
+///
+/// Returns `(Pattern, its children vector, Hands)`. The middle one is the
+/// reason the first is what it is: a `Vec` is three words, `PatternVec` two.
+pub fn type_sizes() -> (usize, usize, usize) {
+    (
+        std::mem::size_of::<Pattern>(),
+        std::mem::size_of::<PatternVec>(),
+        std::mem::size_of::<Hands>(),
+    )
 }

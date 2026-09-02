@@ -94,6 +94,7 @@ fn main() {
     if show_perf {
         set_show_perf(true);
     }
+    let report_footprint = show_perf;
 
     // Set no-rank-skip mode if specified
     if no_rank_skip {
@@ -241,6 +242,22 @@ fn main() {
             println!(
                 "{}  {}  {}  {}  {}  {:.2} s N/A M",
                 trump_char, results[0], results[1], results[2], results[3], total_time
+            );
+        }
+        if report_footprint {
+            let (cap, live, nodes, entry_bytes) = pattern_cache.footprint();
+            let table_mb = cap as f64 * entry_bytes as f64 / (1024.0 * 1024.0);
+            eprintln!(
+                "[FOOTPRINT] pattern cache: capacity {cap} x {entry_bytes} B = {table_mb:.0} MB \
+                 table, {live} live entries, {nodes} pattern nodes ({} below the roots, \
+                 each owning a separate Vec)",
+                nodes.saturating_sub(live)
+            );
+            let (pat, vec, hands_sz) = bridge_solver::type_sizes();
+            eprintln!(
+                "[FOOTPRINT] Pattern = {pat} B (Hands {hands_sz} + children {vec} + bounds/padding), \
+                 so {nodes} nodes are {:.0} MB of structs alone",
+                nodes as f64 * pat as f64 / (1024.0 * 1024.0)
             );
         }
     }
