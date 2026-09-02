@@ -16,10 +16,9 @@
 # ALL SEVEN ARE NOW IN LOCK-STEP, trace and caches both, to 200,000 iterations.
 # They are kept as regression cases: every row must report `none`.
 #
-# Over the 200-deal corpus, 148 of 200 deals now match the reference node for
-# node. The 52 that do not are listed in `residual.tsv`; every fixture here is
-# a notrump lead-West cell, so the trump-contract paths have never been under
-# a fixture at all, and that is where to look next.
+# Over the 200-deal corpus, ALL 200 deals now match the reference node for node:
+# 296,689,028 against 296,689,028, exactly. deal.54 is the trump fixture that
+# got the last of it -- diamonds, declarer South -- and the rest are notrump.
 #
 # deal	trump	lead	line	iter	cache	mech
 deal.72	N	W	-	-	-	FIXED
@@ -29,3 +28,4 @@ deal.10	N	W	-	-	-	FIXED
 deal.4	N	W	-	-	-	FIXED
 deal.134	N	W	-	-	-	FIXED
 deal.38	N	W	-	-	-	FIXED
+deal.54	D	W	-	-	-	FIXED

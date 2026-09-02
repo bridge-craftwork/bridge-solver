@@ -279,11 +279,23 @@ impl Pattern {
             self.children[i].update_bounds(self.bounds);
             if self.children[i].bounds != self.bounds {
                 i += 1;
-            } else {
-                // Child bounds now match parent - flatten
-                let removed = self.children.swap_remove(i);
-                self.children.extend(removed.children);
+                continue;
             }
+            // Child bounds now match parent - flatten.
+            //
+            // Order of operations matters, and is not the obvious one. The
+            // reference lifts the child's sub-patterns onto the end of the list
+            // *first* and only then deletes the child, so its swap-with-last
+            // removal can pull one of the just-appended sub-patterns into the
+            // hole. Deleting first and appending after -- which is what
+            // `swap_remove(i)` followed by `extend` does -- leaves the same
+            // patterns in a different order, and `Pattern::lookup` returns the
+            // first child that matches.
+            let mut subpatterns = Vec::new();
+            std::mem::swap(&mut subpatterns, &mut self.children[i].children);
+            self.children.append(&mut subpatterns);
+            self.children.swap_remove(i);
+            // `i` is not advanced: swap_remove has put a new child here.
         }
     }
 
