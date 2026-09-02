@@ -231,6 +231,36 @@ NT case above, so the cause is still to be found by instrumenting the per-suit
    value truncates the suit harder and under-counts. Latent, and in the same
    direction as the symptom.
 
+### An implicit conversion in the reference's lead ordering
+
+`deal.134` diverged at iteration 9 and `deal.1` at 29, both on move ordering,
+both with an identical playable set and no cutoff cards. The reference put a
+whole suit in a higher lead bucket than we did.
+
+The cause is one line of the reference:
+
+```cpp
+(pd_suit.Have(a) && lho_suit.Have(k) &&
+ (pd_suit.Have(q) || our_suits.Have(Cards().Add(q).Add(j))))
+```
+
+`Have` takes an `int`. `Cards` declares a non-explicit `operator bool()`. So the
+card *set* collapses to `true`, promotes to `1`, and the call is `Have(1)` --
+"do we hold card index 1". The q/j test never happens, nor the j/t test in the
+branch below it.
+
+We had implemented the intent, which is better bridge and the wrong answer for
+this purpose. Matching the reference takes `deal.134` to lock-step, moves
+`deal.1`'s first divergence from iteration 29 to 6735, and moves node counts
+from 0.9911x to 1.0011x. It is deterministic, not undefined -- the set is never
+empty, so it is always exactly `Have(1)` -- and restoring the intended test is
+a one-line change whenever matching stops being the goal.
+
+`deal.1`'s remaining divergence is a different thing again: same score, same
+cutoff, different `rank_winners` (`8130000002` against `1c8010000002`). A fifth
+mechanism, and it feeds the pattern cache, which is where `deal.10` and
+`deal.4` differ too.
+
 ### Three mechanisms, not one
 
 Tracing the same cell (notrump, lead West) on sixteen deals, first 6,000 xray
@@ -347,7 +377,24 @@ the 1.019x to 1.083x trend by deal size, and why the reference's advantage over
 DDS widens on hard deals while ours narrows. `CutoffCache` already probes and
 resizes; the pattern cache is the one that did not get it.
 
-### Fixed, and it closed the node gap without buying any time
+### The goal is lock-step, not fewer nodes
+
+Worth stating, because it changes what counts as progress: searching *fewer*
+nodes than the reference is a divergence too, not a win. The target is the same
+tree, node for node, on a full solve. Only once the two are in lock-step does a
+timing difference mean anything, because only then is it measuring the same
+work. Improvements on top of that come later and separately.
+
+By that measure, node-count parity over the 200 deals now reads:
+
+| | nodes | vs C++ |
+|---|---|---|
+| C++ reference | 296,689,028 | — |
+| direct-mapped `PatternCache` | 307,943,054 | 1.0379x |
+| + probing | 294,034,361 | 0.9911x |
+| + matching `order_leads` | **297,018,481** | **1.0011x** |
+
+### PatternCache probing closed the node gap without buying any time
 
 `PatternCache` now linear-probes and resizes at 75% load, like `CutoffCache`
 and like the reference. Over the same 200 deals:
