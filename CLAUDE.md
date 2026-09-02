@@ -66,3 +66,53 @@ pushover "message" "title"    # title defaults to "Claude Code"
 - Task completed after extended work
 - Build/test failures that need attention
 - Any situation where work is paused and user may not notice
+
+## Lock-step with the C++ reference
+
+This is a port of `macroxue/bridge-solver`, and as of 2026-09-02 it searches the
+same tree as that project at its 2026-01-31 state — **node for node, on all 200
+deals of the reference's own corpus**. That is a property worth keeping, because
+it turns any behavioural change into an immediately visible one.
+
+Two invariants must hold after any change that could touch the search:
+
+```bash
+./dev-build.sh --ci run --release --features bench --bin solver-bench --   nodes fixtures/divergence/lockstep-200.pbn
+```
+
+must total exactly **296,689,028 nodes**, and
+
+```bash
+XRAY=<path to built xray/solver-xray> fixtures/divergence/first-divergence.sh
+```
+
+must report `none` for all twelve fixtures. See `fixtures/divergence/README.md`
+for what each fixture isolates and how to build the instrumented reference.
+
+Searching *fewer* nodes is a divergence too, not an improvement. Getting to
+lock-step took five fixes, three of which were ordering bugs in the pattern
+tree: `Pattern::lookup` returns the first child that matches, so child order is
+semantics rather than housekeeping.
+
+`bench/results/release-profile.md` is the full record — what was measured, what
+was tried and found worthless, and where the remaining gap is.
+
+## Performance work
+
+Current standing, single-threaded over those 200 deals: the reference 21,630 ms,
+this port 23,480 ms, DDS 2.9 20,200 ms. With identical node counts, **1.086x is
+pure per-node cost** with nothing else mixed in.
+
+Before optimising, read the "tried and found worthless" list in
+`release-profile.md`. Hoisting the per-node atomics, deleting ~4,000
+instructions of never-executed tracing, `-C target-cpu=native` and hoisting a
+redundant cache-key hash all measured as exactly nothing.
+
+Measurement discipline that this repo has learned the hard way:
+
+- On a machine that is not idle, same-binary repeats swing 4–6% on the geometric
+  mean. Build both binaries, keep both, and alternate them A/B/A/B with
+  `run --quick --runs 15`; that holds to ~1% under load. A single before/after
+  pair has produced a confident wrong answer here more than once.
+- `perf` does not exist on macOS. Use `samply record`, or Instruments' CPU
+  Counters template, for a profile.
