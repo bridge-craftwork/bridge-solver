@@ -278,13 +278,26 @@ over 194 cells truncated at 1000 nodes each — a slice thin enough to be mostly
 cache-cold startup, and it does not predict whole-table cost. This number is
 whole tables on random deals, which is the workload that matters.
 
-**The upstream 1.28x-faster-than-DDS claim does not reproduce on this machine.**
+**The upstream faster-than-DDS claim does not reproduce on this machine.**
 Here the C++ solver and DDS are within 2% of each other (1.02x). That claim was
-measured on an AMD Ryzen 7 5800H, and DDS carries x86-specific paths, so the
-most likely reading is that it is an x86 result that does not port to ARM — but
-the comparison scripts were never committed (one commit added the README, two
-PNGs and a 50,000-line log, and nothing in that repo invokes DDS), and no DDS
-version or build flags were recorded, so it cannot be checked directly.
+measured on an AMD Ryzen 7 5800H, but the comparison scripts were never
+committed (one commit added the README, two PNGs and a 50,000-line log, and
+nothing in that repo invokes DDS), and no DDS version or build flags were
+recorded, so it cannot be checked directly. The README now says 1.36x, with an
+Aug-2026 note claiming 1.5x; the 1.28x below is the figure their published log
+supports.
+
+**The x86 reading was backwards, and is too small anyway.** An earlier version
+of this paragraph said "DDS carries x86-specific paths". It does not: DDS 2.9's
+55 source files contain no `immintrin`, no `_pext`/`_pdep`, no `__m128`/`__m256`,
+no popcount intrinsic and no `__x86_64__` guard. It is portable C++ and gains
+nothing from being on a Ryzen. **The solver is the one with the x86 fast path** —
+`PackBits`/`UnpackBits` are `_pext_u64`/`_pdep_u64` under `#ifdef __BMI2__` and a
+bit-at-a-time loop otherwise, and its makefile adds `-mbmi2` by grepping
+`/proc/cpuinfo`, so a Linux Zen 3 build gets the instructions and an aarch64
+build cannot. Zen 3 is also the generation where AMD made PEXT fast rather than
+microcoded, so the 5800H is the best case for it. See "How much is the missing
+PEXT actually worth" below for the measurement: about 5%, not 36%.
 
 Their published log does reproduce *internally*: parsing all 5000 deals gives a
 geometric mean of 1.24x and a median of 1.25x against a claimed 1.28x, and the
@@ -914,6 +927,83 @@ The ~254 MB the pool holds never showed up in this profile: `pool_alloc`,
 `pool_free` and `reserve_exact_class` together are under 0.6%, and
 `PatternCache::new` another 0.7%. Retention is worth fixing for memory, but
 nothing here suggests it is costing time.
+
+## How much is the missing PEXT actually worth
+
+The question the upstream claim raises is whether an aarch64 Mac is simply the
+wrong machine to check it on. It is a worse machine for the solver than a Zen 3
+Linux box, for a reason that is real and specific — and the size of it can be
+measured rather than argued about.
+
+**The mechanism.** `PackBits`/`UnpackBits` compile to `_pext_u64`/`_pdep_u64`
+under `__BMI2__` and to a loop over the mask's set bits otherwise, one iteration
+per card still out in the suit. The makefile adds `-mbmi2` when
+`/proc/cpuinfo` says `bmi2`, so a Linux Zen 3 build gets single instructions;
+aarch64 has no equivalent and takes the loop. DDS, by contrast, has no
+architecture-specific code at all, so the same hardware does nothing for it.
+The asymmetry is entirely on the solver's side, and it is in its favour on x86.
+
+**The measurement.** Patching the reference's `ConvertToRelativeSuit` to walk
+the shared mask once for all four seats instead of once per seat — the same
+change this port made, verified to give identical tables on 25 deals — is worth
+**2.0%** to the reference on 500 random deals (54.75 s to 53.63 s, best of
+three interleaved rounds). That replaces four walks with one heavier walk, so it
+removes something over half of the packing cost; PEXT would remove all of it,
+plus the `UnpackBits` loops that `GetRankWinners` runs. Scaling accordingly puts
+the whole BMI2 advantage at roughly **5%, and under 10% on any reading.**
+
+A sampled profile of the reference on aarch64 agrees that this is the right
+order. `clang -O3`, freak.1, 31,456 samples, self time:
+
+| | self |
+|---|---|
+| `Pattern::Lookup` | 30.8% |
+| `Play::EvaluatePlayableCards` | 18.8% |
+| `Trick::ConvertToRelativeSuit` | 13.8% |
+| `Play::SearchWithCache` | 9.2% |
+| `Pattern::Update` | 7.5% |
+| `Pattern::GetRankWinners` | 5.7% |
+
+`ConvertToRelativeSuit` at 13.8% looks like more headroom than 5%, but most of
+that self time is the per-seat `ClearSuit`/`Add`/shift work that PEXT does not
+touch — which is exactly why the 2.0% patch measurement is the number to trust
+over the profile share.
+
+**So the architecture is a real effect and much too small.** It moves the
+solver-to-DDS ratio here from about 1.00x to about 1.05x. Upstream claims 1.36x.
+Roughly 5 points of a 36-point gap are explained; 30 are not.
+
+**What has been ruled out as well.** PGO, which upstream's default `make` target
+uses and this comparison originally did not: rebuilding the reference with
+clang PGO, trained on `hard_deals/deal.8` as its makefile does, is worth about
+1% and nothing on best-of (21.24 s plain against 21.27 s PGO). DDS batching:
+this harness hands DDS forty deals per `CalcAllTablesPBN` call while the
+reference runs one deal per process, but forcing the batch to one changes DDS's
+500-deal time from 53.3 s to 52.9 s, so the batching is not flattering it. DDS's
+build: `-O3 -flto -mtune=generic`, which is not a handicapped one. And deal
+distribution: on 500 random deals rather than the curated corpus this port is
+1.06x DDS instead of 1.12x, a move in the expected direction and far too small
+to matter.
+
+What is left unexplained is on the other side of a measurement nobody can
+reproduce: their DDS version, build flags, and how it was invoked were never
+recorded, and the comparison scripts were never committed.
+
+### The numbers, 500 seeded random deals
+
+Single-threaded, M4 Pro, 2026-09-02. Deals generated from a fixed seed and
+converted to the reference's format; the conversion round-trips exactly.
+
+| | 500 deals | vs DDS |
+|---|---|---|
+| DDS 2.9 | **52.9–53.3 s** | 1.00x |
+| C++ reference, PGO | **53.8 s** | 1.01x slower |
+| C++ reference, plain `-O3` | 54.2 s | 1.02x slower |
+| this port | 57.0 s | 1.07x slower |
+
+The reference's figures include 500 process startups, measured at 0.98 s with
+`-o`; net of that it is level with DDS rather than 1% behind. Either way it is
+not 1.36x ahead.
 
 ## Where the three solvers stand, measured together
 
