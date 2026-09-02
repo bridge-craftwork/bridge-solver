@@ -109,6 +109,42 @@ three -- so the reset never fires there, and the whole +99,448 is the lead
 change.** It is not freak-specific at all. Porting the two separately would let
 the reset in for free and put the lead change on its own merits.
 
+### The freak work is about the memory tail
+
+Isolating the two commits on `deals/freak/deal.1`, a full twenty-cell solve:
+
+| build | time | peak RSS |
+|---|---|---|
+| before `14ab4c7` | 36.5 s | **1,220 MB** |
+| `14ab4c7`, clear caches when 4+ voids | 43.2 s | **559 MB** |
+| `189f86b`, stricter reset condition | 31.3 s | 1,114 MB |
+
+So it is neither correctness nor throughput: a freak deal can take **over a
+gigabyte**, the reset more than halves that at a 19% cost in time, and the
+follow-up relaxes the trigger to buy the time back while keeping a little of the
+saving. Ordinary deals pay the 0.17% and never reach the reset, because none of
+them holds four voids.
+
+**We have a worse version of the same problem.** Same deal, same twenty cells,
+and -- since we are in lock-step -- the same tree:
+
+| | peak RSS | time |
+|---|---|---|
+| C++ (Jan, what we match) | 1,107 MB | 33.3 s |
+| ours | **1,613 MB** | 39.7 s |
+
+**1.46x the memory for an identical search.** That is the same root cause as the
+1.127x per-node time, seen from a different angle: a `Pattern` holds a
+`Vec<Pattern>` -- pointer, length and capacity, each child separately
+heap-allocated -- where the reference has a packed custom `Vector` drawing from
+a pool. Memory magnifies it because the pattern cache is where the port's extra
+weight accumulates.
+
+That makes `610e9da`, the free-list pool for `Vector<T>`'s backing storage, the
+clear first port: it is in the twenty-three that do not touch the tree, and it
+addresses the one structural difference that both remaining measurements point
+at.
+
 And the freak deals themselves settle the wider question: the August build
 returns the same twenty entries as January's on all four, as it does on the 200
 random deals. Across everything that can be tested here, seven months of
