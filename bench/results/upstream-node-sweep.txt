@@ -1,0 +1,30 @@
+commit     date                 nodes      delta  subject
+e965f34    2026-01-31        58462831          -  (baseline: what we match)
+3c23da0    2026-04-13        58462831       same  Extend WebPlay to cover all card playing
+67d59d5    2026-07-10        58462831       same  Vectorize Pattern subset/equality checks with SSE4.1 PTEST
+448a1f5    2026-08-09        58462831       same  Use a narrower hash tag for the cut-off cache
+24ecd16    2026-08-09        58462831       same  Avoid re-hashing a cache key between Lookup and Update
+953a350    2026-08-12        58462831       same  Add more debugging info
+610e9da    2026-08-13        58462831       same  Add a free-list pool for Vector<T>'s backing storage
+b83aa4b    2026-08-13        58754487     291656  Tune lead ordering
+14ab4c7    2026-08-14        58853935      99448  Clear caches for ultra-freakish hands
+b81f903    2026-08-15        58853935       same  Fix null-pointer deref in Vector<T>::resize()/clear()
+8a01aa8    2026-08-16        58853935       same  Reduce cache index to a single 64-bit value
+bf4a521    2026-08-16        58853935       same  ShapeEntry holds patterns of four seats
+ad89f22    2026-08-16        58853935       same  Simplify the handling of a single cutoff card
+189f86b    2026-08-16        58853935       same  Stricter condition for resetting bounds cache for ultra-freakish hands
+2d104ae    2026-08-16        58853935       same  Fix format string warnings for uint64_t under make web
+89e9501    2026-08-16        58853935       same  Remove unused Hands::opponent_cards() and WebPlay::trump field
+f5d793d    2026-08-16        58853935       same  Improve const-correctness throughout solver.cc
+205aaca    2026-08-21        58966782     112847  Bubble up broader patterns
+c8d254f    2026-08-22        58966782       same  Fix duplicate-deal bug in Hands::Deal()'s RNG seeding
+bfa0d80    2026-08-23        58966782       same  Keep solve_plays()'s caches warm across calls for the same deal+trump
+39dc792    2026-08-28        58966782       same  Fix stale cache reuse between solve() and solve_plays() in web build
+b072166    2026-08-29        58966782       same  Match VectorPool style to the rest of solver.cc
+559908e    2026-08-29        58966782       same  Use inline comparisons to sort discards
+990a665    2026-08-29        58403364    -563418  Simpler cutoff cache index with playing order and without seat
+0216224    2026-08-30        58966782     563418  Add my suit to cutoff index when following suit
+bac53be    2026-08-30        58966782       same  Fix missing NOTRUMP check before suit extraction
+f6a01a9    2026-08-30        58966782       same  Format code with clang-format
+da18a72    2026-08-31        58966782       same  Make comments more concise
+DONE

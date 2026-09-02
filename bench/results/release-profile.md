@@ -77,10 +77,40 @@ cache index (`8a01aa8`), a narrower hash tag (`448a1f5`), skipping a re-hash
 between lookup and update (`24ecd16`). That first one is aimed squarely at what
 this port's remaining 13% per-node gap looks like.
 
-So the sensible order is not a rebase: keep the January lock-step as the
-correctness anchor, port the implementation commits on their own merits, and
-weigh the behavioural ones individually rather than inheriting a 0.74% larger
-search to get them.
+### Which commits actually changed the tree
+
+Upstream's own history bisects by node count without porting anything: build
+each commit that touches `solver.cc`, measure, and the deltas fall out. Deals
+1-40, full table, in `upstream-node-sweep.txt`. **Four commits of twenty-seven
+moved the search. The other twenty-three did not.**
+
+| commit | delta | |
+|---|---|---|
+| `b83aa4b` Tune lead ordering | +291,656 | +0.50% |
+| `14ab4c7` Clear caches for ultra-freakish hands | +99,448 | +0.17% |
+| `205aaca` Bubble up broader patterns | +112,847 | +0.19% |
+| `990a665` Simpler cutoff cache index, without seat | **-563,418** | -0.96% |
+| `0216224` Add my suit to cutoff index when following suit | **+563,418** | exactly undone |
+
+The last pair is the interesting one: dropping the seat from the cutoff index
+made the search *smaller* -- a coarser key shares entries across positions, and
+since the cutoff cache only supplies a move-ordering hint, sharing it loosely is
+free -- and adding the suit back the next day restored the count to the digit.
+Net zero across the two.
+
+So the +0.86% is three deliberate changes and nothing accidental. One of them,
+`14ab4c7`, is explicitly for freak distributions, which is a trade paid on
+ordinary deals to be correct on shapes this corpus does not contain.
+
+**Everything else is free.** All twenty-three no-change commits include every
+one of the speed-ups: the free-list pool for `Vector<T>` (`610e9da`), the
+narrower hash tag (`448a1f5`), skipping the re-hash between lookup and update
+(`24ecd16`), the single 64-bit cache index (`8a01aa8`), `ShapeEntry` holding
+four seats (`bf4a521`), the SSE4.1 vectorisation (`67d59d5`, x86 only).
+Upstream's 5.5% is available **without touching the tree at all**.
+
+So the order is not a rebase: port the twenty-three, which lock-step verifies by
+construction, and take the four one at a time on their merits.
 
 Two smaller notes. The `Have(1)` implicit conversion documented below is
 **still present** in current upstream, so matching it remains right. And
