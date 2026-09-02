@@ -39,7 +39,7 @@ pub mod types;
 
 pub use bridge_solver::{
     get_node_count, order_follows, order_leads, set_no_pruning, set_no_rank_skip, set_no_tt,
-    set_show_perf, set_xray_cache_interval, set_xray_limit, OrderedCards, PartialTrick, PlayedCard,
+    set_show_perf, set_xray_cache_window, set_xray_limit, OrderedCards, PartialTrick, PlayedCard,
     Solver,
 };
 pub use cards::Cards;

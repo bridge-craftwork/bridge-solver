@@ -14,7 +14,8 @@ use std::sync::atomic::Ordering;
 
 // Re-export atomic counters from bridge_solver module
 use super::bridge_solver::{
-    xray_should_log, NO_PRUNING, NO_RANK_SKIP, NO_TT, XRAY_CACHE_INTERVAL, XRAY_COUNT, XRAY_LIMIT,
+    xray_should_log, NO_PRUNING, NO_RANK_SKIP, NO_TT, XRAY_CACHE_END, XRAY_CACHE_START,
+    XRAY_CACHE_STEP, XRAY_COUNT, XRAY_LIMIT,
 };
 
 /// Search result - NS tricks and rank winners (cards whose rank affected the outcome)
@@ -522,8 +523,15 @@ impl<'a> Search<'a> {
             if count == limit + 1 {
                 eprintln!("XRAY_LIMIT_REACHED: {} iterations", limit);
             }
-            let interval = XRAY_CACHE_INTERVAL.load(Ordering::Relaxed);
-            if interval > 0 && count <= limit && count.is_multiple_of(interval) {
+            let step = XRAY_CACHE_STEP.load(Ordering::Relaxed);
+            let start = XRAY_CACHE_START.load(Ordering::Relaxed);
+            let end = XRAY_CACHE_END.load(Ordering::Relaxed);
+            if step > 0
+                && count <= limit
+                && count >= start
+                && (end == 0 || count <= end)
+                && (count - start).is_multiple_of(step)
+            {
                 let (cutoff_n, cutoff_h) = self.cutoff_cache.digest();
                 let (pattern_n, pattern_h) = self.pattern_cache.digest();
                 eprintln!(

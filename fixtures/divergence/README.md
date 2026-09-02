@@ -58,8 +58,16 @@ relative position, so we promote `D9` into a higher-priority bucket than
 **`PATTERN_HIT` (deal.38)** — at depth 16 the reference reports
 `bounds=[0,7] adj_upper=10 UPPER_CUT` and prunes; we miss and go on to compute
 fast tricks and store. Every preceding trace line is identical, which reads as
-a narrower lookup on our side — and is not: the cache digests show the two
-caches had already parted company 445 iterations earlier. See below.
+a narrower lookup on our side — and is not. Bisecting the cache digests
+(`-C 1180:1195`) pins the real divergence to iteration 1189, 445 earlier, where
+the reference's pattern cache takes a fresh slot (73 → 74 entries) and ours
+overwrites an existing one (still 73, different digest).
+
+`PatternCache` is direct-mapped: `lookup` checks one slot and gives up,
+`get_or_create` evicts whatever is in that slot. The reference linear-probes on
+both paths, never evicts, and resizes at 75% load. Every collision costs us an
+entry it keeps, which is why the miss appears later and why the loss compounds
+as the table fills.
 
 All three fail safely. A low fast-trick estimate, a worse move order and a
 missed pattern hit can only fail to prune — none can return a wrong answer,

@@ -515,8 +515,11 @@ thread_local! {
 
 pub(crate) static XRAY_COUNT: AtomicUsize = AtomicUsize::new(0);
 pub(crate) static XRAY_LIMIT: AtomicUsize = AtomicUsize::new(0);
-/// Emit a cache digest every N xray iterations; 0 disables it.
-pub(crate) static XRAY_CACHE_INTERVAL: AtomicUsize = AtomicUsize::new(0);
+/// Cache-digest window: emit every STEP iterations from START to END.
+/// STEP 0 disables it; END 0 means no upper bound.
+pub(crate) static XRAY_CACHE_START: AtomicUsize = AtomicUsize::new(0);
+pub(crate) static XRAY_CACHE_END: AtomicUsize = AtomicUsize::new(0);
+pub(crate) static XRAY_CACHE_STEP: AtomicUsize = AtomicUsize::new(0);
 pub(crate) static NO_PRUNING: AtomicBool = AtomicBool::new(false);
 pub(crate) static NO_TT: AtomicBool = AtomicBool::new(false);
 pub(crate) static NO_RANK_SKIP: AtomicBool = AtomicBool::new(false);
@@ -539,16 +542,24 @@ pub(crate) fn xray_should_log() -> bool {
     limit > 0 && XRAY_COUNT.load(Ordering::Relaxed) <= limit
 }
 
-/// Emit a cache content digest every `n` xray iterations (0 = never).
+/// Emit a cache content digest every `step` iterations from `start` to `end`.
 ///
 /// The trace records what the search *did*; this records what its caches
 /// *hold*. Those diverge at different moments: two searches can take the same
 /// decisions for a long time while their caches drift apart through different
 /// eviction, resizing or pattern-tree shape, and the first visible symptom is
 /// then a lookup that hits on one side and misses on the other -- far too late
-/// to say why. Digesting on an interval and bisecting finds the drift instead.
-pub fn set_xray_cache_interval(n: usize) {
-    XRAY_CACHE_INTERVAL.store(n, Ordering::Relaxed);
+/// to say why.
+///
+/// The window exists so the drift can be bisected. A digest is O(table size),
+/// so emitting one per node is far too slow to run to completion; instead sweep
+/// coarsely, find the interval where the two solvers stop agreeing, and narrow
+/// into it. `step` of 0 disables, `end` of 0 means no upper bound, and the
+/// first emission lands exactly on `start`.
+pub fn set_xray_cache_window(start: usize, end: usize, step: usize) {
+    XRAY_CACHE_START.store(start, Ordering::Relaxed);
+    XRAY_CACHE_END.store(end, Ordering::Relaxed);
+    XRAY_CACHE_STEP.store(step, Ordering::Relaxed);
 }
 
 /// Set no-pruning mode (disables fast/slow tricks pruning for debugging)

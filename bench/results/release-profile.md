@@ -284,6 +284,61 @@ the same value: a visible difference that changes nothing, and the caches
 rightly agree for another eleven hundred iterations. `deal.38` is the reverse,
 and is why the pattern-cache conclusion above had to be withdrawn.
 
+### Root cause of the pattern-cache divergence: no probing
+
+Bisecting `deal.38` with `-C 1180:1195` pins it to a single step. The digests
+are identical at iteration 1188 and differ at 1189:
+
+```
+c++   iter=1189 cutoff=59/eeb7d6b187ad13b2 pattern=74/63846b1f49f46558
+ours  iter=1189 cutoff=59/eeb7d6b187ad13b2 pattern=73/6a0d824c48bed25b
+```
+
+The cutoff caches still agree. The reference's pattern cache goes from 73 live
+entries to **74** — it took a fresh slot. Ours stays at **73** with a changed
+digest — we wrote over an entry that was already there.
+
+`PatternCache` does no probing at all. It is direct-mapped:
+
+```rust
+pub fn lookup(&mut self, shape: u64, seat_to_play: Seat) -> Option<&mut ShapeEntry> {
+    let idx = self.index(hash);
+    let entry = &mut self.entries[idx];
+    if entry.hash == hash { Some(entry) } else { None }   // one slot, then give up
+}
+
+pub fn get_or_create(&mut self, shape: u64, seat_to_play: Seat) -> &mut ShapeEntry {
+    let idx = self.index(hash);
+    if self.entries[idx].hash != hash {
+        self.entries[idx].reset(hash);                     // evict the incumbent
+    }
+    ...
+}
+```
+
+The reference linear-probes on both paths, never evicts, and resizes at 75%
+load:
+
+```cpp
+for (int d = 0; ; ++d) {
+  Entry& entry = entries[(index + d) & (size - 1)];
+  if (entry.hash == hash) return &entry;
+  if (entry.hash == 0) { ++load_count; entry.Reset(hash); return &entry; }
+}
+```
+
+So every hash collision costs us an entry the reference keeps. That is the
+`PATTERN_HIT` miss at iteration 1635: we had evicted it.
+
+It also explains the shape of the whole problem. Collisions get more frequent
+as the table fills, so the loss grows with the length of the search — which is
+the 1.019x to 1.083x trend by deal size, and why the reference's advantage over
+DDS widens on hard deals while ours narrows. `CutoffCache` already probes and
+resizes; the pattern cache is the one that did not get it.
+
+Fixing it means giving `PatternCache` the same linear probing and 75% resize.
+Unmeasured, but it is the strongest candidate for the ~3.8% node excess.
+
 All three are safe and all three cost nodes. A low fast-trick estimate, a missed
 pattern hit and a worse move order can only fail to prune, never return a wrong
 answer, which is exactly why every correctness test passes while node counts do

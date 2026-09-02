@@ -12,7 +12,7 @@
 use bridge_solver::cards::card_of;
 use bridge_solver::types::rank_name;
 use bridge_solver::{
-    set_no_pruning, set_no_rank_skip, set_no_tt, set_show_perf, set_xray_cache_interval,
+    set_no_pruning, set_no_rank_skip, set_no_tt, set_show_perf, set_xray_cache_window,
     set_xray_limit, Cards, CutoffCache, Hands, PatternCache, Solver, CLUB, DIAMOND, EAST, HEART,
     NORTH, NOTRUMP, NUM_RANKS, SOUTH, SPADE, WEST,
 };
@@ -26,7 +26,7 @@ fn main() {
     // Parse arguments
     let mut file_path = None;
     let mut xray_iterations = 0usize;
-    let mut cache_interval = 0usize;
+    let mut cache_spec: (usize, usize, usize) = (0, 0, 0);
     let mut no_pruning = false;
     let mut no_tt = false;
     let mut no_rank_skip = false;
@@ -40,7 +40,7 @@ fn main() {
             xray_iterations = args[i + 1].parse().unwrap_or(0);
             i += 2;
         } else if args[i] == "-C" && i + 1 < args.len() {
-            cache_interval = args[i + 1].parse().unwrap_or(0);
+            cache_spec = parse_cache_spec(&args[i + 1]);
             i += 2;
         } else if args[i] == "-P" {
             no_pruning = true;
@@ -74,10 +74,10 @@ fn main() {
         set_xray_limit(xray_iterations);
     }
 
-    // Digest the caches every N iterations, for locating cache drift that the
+    // Digest the caches over a window, for locating cache drift that the
     // decision trace does not show.
-    if cache_interval > 0 {
-        set_xray_cache_interval(cache_interval);
+    if cache_spec.2 > 0 {
+        set_xray_cache_window(cache_spec.0, cache_spec.1, cache_spec.2);
     }
 
     // Set no-pruning mode if specified
@@ -335,4 +335,23 @@ fn format_suit_cards(cards: Cards, suit: usize) -> String {
         s.push('-');
     }
     s
+}
+
+/// Parse `-C`: `STEP`, `START:END`, or `START:END:STEP`.
+///
+/// The three forms are the three stages of a bisection — sweep the whole run
+/// coarsely, then every iteration of the interval that disagreed, then narrow.
+/// `START:END` defaults to a step of 1 because that is what the last stage
+/// wants. Returns `(start, end, step)` with a step of 0 meaning "off".
+fn parse_cache_spec(arg: &str) -> (usize, usize, usize) {
+    let parts: Vec<usize> = arg
+        .split(':')
+        .map(|p| p.trim().parse().unwrap_or(0))
+        .collect();
+    match parts.as_slice() {
+        [step] => (0, 0, *step),
+        [start, end] => (*start, *end, 1),
+        [start, end, step] => (*start, *end, *step),
+        _ => (0, 0, 0),
+    }
 }
