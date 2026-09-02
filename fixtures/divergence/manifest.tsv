@@ -1,0 +1,20 @@
+# Positions where our search diverges from the C++ reference.
+#
+# deal    the deal's name in macroxue/bridge-solver's 1k_deals corpus
+# trump   trump suit for the single search (N = notrump)
+# lead    opening leader
+# line    xray trace line of the first divergence, with `remaining=[...]`
+#         normalised out (the two solvers format that field differently)
+# mech    the trace record type where they part company
+#
+# Every row is one search from a cold cache, so it reproduces standalone: no
+# preceding cells, no shared cache state, no ordering to set up.
+#
+# deal	trump	lead	line	mech
+deal.72	N	W	208	FAST_TRICKS
+deal.134	N	W	69	MOVE_ORDER_AFTER
+deal.1	N	W	219	MOVE_ORDER_AFTER
+deal.38	N	W	13132	PATTERN_HIT
+deal.12	N	W	16347	FAST_TRICKS
+deal.10	N	W	31330	FAST_TRICKS
+deal.4	N	W	37590	FAST_TRICKS
