@@ -537,6 +537,11 @@ impl<'a> Search<'a> {
                 eprintln!(
                     "CACHE: iter={count} cutoff={cutoff_n}/{cutoff_h:016x} pattern={pattern_n}/{pattern_h:016x}"
                 );
+                // A window of exactly one iteration means "show me this one",
+                // so break the pattern cache out entry by entry.
+                if start == end && start > 0 {
+                    self.pattern_cache.dump(count);
+                }
             }
         }
 

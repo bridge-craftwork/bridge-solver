@@ -216,19 +216,31 @@ impl Pattern {
                 }
                 return;
             } else if child.is_subset_of(&new_pattern) {
-                // New pattern is more general - absorb child
+                // New pattern is more general - absorb child.
+                //
+                // The absorbed child's *position* is load-bearing. The
+                // reference finishes with `pattern.MoveFrom(new_pattern)`,
+                // overwriting slot `i` in place, so the new pattern inherits
+                // the position of the child it absorbed. Removing slot `i` and
+                // pushing the result instead reorders the children twice over:
+                // `swap_remove` drops the last child into the hole, and the new
+                // pattern lands at the end. `Pattern::lookup` returns the first
+                // child that matches, so the order decides *which* pattern a
+                // hit returns, and with it the rank winners that hit reports.
                 child.update_bounds(new_pattern.bounds);
                 if child.bounds != new_pattern.bounds {
-                    new_pattern.children.push(self.children.swap_remove(i));
+                    // The child becomes a sub-pattern of the new one; slot `i`
+                    // is overwritten below, so leaving a default behind is safe.
+                    let absorbed = std::mem::take(&mut self.children[i]);
+                    new_pattern.children.push(absorbed);
                 } else {
-                    // Transfer children
-                    let mut old_children = Vec::new();
-                    std::mem::swap(&mut old_children, &mut self.children[i].children);
-                    new_pattern.children.append(&mut old_children);
-                    self.children.swap_remove(i);
+                    // `new_pattern.patterns.swap(pattern.patterns)` in the
+                    // reference: a swap, not an append, so any children the new
+                    // pattern arrived with are dropped rather than merged.
+                    std::mem::swap(&mut new_pattern.children, &mut self.children[i].children);
                 }
                 // Check remaining children
-                let mut j = i;
+                let mut j = i + 1;
                 while j < self.children.len() {
                     if self.children[j].is_subset_of(&new_pattern) {
                         self.children[j].update_bounds(new_pattern.bounds);
@@ -247,7 +259,7 @@ impl Pattern {
                         j += 1;
                     }
                 }
-                self.children.push(new_pattern);
+                self.children[i] = new_pattern;
                 return;
             }
         }
@@ -653,7 +665,60 @@ fn pattern_digest(p: &Pattern, depth: u64) -> u64 {
     h
 }
 
+fn pattern_nodes(p: &Pattern) -> usize {
+    1 + p.children.iter().map(pattern_nodes).sum::<usize>()
+}
+
 impl PatternCache {
+    /// One line per live entry, sorted by hash so the two implementations'
+    /// differing slot layouts do not matter.
+    ///
+    /// The aggregate digest says *that* two caches differ; this says *which*
+    /// entry, which is the difference between knowing there is a bug and being
+    /// able to look at it.
+    pub fn dump(&self, iter: usize) {
+        let mut rows: Vec<(u64, usize, u64)> = self
+            .entries
+            .iter()
+            .filter(|e| e.hash != 0)
+            .map(|e| {
+                (
+                    e.hash,
+                    pattern_nodes(&e.pattern),
+                    pattern_digest(&e.pattern, 0),
+                )
+            })
+            .collect();
+        rows.sort_unstable();
+        for (hash, nodes, digest) in rows {
+            eprintln!(
+                "CACHEENTRY: iter={iter} hash={hash:016x} nodes={nodes} digest={digest:016x}"
+            );
+        }
+        // And the trees themselves, so a differing digest can be read rather
+        // than merely detected.
+        let mut sorted: Vec<&ShapeEntry> = self.entries.iter().filter(|e| e.hash != 0).collect();
+        sorted.sort_unstable_by_key(|e| e.hash);
+        for entry in sorted {
+            Self::dump_tree(iter, entry.hash, &entry.pattern, 0);
+        }
+    }
+
+    fn dump_tree(iter: usize, hash: u64, p: &Pattern, depth: usize) {
+        eprintln!(
+            "CACHETREE: iter={iter} hash={hash:016x} d={depth} hands=[{:x},{:x},{:x},{:x}] bounds=[{},{}]",
+            p.hands[0].value(),
+            p.hands[1].value(),
+            p.hands[2].value(),
+            p.hands[3].value(),
+            p.bounds.lower,
+            p.bounds.upper
+        );
+        for child in &p.children {
+            Self::dump_tree(iter, hash, child, depth + 1);
+        }
+    }
+
     /// Live entries, and a digest of their contents.
     pub fn digest(&self) -> (usize, u64) {
         let mut count = 0;

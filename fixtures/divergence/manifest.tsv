@@ -13,22 +13,20 @@
 # Every row is one search from a cold cache, so it reproduces standalone: no
 # preceding cells, no shared cache state, no ordering to set up.
 #
-# READ `mech` WITH CARE. It names the first *visible* difference, which is not
-# always the first real one. On deal.10 and deal.4 the caches part company
-# thousands of iterations before the trace shows anything, so their FAST_TRICKS
-# label is a downstream symptom, not the cause. Where `cache` is much lower
-# than `iter`, bisect the cache first.
+# All the cache divergences are now closed: every position below holds caches
+# identical to the reference's through 6,000 iterations, and node counts over
+# 200 deals are 296,689,778 against 296,689,028 -- 750 nodes apart in 296.7
+# million. What is left is one mechanism, the fast-tricks estimate, showing up
+# in five positions.
 #
 # deal	trump	lead	line	iter	cache	mech
-deal.1	N	W	6735	-	-	RANK_WINNERS
-# deal.134 diverged at iteration 9 on lead ordering. Fixed by matching the
-# reference's `Have(1)`; see order_leads. Regression case: must report `none`.
+deal.72	N	W	208	28	none	FAST_TRICKS
+deal.12	N	W	16347	-	none	FAST_TRICKS
+deal.1	N	W	24341	-	none	FAST_TRICKS
+deal.10	N	W	31330	-	none	FAST_TRICKS
+deal.4	N	W	37590	-	none	FAST_TRICKS
+# Regression cases: both must report `none`. deal.134 diverged at iteration 9
+# on lead ordering (the reference's `Have(1)`); deal.38 at 1635 on a pattern
+# lookup, caused by cache drift at 1189 from PatternCache not probing.
 deal.134	N	W	-	-	-	FIXED
-deal.72	N	W	208	28	4550	FAST_TRICKS
-deal.12	N	W	16347	1930	4260	FAST_TRICKS
-deal.10	N	W	31330	3716	890	PATTERN_CONTENT
-deal.4	N	W	37590	4507	1410	PATTERN_CONTENT
-# deal.38 had a PATTERN_HIT divergence at iteration 1635, caused by cache drift
-# at 1189. Fixed by giving PatternCache the linear probing the reference has.
-# Kept as a regression case: it must report `none`.
 deal.38	N	W	-	-	-	FIXED
