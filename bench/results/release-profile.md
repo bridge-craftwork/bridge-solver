@@ -98,9 +98,23 @@ since the cutoff cache only supplies a move-ordering hint, sharing it loosely is
 free -- and adding the suit back the next day restored the count to the digit.
 Net zero across the two.
 
-So the +0.86% is three deliberate changes and nothing accidental. One of them,
-`14ab4c7`, is explicitly for freak distributions, which is a trade paid on
-ordinary deals to be correct on shapes this corpus does not contain.
+So the +0.86% is three deliberate changes and nothing accidental.
+
+`14ab4c7` repays a closer look, because its message names the half that costs
+nothing. It bundles two unrelated changes: a cache reset between cells when a
+deal holds four or more voids, and a narrowing of two lead-classification tests
+from `partnership_cards` (both hands, every suit) to `our_suits` (this suit,
+from the *playable* cards). **No deal in 1-40 has four voids -- none has even
+three -- so the reset never fires there, and the whole +99,448 is the lead
+change.** It is not freak-specific at all. Porting the two separately would let
+the reset in for free and put the lead change on its own merits.
+
+And the freak deals themselves settle the wider question: the August build
+returns the same twenty entries as January's on all four, as it does on the 200
+random deals. Across everything that can be tested here, seven months of
+upstream work changed no answer. Its timing on them is mixed rather than
+uniformly better -- `deals/freak/deal.1` is 14% faster, `deal.2` 39% *slower*
+and using more memory.
 
 **Everything else is free.** All twenty-three no-change commits include every
 one of the speed-ups: the free-list pool for `Vector<T>` (`610e9da`), the
