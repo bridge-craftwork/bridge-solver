@@ -171,7 +171,37 @@ pairing as this repo, which retires the licence question that shaped
 Against current upstream rather than January's, our margin is 24,731 ms against
 20,730 ms -- **1.193x**.
 
-## Lock-step, and what the timing then means
+## The pooled pattern vector
+
+Porting the reference's `Vector<T>` and its free-list pool (`610e9da`), the
+first of the twenty-three commits that do not touch the tree. Measured first,
+which changed the design: on `deals/freak/deal.1` the 589 MB gap was 36 MB of
+hash table, 923 MB of `Pattern` structs and roughly 737 MB of allocator slack
+and headers, so both halves of the reference's answer were needed rather than
+the pool alone.
+
+`PatternVec` is a pointer and a `u32` length and capacity where `Vec` is three
+words, taking `Pattern` from 64 bytes to the reference's exact 56 -- 115 MB over
+15.1M nodes -- and its blocks come from per-power-of-two free lists refilled in
+8 KB slabs, so a block is exactly its capacity and carries no header.
+
+| | Pattern | peak RSS on freak.1 | that deal | 200 deals |
+|---|---|---|---|---|
+| before | 64 B | 1,696 MB | 34.70 s | 24,731 ms |
+| after | **56 B** | **1,361 MB** | **33.74 s** | **23,480 ms** |
+| C++ reference | 56 B | 1,107 MB | 33.3 s | 21,630 ms |
+
+**Per-node cost 1.127x → 1.086x**, and 57% of the memory gap closed. Node counts
+are still exactly 296,689,028 and all twelve fixtures still report `none`, which
+is what makes the timing comparable at all.
+
+What is left of the memory gap -- about 254 MB -- is pool retention rather than
+per-node waste, and blocks are recycled rather than freed, so a thread holds its
+peak for its lifetime. `drain_pool()` is public for that boundary and is worth
+wiring into the wasm build, where holding 1.3 GB after one hard deal on a page
+that stays open would be fatal.
+
+## Lock-step, and what the timing then means## Lock-step, and what the timing then means
 
 All 200 deals of the reference's own corpus search the same tree: **296,689,028
 nodes against 296,689,028, exactly**. Eight fixtures in `fixtures/divergence`
