@@ -53,9 +53,9 @@ cell against the C++ solver's own output), single-threaded, best of 3:
 
 | solver | 200 deals | vs ours |
 |---|---|---|
-| ours | 24.04 s | — |
-| C++ reference (macroxue) | 20.62 s | **1.17x** |
-| DDS 2.9 | 20.24 s | **1.19x** |
+| ours | 23.96 s | — |
+| C++ reference (macroxue) | 20.62 s | **1.16x** |
+| DDS 2.9 | 20.03 s | **1.20x** |
 
 The build, recorded so the number has provenance — the makefile's own PGO path
 is GCC-specific (`.gcda`) and cannot run under Apple clang:
@@ -98,19 +98,60 @@ half a second. A least-squares fit gives `dds = -32.5 ms + 1.60 x solver`, so a
 fixed per-invocation overhead inflating DDS is ruled out: the intercept is
 negative. Whatever produced their result, it was not measurement overhead.
 
-### What this leaves open
+### The gap decomposes: 3.8% extra search, 12% per node
 
-We are 1.17x the reference at the same node counts — or rather, at node counts
-that matched over 194 cells in `cache-fix.md` and have never been checked on
-whole tables. Two things worth doing, in order:
+`cache-fix.md` established that we walk the reference's tree node-for-node.
+That was measured over 194 cells truncated at a thousand nodes each, and **it
+does not hold on full solves**. Counting nodes on the same 200 deals -- both
+counters increment at the top of `EvaluatePlayableCards`, so they count the
+same event -- gives:
 
-1. **Compare node counts per deal on these 200 deals** (`solver -S` against our
-   own counter). If they match, the whole 1.17x is per-node cost. If they do
-   not, some of it is extra search, and that is a different problem.
-2. **The per-board spread**, below. Ours widens against DDS on the hardest
-   boards, while the C++ original's advantage over DDS *widens* on hard deals.
-   If the original gains where we lose, that is a pointer at where the port's
-   cost diverges.
+| | ours / C++ |
+|---|---|
+| nodes searched | **1.038x** |
+| wall clock | **1.162x** |
+| implied ns per node | **1.120x** |
+
+Not one of the 200 deals matches node-for-node. The per-deal ratio runs from
+0.699x to 1.384x with a median of 1.021x, and we search *fewer* nodes than the
+reference on 70 of them. This is not a missing prune -- that would be one-sided
+-- it is small divergences in move ordering and cache state that compound
+differently on different deals.
+
+They compound with size, which is the part that matters:
+
+| C++ nodes | deals | ours / C++ |
+|---|---|---|
+| < 300k | 23 | 1.019x |
+| 300k - 1M | 70 | 1.025x |
+| 1M - 3M | 84 | 1.026x |
+| 3M - 10M | 23 | **1.083x** |
+
+That lines up with the two other places the hard deals stand out: our per-board
+spread against DDS is worst on the corpus's two most expensive boards, and the
+reference's own advantage over DDS widens on hard deals. Whatever diverges,
+it diverges more the longer the search runs.
+
+### One cause found and fixed: declarer order
+
+The reference solves a strain's four cells in lead order W, E, N, S -- that is,
+declarers **S, N, W, E**, partners adjacent. We solved them N, E, S, W,
+alternating sides.
+
+That is not cosmetic, because the caches are shared across a strain and the
+MTD(f) seed chains from one cell to the next: `seed_from` hands the next search
+`ns_tricks + 1`, so ordering partners adjacently means each seed comes from a
+cell whose NS trick count is usually the same or within one. Alternating sides
+means every second seed is derived from the opponents declaring, which is a
+poor guess and costs MTD(f) iterations.
+
+Matching the reference's order took 310.4M nodes to 307.9M -- **0.8% fewer, for
+a two-line change**, with all ten corpus tables unchanged. It is the ordering
+the reference chose on purpose.
+
+That leaves ~3.8% of node excess unexplained, and the ~12% per-node cost as the
+larger half of the gap. The per-node half is now the thing to chase, and the
+39 `panic_bounds_check` sites below are the only concrete lead on it.
 
 ## Scaling, one to twelve threads
 

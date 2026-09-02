@@ -10,7 +10,7 @@
 //! the score is labeled by the par contract's declaring side and signed to that
 //! side (a sacrifice reads negative, e.g. "NS -100").
 
-use crate::{direction_to_seat, CutoffCache, Hands, PatternCache, Solver};
+use crate::{direction_to_seat, get_node_count, CutoffCache, Hands, PatternCache, Solver};
 use crate::{CLUB, DIAMOND, HEART, NOTRUMP, SPADE};
 use bridge_types::{Contract, Deal, Direction, Doubled, Strain};
 
@@ -29,10 +29,10 @@ const STRAINS: [Strain; 5] = [
     Strain::NoTrump,
 ];
 const DIRECTIONS: [Direction; 4] = [
-    Direction::North,
-    Direction::East,
     Direction::South,
+    Direction::North,
     Direction::West,
+    Direction::East,
 ];
 
 fn dir_index(d: Direction) -> usize {
@@ -68,9 +68,21 @@ impl DdTricks {
 
 /// Solve the full 20-entry DD table for a complete deal.
 pub fn solve_dd_table(deal: &Deal) -> DdTricks {
+    solve_dd_table_with_nodes(deal).0
+}
+
+/// Solve the full table, and report how many nodes it took.
+///
+/// The same function as [`solve_dd_table`], with the per-cell counts summed.
+/// It lives here rather than in the benchmark harness so that the count cannot
+/// drift from the search it describes: comparing node counts against the C++
+/// reference is only meaningful if the count covers exactly the work the
+/// timing covers, cache reuse and MTD(f) seeding included.
+pub fn solve_dd_table_with_nodes(deal: &Deal) -> (DdTricks, u64) {
     let hands = Hands::from_deal(deal);
     let total = hands.num_tricks() as u8;
     let mut tricks = [[0u8; 5]; 4];
+    let mut nodes = 0u64;
     for strain in STRAINS {
         let trump = strain_trump(strain);
         let mut cutoff = CutoffCache::new(16);
@@ -87,6 +99,7 @@ pub fn solve_dd_table(deal: &Deal) -> DdTricks {
                 Some(g) => solver.solve_with_caches_seeded(&mut cutoff, &mut pattern, g),
                 None => solver.solve_with_caches(&mut cutoff, &mut pattern),
             };
+            nodes += get_node_count();
             seed = Some(Solver::seed_from(ns));
             let declarer_tricks = if matches!(dir, Direction::North | Direction::South) {
                 ns
@@ -96,7 +109,7 @@ pub fn solve_dd_table(deal: &Deal) -> DdTricks {
             tricks[dir_index(dir)][strain_index(strain)] = declarer_tricks;
         }
     }
-    DdTricks { tricks }
+    (DdTricks { tricks }, nodes)
 }
 
 fn strain_trump(strain: Strain) -> usize {

@@ -33,7 +33,7 @@ use std::time::{Duration, Instant};
 #[cfg(feature = "dds-reference")]
 mod dds;
 
-use bridge_solver::solve_dd_table;
+use bridge_solver::{solve_dd_table, solve_dd_table_with_nodes};
 use bridge_types::Deal;
 use clap::{Args, Parser, Subcommand};
 use serde::{Deserialize, Serialize};
@@ -327,6 +327,14 @@ enum Cmd {
     /// Measure DDS on the same corpus, with the same timing code.
     #[cfg(feature = "dds-reference")]
     Reference(ReferenceArgs),
+    /// Report nodes searched per deal, for comparison against the C++
+    /// reference's `-S` output. Timing tells you the cost of the search;
+    /// this tells you its size, and only both together say whether a gap is
+    /// per-node execution or extra work.
+    Nodes {
+        /// A file of PBN deal strings, one per line.
+        pbn: PathBuf,
+    },
     /// Compare two results files.
     Compare {
         /// The earlier results file (the baseline).
@@ -1025,6 +1033,31 @@ fn generated_deals(count: usize) -> Result<Vec<(String, Deal)>, String> {
     Ok(out)
 }
 
+/// Print nodes searched per deal, and the total.
+fn nodes_report(path: &PathBuf) -> Result<(), String> {
+    let text =
+        std::fs::read_to_string(path).map_err(|e| format!("reading {}: {e}", path.display()))?;
+    let mut total = 0u64;
+    let mut count = 0usize;
+    for (i, line) in text.lines().enumerate() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let deal = Deal::from_pbn(line)
+            .ok_or_else(|| format!("{}:{}: unparseable deal", path.display(), i + 1))?;
+        let (_, nodes) = solve_dd_table_with_nodes(&deal);
+        println!("{} {nodes}", i + 1);
+        total += nodes;
+        count += 1;
+    }
+    eprintln!(
+        "{count} deals, {total} nodes, {:.0} per deal",
+        total as f64 / count as f64
+    );
+    Ok(())
+}
+
 /// Index of the median-cost board, chosen deterministically so that two
 /// `--quick` runs measure the same thing.
 fn median_board(deals: &[Deal]) -> usize {
@@ -1118,6 +1151,7 @@ fn main() {
         }),
         #[cfg(feature = "dds-reference")]
         Cmd::Reference(args) => reference(args),
+        Cmd::Nodes { pbn } => nodes_report(pbn),
         Cmd::Compare { baseline, current } => compare(baseline, current),
     };
     if let Err(e) = outcome {

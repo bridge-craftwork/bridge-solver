@@ -44,7 +44,9 @@ pub use bridge_solver::{
 pub use cards::Cards;
 pub use convert::{direction_to_seat, seat_to_direction};
 pub use hands::Hands;
-pub use par::{par, solve_dd_table, DdTricks, ParContract, ParResult, Side};
+pub use par::{
+    par, solve_dd_table, solve_dd_table_with_nodes, DdTricks, ParContract, ParResult, Side,
+};
 pub use pattern::PatternCache;
 pub use search::{slow_trump_tricks_opponent, CutoffCache};
 pub use types::{Seat, Suit, NOTRUMP, NUM_RANKS, NUM_SEATS, NUM_SUITS, TOTAL_CARDS, TOTAL_TRICKS};
