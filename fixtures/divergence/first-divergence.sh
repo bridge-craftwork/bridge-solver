@@ -13,8 +13,23 @@ set -euo pipefail
 cd "$(dirname "$0")/../.."
 
 XRAY=${XRAY:?set XRAY to the built xray/solver-xray binary}
-DIAG=${DIAG:-./target/release/solver-diag}
+DIAG=${DIAG:-}
 LIMIT=${LIMIT:-6000}
+
+# Build solver-diag rather than trusting whatever is in target/. It needs
+# `--features cli`, so the obvious build command fails and leaves the previous
+# revision's binary in place -- and this script would then compare the
+# reference against *that*, reporting `none` for a tree that has diverged.
+# Silent success against stale code is the worst failure mode a divergence
+# check can have, so the default path is always rebuilt.
+if [ -z "$DIAG" ]; then
+  DIAG=./target/release/solver-diag
+  ./dev-build.sh --ci build --release --features cli --bin solver-diag >&2
+else
+  # An explicit DIAG is someone comparing a binary they built on purpose --
+  # an older revision, say. Left alone, but it has to exist.
+  [ -x "$DIAG" ] || { echo "DIAG=$DIAG is not an executable" >&2; exit 1; }
+fi
 work=$(mktemp -d); trap 'rm -rf "$work"' EXIT
 
 printf '%-10s %-18s %-10s %s\n' deal expected actual status

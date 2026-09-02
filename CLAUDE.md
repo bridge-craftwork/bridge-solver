@@ -120,12 +120,14 @@ Measurement discipline that this repo has learned the hard way:
 - On a machine that is not idle, same-binary repeats swing 4–6% on the geometric
   mean. Build both binaries, keep both, and alternate them A/B/A/B. A single
   before/after pair has produced a confident wrong answer here more than once.
-- **Do not use `--quick` for A/B.** Its board choice is itself an unrepeated
-  timing, so under load it flips between two boards of different cost and
-  averages two workloads into one number. Use the full corpus:
-  `run --no-sweep --runs 5` is ~5 s, so eight interleaved rounds a side is a
-  couple of minutes, and the ten paired per-board ratios are what make a result
-  attributable — a real change moves every board by roughly the same fraction.
-  See "Two ways the harness will mislead you" in `release-profile.md`.
+- **A/B on the full corpus, not `--quick`.** `run --no-sweep --runs 5` is ~5 s,
+  so eight interleaved rounds a side is a couple of minutes, and the ten paired
+  per-board ratios are what make a result attributable — a real change moves
+  every board by roughly the same fraction, and noise does not. `--quick` is one
+  board and so one ratio. Its board choice used to be an unrepeated timing that
+  flipped between two boards under load, averaging two workloads into one
+  number; it now ranks by nodes searched and is stable, but `--quick` numbers
+  from before that change compare only with each other. See "Two ways the
+  harness used to mislead you" in `release-profile.md`.
 - `perf` does not exist on macOS. Use `samply record`, or Instruments' CPU
   Counters template, for a profile.

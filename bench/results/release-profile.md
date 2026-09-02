@@ -915,34 +915,47 @@ The ~254 MB the pool holds never showed up in this profile: `pool_alloc`,
 `PatternCache::new` another 0.7%. Retention is worth fixing for memory, but
 nothing here suggests it is costing time.
 
-## Two ways the harness will mislead you
+## Two ways the harness used to mislead you
 
-Both were hit while measuring the two leads above, and both produced a
-confidently wrong number before being caught.
+Both were hit while measuring the two leads above, both produced a confidently
+wrong number before being caught, and both are now fixed. Recorded because the
+failure modes are worth recognising elsewhere: each one reported success.
 
-**`--quick` does not measure the same board twice.** Its doc comment says the
-median-cost board is "chosen deterministically so that two `--quick` runs
-measure the same thing", and `median_board` in `src/bin/solver-bench/main.rs`
-times every board **once**, unrepeated, and takes the median of those timings.
-Boards 4 (~81 ms) and 7 (~76 ms) are adjacent in cost, so on a loaded machine
-the choice flips between them and an A/B mean silently averages two different
-workloads. In the first run of this session it flipped three times in twenty
-runs and made a 1% regression look like a dead heat. **Use the full corpus for
-A/B work.** It is only about 5 s per pass at `--runs 5`, which is cheap enough
-to interleave eight rounds a side, and it gives ten paired ratios instead of
-one — the across-the-board consistency is what separates a result from drift,
-exactly as it did for the LTO change above.
+**`--quick` did not measure the same board twice.** Its doc comment said the
+median-cost board was "chosen deterministically", and `median_board` timed
+every board **once**, unrepeated, and took the median of those timings. Boards
+4 (~81 ms) and 7 (~76 ms) are 6% apart, inside the drift on a loaded machine,
+so the choice flipped between them and an A/B mean silently averaged two
+different workloads. It flipped three times in twenty runs here and made a 1%
+regression look like a dead heat.
 
-**`first-divergence.sh` will happily check a stale binary.** `XRAY` is
-required, but `DIAG` defaults to `./target/release/solver-diag` and nothing
-rebuilds it. That binary needs `--features cli`, so the obvious
+`median_board` now ranks by **nodes searched**. It is the same ten solves, but
+nodes is a property of the deal rather than of the machine, so the answer does
+not move: ten consecutive `--quick` runs on a loaded machine now name the same
+board ten times. Note that the node-median and the time-median are different
+boards — nodes and time are not perfectly correlated across a corpus spanning
+16 ms to 300 ms — so `--quick` numbers from before this change compare only
+with each other.
+
+Even fixed, `--quick` is one board and so one ratio. For A/B use the full
+corpus: about 5 s per pass at `--runs 5`, cheap enough to interleave eight
+rounds a side, and ten paired ratios instead of one. The across-the-board
+consistency is what separates a result from drift, exactly as it did for the
+LTO change above.
+
+**`first-divergence.sh` would happily check a stale binary.** `XRAY` was
+required, but `DIAG` defaulted to `./target/release/solver-diag` and nothing
+rebuilt it. That binary needs `--features cli`, so the obvious
 `./dev-build.sh --ci build --release --bin solver-diag` *fails*, leaves
 whatever was there before, and the script then reports `none` on all twelve
-fixtures — against the previous revision's code. Build it explicitly first:
+fixtures — against the previous revision's code. One of the runs in this
+session did exactly that, against a binary three hours old.
 
-```bash
-./dev-build.sh --ci build --release --features cli --bin solver-diag
-```
+The script now builds `solver-diag` itself, with the right features, unless
+`DIAG` is set explicitly — which is the case where someone means a particular
+binary, an older revision say, and that one is checked for existence instead.
+Silent success against stale code is the worst failure mode a divergence check
+can have.
 
 ## Four things that looked wrong and were not
 

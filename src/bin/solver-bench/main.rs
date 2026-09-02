@@ -1071,20 +1071,30 @@ fn nodes_report(path: &PathBuf, per_cell: bool) -> Result<(), String> {
     Ok(())
 }
 
-/// Index of the median-cost board, chosen deterministically so that two
-/// `--quick` runs measure the same thing.
+/// Index of the median-cost board.
+///
+/// Cost is nodes searched, not wall time. Both need the same ten solves, but
+/// nodes is a property of the deal and the search, so the answer is the same
+/// on a loaded machine as on an idle one -- which is the whole point of a
+/// board that two `--quick` runs can agree on.
+///
+/// It was wall time, ranked from a single unrepeated timing per board. Boards
+/// 4 and 7 of `corpus-v1` sit about 6% apart, which is inside the drift on a
+/// busy machine, so the median flipped between them from run to run and an A/B
+/// silently averaged two different workloads. That cost a real measurement
+/// before it was noticed; see "Two ways the harness will mislead you" in
+/// `bench/results/release-profile.md`.
 fn median_board(deals: &[Deal]) -> usize {
-    let mut costs: Vec<(usize, f64)> = deals
+    let mut costs: Vec<(usize, u64)> = deals
         .iter()
         .enumerate()
         .map(|(i, d)| {
-            let (_, s) = measure(|| {
-                let _ = solve_dd_table(d);
-            });
-            (i, s.wall_ms)
+            let (_, nodes) = solve_dd_table_with_nodes(d);
+            (i, nodes)
         })
         .collect();
-    costs.sort_by(|a, b| a.1.total_cmp(&b.1));
+    // Tie-break on index so the order is total, not merely deterministic-ish.
+    costs.sort_by_key(|&(i, nodes)| (nodes, i));
     costs[costs.len() / 2].0
 }
 

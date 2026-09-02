@@ -29,9 +29,17 @@ Release matters. A debug build is roughly two orders of magnitude slower and
 does not even rank the boards in the same order, so its "hardest board" is not
 the release build's hardest board.
 
-`--quick` measures only the median-cost board, chosen deterministically so two
-quick runs are comparable with each other. Use it while iterating; use the full
-corpus for anything recorded or compared across revisions.
+`--quick` measures only the median-cost board, where cost is **nodes searched**
+rather than wall time. Both rank the same ten solves, but nodes is a property of
+the deal and the search, so two `--quick` runs agree on which board they mean
+however busy the machine is. Ranking by a single unrepeated timing did not: two
+boards 6% apart traded places from run to run, and an A/B over them averaged two
+different workloads.
+
+Use `--quick` while iterating. Use the full corpus for anything recorded, and
+for any A/B -- ten paired per-board ratios are what make a difference
+attributable, because a real change moves every board by roughly the same
+fraction and noise does not.
 
 ## Wall clock and CPU, always both
 
