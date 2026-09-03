@@ -41,6 +41,25 @@ for any A/B -- ten paired per-board ratios are what make a difference
 attributable, because a real change moves every board by roughly the same
 fraction and noise does not.
 
+## Instructions, when the question is "did I remove work"
+
+```bash
+solver-bench cost <file.pbn>
+```
+
+Instructions retired, cycles, nodes and wall for a corpus, in one pass. The
+first of those is nearly deterministic -- 0.015% over five repeats on a machine
+at load average 5, against 1.45% for wall clock -- because it is a property of
+the code rather than of the machine. One run of it beats fifteen timed ones for
+the question "does this change do less work", and it survives a busy machine.
+
+It is not a substitute for timing. Instructions are not time, and the ratio
+between them is the interesting part: the `convert_suit` change measured -5.94%
+instructions but -2.12% cycles and -1.89% wall, because what it deleted was
+cheap parallel ALU work and IPC fell from 2.80 to 2.70. Fewer instructions with
+*more* cycles means a change traded compute for stalls, which is worth knowing
+early. Iterate with `cost`, record with `run`.
+
 ## Wall clock and CPU, always both
 
 Every measurement records wall clock *and* CPU time (`getrusage`, so it counts

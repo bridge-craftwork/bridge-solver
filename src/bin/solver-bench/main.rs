@@ -157,6 +157,65 @@ fn cpu_time() -> Duration {
     Duration::ZERO
 }
 
+/// Instructions retired and CPU cycles consumed by this process so far.
+///
+/// Wall clock answers "how long did the user wait", which is the question that
+/// matters to a user and the one that needs repeats, a quiet machine and a
+/// minimum-of-N to ask honestly. Instructions retired answers a different and
+/// much cheaper question: *how much work did the program actually do*. It is a
+/// property of the executed code, not of the machine's mood, so it does not
+/// care about scheduling, frequency, or what else is running -- which makes a
+/// single run of it worth more than fifteen wall-clock runs when the question
+/// is "did my change remove work".
+///
+/// The two are not interchangeable, and the gap between them is informative
+/// rather than noise. A change that removes instructions but adds cache misses
+/// is slower despite counting better; the cycles figure catches that, and
+/// cycles-per-instruction says which way a change traded.
+///
+/// macOS only. `proc_pid_rusage` with `RUSAGE_INFO_V4` needs no entitlement or
+/// root. The offsets are checked against `<libproc.h>` on this platform:
+/// `sizeof(rusage_info_v4)` is 296, `ri_instructions` at 248, `ri_cycles` at
+/// 256, and the struct is read as words rather than transcribed field by field
+/// because only those two are wanted and the rest are a long tail of
+/// QoS accounting that would be easy to get subtly wrong.
+#[cfg(target_os = "macos")]
+fn counters() -> Option<(u64, u64)> {
+    const RUSAGE_INFO_V4: libc::c_int = 4;
+    const WORDS: usize = 296 / 8;
+    const INSTRUCTIONS: usize = 248 / 8;
+    const CYCLES: usize = 256 / 8;
+    extern "C" {
+        fn proc_pid_rusage(
+            pid: libc::c_int,
+            flavor: libc::c_int,
+            buffer: *mut libc::c_void,
+        ) -> libc::c_int;
+    }
+    let mut buf = [0u64; WORDS];
+    // SAFETY: `proc_pid_rusage` writes at most `sizeof(rusage_info_v4)` bytes
+    // through the pointer, and `buf` is exactly that size and 8-aligned, which
+    // is the struct's alignment since every field past the leading uuid is a
+    // `uint64_t`. It reads nothing else and cannot retain the pointer.
+    let rc = unsafe {
+        proc_pid_rusage(
+            std::process::id() as libc::c_int,
+            RUSAGE_INFO_V4,
+            buf.as_mut_ptr() as *mut libc::c_void,
+        )
+    };
+    if rc != 0 {
+        return None;
+    }
+    Some((buf[INSTRUCTIONS], buf[CYCLES]))
+}
+
+/// No equivalent elsewhere; the wall and CPU figures stand alone.
+#[cfg(not(target_os = "macos"))]
+fn counters() -> Option<(u64, u64)> {
+    None
+}
+
 /// Time one closure, wall and CPU together.
 fn measure<T>(f: impl FnOnce() -> T) -> (T, Sample) {
     let cpu0 = cpu_time();
@@ -382,6 +441,20 @@ enum Cmd {
     /// average. This reports one time per deal so the percentiles can be
     /// taken, rather than a single figure.
     Latency(LatencyArgs),
+    /// Instructions and cycles for a whole corpus, in one pass.
+    ///
+    /// The quick answer to "did my change remove work". Instructions retired
+    /// are a property of the code rather than of the machine, so one run of
+    /// this says more than fifteen wall-clock runs, and it can be trusted on a
+    /// busy machine. Confirm anything it likes with `run`, because fewer
+    /// instructions is not the same as less time.
+    Cost {
+        /// A file of PBN deal strings, one per line.
+        pbn: PathBuf,
+        /// Repeats; the lowest instruction count is reported.
+        #[arg(long, default_value_t = 1)]
+        runs: usize,
+    },
     /// Compare two results files.
     Compare {
         /// The earlier results file (the baseline).
@@ -1219,6 +1292,7 @@ fn main() {
         Cmd::Reference(args) => reference(args),
         Cmd::Nodes { pbn, per_cell } => nodes_report(pbn, *per_cell),
         Cmd::Latency(args) => latency_report(args),
+        Cmd::Cost { pbn, runs } => cost_report(pbn, *runs),
         Cmd::Compare { baseline, current } => compare(baseline, current),
     };
     if let Err(e) = outcome {
@@ -1365,4 +1439,57 @@ fn fmt_pct(p: f64) -> String {
     } else {
         format!("p{p:.0}")
     }
+}
+
+/// Instructions, cycles and nodes for a whole corpus.
+fn cost_report(path: &PathBuf, runs: usize) -> Result<(), String> {
+    let text =
+        std::fs::read_to_string(path).map_err(|e| format!("reading {}: {e}", path.display()))?;
+    let mut deals = Vec::new();
+    for (i, line) in text.lines().enumerate() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        deals.push(
+            Deal::from_pbn(line)
+                .ok_or_else(|| format!("{}:{}: unparseable deal", path.display(), i + 1))?,
+        );
+    }
+    if deals.is_empty() {
+        return Err(format!("{}: no deals", path.display()));
+    }
+    if counters().is_none() {
+        return Err("instruction counters are unavailable on this platform".into());
+    }
+
+    let (mut best_ins, mut best_cyc, mut best_ms, mut nodes) = (u64::MAX, u64::MAX, f64::MAX, 0u64);
+    for _ in 0..runs.max(1) {
+        let before = counters().unwrap_or((0, 0));
+        let mut n = 0u64;
+        let (_, sample) = measure(|| {
+            for deal in &deals {
+                let (_, c) = solve_dd_table_with_nodes(deal);
+                n += c;
+            }
+        });
+        let after = counters().unwrap_or((0, 0));
+        best_ins = best_ins.min(after.0.saturating_sub(before.0));
+        best_cyc = best_cyc.min(after.1.saturating_sub(before.1));
+        best_ms = best_ms.min(sample.wall_ms);
+        nodes = n;
+    }
+
+    println!("deals        {:>18}", deals.len());
+    println!("nodes        {nodes:>18}");
+    println!("instructions {best_ins:>18}");
+    println!("cycles       {best_cyc:>18}");
+    println!("wall ms      {best_ms:>18.1}");
+    println!();
+    println!("ins/node     {:>18.2}", best_ins as f64 / nodes as f64);
+    println!("cycles/node  {:>18.2}", best_cyc as f64 / nodes as f64);
+    // Below about 1.0 the search is stalling rather than computing, which is
+    // what separates "removed instructions" from "made it faster".
+    println!("IPC          {:>18.2}", best_ins as f64 / best_cyc as f64);
+    Ok(())
 }

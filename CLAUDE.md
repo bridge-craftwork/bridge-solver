@@ -119,6 +119,23 @@ Before optimising, read the "tried and found worthless" list in
 instructions of never-executed tracing, `-C target-cpu=native` and hoisting a
 redundant cache-key hash all measured as exactly nothing.
 
+**Check instructions first, then confirm with time.** `solver-bench cost <pbn>`
+reports instructions retired, cycles and nodes for a corpus in one pass. On a
+machine at load average 5, five repeats of it varied by **0.015%** on
+instructions against 1.45% on wall clock, so a single run of it is worth more
+than fifteen wall-clock runs and it can be trusted while something else is
+building. Instructions retired are a property of the executed code, not of the
+machine's mood.
+
+It answers a different question, though, and the gap is informative rather than
+noise. The `convert_suit` change measures **-5.94% instructions, -2.12% cycles,
+-1.89% wall**: it deleted cheap ILP-friendly ALU work, so IPC fell from 2.80 to
+2.70 and the instruction figure overstates the win threefold. So use `cost` to
+decide whether an idea is worth pursuing and to catch a change that quietly
+adds work -- it is unambiguous about the *sign* -- and use `run` for any number
+that gets recorded. A change that removes instructions and raises cycles has
+traded compute for stalls, which is what the SoA scan-key experiment did.
+
 Measurement discipline that this repo has learned the hard way:
 
 - On a machine that is not idle, same-binary repeats swing 4–6% on the geometric
