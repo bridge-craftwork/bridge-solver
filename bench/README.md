@@ -60,6 +60,46 @@ cheap parallel ALU work and IPC fell from 2.80 to 2.70. Fewer instructions with
 *more* cycles means a change traded compute for stalls, which is worth knowing
 early. Iterate with `cost`, record with `run`.
 
+### Prefer cycles to wall clock for "is it faster"
+
+Cycles are the middle term, and they are the one to quote. Twelve repeats on a
+loaded machine:
+
+| | spread | CV |
+|---|---|---|
+| instructions | 0.017% | 0.004% |
+| cycles | 1.010% | 0.344% |
+| wall | 1.131% | 0.404% |
+| **wall per cycle** | **0.270%** | 0.080% |
+
+That last row is the important one. Wall per cycle is nearly constant, so on a
+machine whose work stays on the performance cores, cycles and wall carry the
+same information and cycles buys almost nothing -- and the 1% both of them
+still wander is *real*, not jitter: it is `cycles/instruction` moving by the
+same 1.007%, which is cache and predictor state genuinely differing as other
+processes come and go. No counter averages that away.
+
+Cycles earn their keep in the case that silently ruins a wall-clock result:
+work landing on an efficiency core. The same corpus, forced there with
+`taskpolicy -b`:
+
+| | P-cores | E-cores | inflated by |
+|---|---|---|---|
+| instructions | 31.219e9 | 31.451e9 | 0.74% |
+| cycles | 11.629e9 | 15.881e9 | 36.6% |
+| wall | 2,918 ms | 12,014 ms | **312%** |
+
+Effective clock 3.99 GHz against 1.32 GHz. Cycles absorb the frequency
+difference entirely and leave only the efficiency core's lower IPC, so an
+excursion that makes wall clock wrong by a factor of four makes cycles wrong by
+a factor of 1.4 -- and a minimum-of-three rejects it easily, where in wall
+clock it can hide inside a mean.
+
+So: **cycles as the headline for speed, wall for anything user-facing** (a
+person waits on seconds, not cycles), and instructions to ask whether the work
+itself changed. Cycles are never worse than wall and occasionally much better,
+which is the whole argument for them.
+
 ## Wall clock and CPU, always both
 
 Every measurement records wall clock *and* CPU time (`getrusage`, so it counts

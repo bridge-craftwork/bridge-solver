@@ -136,6 +136,15 @@ adds work -- it is unambiguous about the *sign* -- and use `run` for any number
 that gets recorded. A change that removes instructions and raises cycles has
 traded compute for stalls, which is what the SoA scan-key experiment did.
 
+**Quote cycles, not wall, when the question is speed.** Wall per cycle is
+constant to 0.27% here, so while everything stays on a performance core the two
+say the same thing. They stop saying the same thing when a run lands on an
+efficiency core: measured with `taskpolicy -b`, that inflates wall by 312% and
+cycles by only 36.6%, because cycles absorb the 3.99 GHz-to-1.32 GHz frequency
+drop and leave just the lower IPC. Wall clock wrong by four, cycles wrong by
+1.4, and a minimum-of-three rejects the latter easily. Keep wall for anything
+user-facing, since a person waits on seconds.
+
 Measurement discipline that this repo has learned the hard way:
 
 - On a machine that is not idle, same-binary repeats swing 4–6% on the geometric
