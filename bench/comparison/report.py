@@ -70,50 +70,92 @@ def main():
 
 
 def write_plot(path, label, srt, dds):
+    """Two panels: the shape, and the difference.
+
+    The absolute curve alone is nearly useless here -- three lines spanning
+    three decades sit on top of each other and a 20% difference is invisible.
+    But it is the shape worth seeing, because it is the whole argument for
+    caring about the tail: flat and cheap until about p80, then an order of
+    magnitude in the last few percent. So it goes on top, and underneath it the
+    same curves divided by DDS, where the crossover is legible.
+    """
     import math
 
-    W, H, M = 760, 420, 58
+    W, PH, M, GAP = 820, 250, 66, 54
+    H = M + PH + GAP + PH + M
     n = len(srt[0])
     lo = max(1.0, min(s[0] for s in srt))
     hi = max(s[-1] for s in srt)
-    x = lambda i: M + (W - 2 * M) * i / max(1, n - 1)
-    y = lambda v: H - M - (H - 2 * M) * (math.log10(max(v, lo)) - math.log10(lo)) / (
+    colours = ["#2f6fb5", "#b5502f", "#4a8a4a", "#8a4a8a"]
+    x = lambda i: M + (W - M - 130) * i / max(1, n - 1)
+    top = lambda v: M + PH - PH * (math.log10(max(v, lo)) - math.log10(lo)) / (
         math.log10(hi) - math.log10(lo)
     )
-    colours = ["#2f6fb5", "#b5502f", "#4a8a4a", "#8a4a8a"]
-    out = [
+    ratios = [[s[i] / srt[dds][i] for i in range(n)] for s in srt]
+    # Scale off the bulk, not the extremes. The first percentile of deals runs
+    # in a handful of milliseconds, where fixed per-solve overhead is most of
+    # the time and the ratio swings wildly; letting that set the axis squashes
+    # the region anyone cares about into a band. Points outside are clamped to
+    # the edge rather than dropped, so the line still shows they went there.
+    flat = sorted(v for k, r in enumerate(ratios) if k != dds for v in r)
+    rlo = min(0.9, flat[int(0.01 * len(flat))])
+    rhi = max(1.1, flat[int(0.99 * len(flat))])
+    pad = 0.06 * (rhi - rlo)
+    rlo, rhi = rlo - pad, rhi + pad
+    ry = lambda v: M + PH + GAP + PH - PH * (min(max(v, rlo), rhi) - rlo) / (rhi - rlo)
+
+    o = [
         f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {W} {H}" '
         f'font-family="system-ui,sans-serif" font-size="12">',
         f'<rect width="{W}" height="{H}" fill="#fff"/>',
+        f'<text x="{M}" y="{M-34}" font-size="14" fill="#111">'
+        f"Time to solve one board &#8212; {n} random deals, each solver sorted by its own time</text>",
     ]
     for dec in range(int(math.floor(math.log10(lo))), int(math.ceil(math.log10(hi))) + 1):
         v = 10.0**dec
-        if not (lo <= v <= hi):
-            continue
-        out.append(
-            f'<line x1="{M}" y1="{y(v):.1f}" x2="{W-M}" y2="{y(v):.1f}" stroke="#e4e4e4"/>'
-            f'<text x="{M-8}" y="{y(v)+4:.1f}" text-anchor="end" fill="#666">{v:g} ms</text>'
+        if lo <= v <= hi:
+            o.append(
+                f'<line x1="{M}" y1="{top(v):.1f}" x2="{W-130}" y2="{top(v):.1f}" stroke="#eee"/>'
+                f'<text x="{M-8}" y="{top(v)+4:.1f}" text-anchor="end" fill="#777">{v:g} ms</text>'
+            )
+    for g in (1.0, rlo, rhi, (rlo + rhi) / 2, (rlo + 1.0) / 2, (rhi + 1.0) / 2):
+        o.append(
+            f'<line x1="{M}" y1="{ry(g):.1f}" x2="{W-130}" y2="{ry(g):.1f}" '
+            f'stroke="{"#bbb" if abs(g-1)<1e-9 else "#eee"}"/>'
+            f'<text x="{M-8}" y="{ry(g)+4:.1f}" text-anchor="end" fill="#777">{g:.2f}x</text>'
         )
     for p in (0, 50, 80, 90, 95, 100):
         i = min(n - 1, int(p / 100 * n))
-        out.append(
-            f'<line x1="{x(i):.1f}" y1="{M}" x2="{x(i):.1f}" y2="{H-M}" stroke="#f0f0f0"/>'
-            f'<text x="{x(i):.1f}" y="{H-M+18}" text-anchor="middle" fill="#666">p{p}</text>'
+        for y0, y1 in ((M, M + PH), (M + PH + GAP, M + PH + GAP + PH)):
+            o.append(f'<line x1="{x(i):.1f}" y1="{y0}" x2="{x(i):.1f}" y2="{y1}" stroke="#f4f4f4"/>')
+        o.append(
+            f'<text x="{x(i):.1f}" y="{H-M+18}" text-anchor="middle" fill="#777">p{p}</text>'
         )
     for k, s in enumerate(srt):
-        pts = " ".join(f"{x(i):.1f},{y(v):.1f}" for i, v in enumerate(s))
-        out.append(
-            f'<polyline points="{pts}" fill="none" stroke="{colours[k%4]}" stroke-width="2"/>'
+        o.append(
+            '<polyline points="'
+            + " ".join(f"{x(i):.1f},{top(v):.1f}" for i, v in enumerate(s))
+            + f'" fill="none" stroke="{colours[k%4]}" stroke-width="1.8"/>'
         )
-        out.append(
-            f'<text x="{W-M+4}" y="{y(s[-1])+4:.1f}" fill="{colours[k%4]}">{label[k]}</text>'
-        )
-    out.append(
-        f'<text x="{M}" y="{M-18}" font-size="13" fill="#222">'
-        f"Time to solve one board, {n} random deals, sorted</text>"
+        if k != dds:
+            o.append(
+                '<polyline points="'
+                + " ".join(f"{x(i):.1f},{ry(v):.1f}" for i, v in enumerate(ratios[k]))
+                + f'" fill="none" stroke="{colours[k%4]}" stroke-width="1.8"/>'
+            )
+    o.append(
+        f'<text x="{M}" y="{M+PH+GAP-16}" font-size="13" fill="#111">'
+        f"Ratio to {label[dds]} at the same percentile &#8212; below 1.00 is faster</text>"
     )
-    out.append("</svg>")
-    open(path, "w").write("\n".join(out))
+    for k, lab in enumerate(label):
+        yy = M + 6 + k * 18
+        o.append(
+            f'<line x1="{W-118}" y1="{yy-4}" x2="{W-98}" y2="{yy-4}" '
+            f'stroke="{colours[k%4]}" stroke-width="3"/>'
+            f'<text x="{W-92}" y="{yy}" fill="#333">{lab}</text>'
+        )
+    o.append("</svg>")
+    open(path, "w").write("\n".join(o))
 
 
 if __name__ == "__main__":

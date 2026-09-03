@@ -41,8 +41,10 @@ for t in $THREADS; do
     # One process per thread count: DDS cannot survive a second SetResources.
     out=$("$BENCH" reference --throughput-pbn "$CORPUS/deals.pbn" --runs 1 \
             --dds-threads "$t" --dds-threading 5 2>/dev/null)
-    ours_b+="$(echo "$out" | awk '$1=="ours"{print $2}')"$'\n'
-    dds_b+="$(echo "$out" | awk '$1=="dds"{print $2}')"$'\n'
+    # The numeric guard matters: the run also prints a banner line beginning
+    # `dds      : STL threading, ...`, whose second field is a colon.
+    ours_b+="$(echo "$out" | awk '$1=="ours" && $2 ~ /^[0-9.]+$/ {print $2}')"$'\n'
+    dds_b+="$(echo "$out" | awk '$1=="dds"  && $2 ~ /^[0-9.]+$/ {print $2}')"$'\n'
 
     # The reference: one process per deal, fanned out N at a time.
     s=$(secs)
