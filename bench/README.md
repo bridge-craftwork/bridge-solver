@@ -110,12 +110,27 @@ converted from the LIN fixture and confirmed to reproduce them exactly. So the
 corpus is a correctness fixture as well as a workload, and a run that is fast
 and wrong says so.
 
+## Comparing against other solvers
+
+Everything above is this port measured against itself, which is what the ten
+curated boards are for. Comparing *products* -- this port, DDS 2.9 and the C++
+reference -- is a different job with a different corpus and different
+methodology, and it lives in `comparison/`. Start with
+`comparison/METHODOLOGY.md`.
+
 ## Files
 
 ```
 bench/
   corpus.json                     the boards, with their pinned DD tables
   README.md                       this file
+  comparison/
+    METHODOLOGY.md                how the three-solver comparison is measured
+    RESULTS.md                    what it currently says
+    gen-corpus.py                 the shared random corpus, from a seed
+    build-reference.sh            build macroxue/bridge-solver for comparison
+    ref-latency.patch             its per-deal timing instrumentation
+    throughput.sh                 whole-set wall clock at N threads
   results/
     BASELINE.md                   the current reference numbers, and what they mean
     <name>.json                   a recorded run

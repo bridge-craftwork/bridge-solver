@@ -316,6 +316,41 @@ struct Cli {
     command: Cmd,
 }
 
+/// Options for `latency`.
+#[derive(Parser)]
+struct LatencyArgs {
+    /// A file of PBN deal strings, one per line.
+    pbn: PathBuf,
+    /// Most repeats of any one deal; the fastest is kept.
+    ///
+    /// The minimum, not the mean: a single-threaded solve on an 8P+4E machine
+    /// is occasionally scheduled onto an efficiency core at roughly a third
+    /// the speed, and that does not average out, it just adds a slow mode.
+    /// The fastest run is the one that got a performance core and an
+    /// uncontended cache.
+    #[arg(long, default_value_t = 15)]
+    runs: usize,
+    /// Stop repeating a deal once it has had this many milliseconds, after a
+    /// floor of three repeats.
+    ///
+    /// Deals in this workload span more than tenfold, and the two ends need
+    /// opposite treatment. A deal near the median is short enough that
+    /// scheduling noise is a large fraction of it, so it wants many repeats --
+    /// and being short, they are cheap. A deal in the slow tail is long enough
+    /// that a real difference is visible immediately, and repeating it fifteen
+    /// times would dominate the run for no gain. Budgeting the time per deal
+    /// rather than fixing the count gives each end what it needs.
+    #[arg(long, default_value_t = 300.0)]
+    budget_ms: f64,
+    /// Also measure DDS on each deal, for the same-timing-code comparison.
+    #[cfg(feature = "dds-reference")]
+    #[arg(long)]
+    dds: bool,
+    /// Write per-deal milliseconds here as TSV: index, ours, dds.
+    #[arg(long)]
+    tsv: Option<PathBuf>,
+}
+
 #[derive(Subcommand)]
 enum Cmd {
     /// Measure each board single-threaded, and optionally sweep thread counts.
@@ -339,6 +374,14 @@ enum Cmd {
         #[arg(long)]
         per_cell: bool,
     },
+    /// Per-deal latency over a file of deals, for the percentile view.
+    ///
+    /// The mean over a corpus is a tail measurement in disguise -- on random
+    /// deals the slowest fifth is about half of all the work -- so what a
+    /// person waiting on one board experiences is a distribution, not an
+    /// average. This reports one time per deal so the percentiles can be
+    /// taken, rather than a single figure.
+    Latency(LatencyArgs),
     /// Compare two results files.
     Compare {
         /// The earlier results file (the baseline).
@@ -1175,10 +1218,151 @@ fn main() {
         #[cfg(feature = "dds-reference")]
         Cmd::Reference(args) => reference(args),
         Cmd::Nodes { pbn, per_cell } => nodes_report(pbn, *per_cell),
+        Cmd::Latency(args) => latency_report(args),
         Cmd::Compare { baseline, current } => compare(baseline, current),
     };
     if let Err(e) = outcome {
         eprintln!("solver-bench: {e}");
         std::process::exit(1);
+    }
+}
+
+/// Percentiles of a sorted slice, by nearest-rank.
+fn percentile(sorted: &[f64], p: f64) -> f64 {
+    if sorted.is_empty() {
+        return 0.0;
+    }
+    let i = ((p / 100.0) * sorted.len() as f64).ceil() as usize;
+    sorted[i.saturating_sub(1).min(sorted.len() - 1)]
+}
+
+/// Per-deal latency over a file of deals.
+fn latency_report(args: &LatencyArgs) -> Result<(), String> {
+    let text = std::fs::read_to_string(&args.pbn)
+        .map_err(|e| format!("reading {}: {e}", args.pbn.display()))?;
+    let mut deals = Vec::new();
+    for (i, line) in text.lines().enumerate() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let deal = Deal::from_pbn(line)
+            .ok_or_else(|| format!("{}:{}: unparseable deal", args.pbn.display(), i + 1))?;
+        deals.push((line.to_string(), deal));
+    }
+    if deals.is_empty() {
+        return Err(format!("{}: no deals", args.pbn.display()));
+    }
+
+    println!("deals    : {}", deals.len());
+    println!(
+        "runs     : best of up to {}, or until a deal has had {:.0} ms",
+        args.runs, args.budget_ms
+    );
+    println!("machine  : {} ({} logical)", machine(), logical_cpus());
+
+    // DDS's resources are process-global and must be set before the first
+    // solve; without this the first call dies with `Memory::GetPtr: 0 vs. 0`
+    // and DDS calls `exit(1)`, taking the harness with it. One thread, and
+    // the STL backend rather than DDS's macOS default of GCD, which
+    // dispatches at background priority and so lands on the efficiency cores.
+    #[cfg(feature = "dds-reference")]
+    if args.dds {
+        dds::set_backend(5)?;
+        dds::set_threads(1);
+        let (backend, cores, threads) = dds::info();
+        println!("dds      : {backend} threading, {cores} cores seen, {threads} threads made");
+    }
+
+    let mut ours = Vec::with_capacity(deals.len());
+    let mut dds_ms: Vec<f64> = Vec::new();
+
+    // Interleaved by deal rather than by solver: a deal's two figures are then
+    // taken under the same machine conditions, which is what makes the
+    // per-deal ratio meaningful even when the machine drifts over the run.
+    /// Repeat until the budget is spent, keeping the fastest. At least three,
+    /// at most `runs`.
+    fn best_of(runs: usize, budget_ms: f64, mut once: impl FnMut() -> f64) -> f64 {
+        let (mut best, mut spent) = (f64::MAX, 0.0);
+        for i in 0..runs.max(3) {
+            let ms = once();
+            best = best.min(ms);
+            spent += ms;
+            if i + 1 >= 3 && spent >= budget_ms {
+                break;
+            }
+        }
+        best
+    }
+
+    for (pbn, deal) in &deals {
+        ours.push(best_of(args.runs, args.budget_ms, || {
+            measure(|| {
+                let _ = solve_dd_table(deal);
+            })
+            .1
+            .wall_ms
+        }));
+
+        #[cfg(feature = "dds-reference")]
+        if args.dds {
+            dds_ms.push(best_of(args.runs, args.budget_ms, || {
+                measure(|| {
+                    let _ = dds::solve_table(pbn);
+                })
+                .1
+                .wall_ms
+            }));
+        }
+        let _ = pbn;
+    }
+
+    if let Some(path) = &args.tsv {
+        let mut out = String::from("deal\tours_ms\tdds_ms\n");
+        for (i, o) in ours.iter().enumerate() {
+            let d = dds_ms.get(i).map(|v| format!("{v:.3}")).unwrap_or_default();
+            out.push_str(&format!("{}\t{o:.3}\t{d}\n", i + 1));
+        }
+        std::fs::write(path, out).map_err(|e| format!("writing {}: {e}", path.display()))?;
+        println!("wrote {}", path.display());
+    }
+
+    let mut so = ours.clone();
+    so.sort_by(f64::total_cmp);
+    let mut sd = dds_ms.clone();
+    sd.sort_by(f64::total_cmp);
+
+    println!();
+    if sd.is_empty() {
+        println!("{:>6} {:>10}", "pct", "ours ms");
+        for p in [50.0, 80.0, 90.0, 95.0, 99.0, 100.0] {
+            println!("{:>6} {:>10.1}", fmt_pct(p), percentile(&so, p));
+        }
+    } else {
+        println!(
+            "{:>6} {:>10} {:>10} {:>10}",
+            "pct", "ours ms", "dds ms", "ours/dds"
+        );
+        for p in [50.0, 80.0, 90.0, 95.0, 99.0, 100.0] {
+            let (o, d) = (percentile(&so, p), percentile(&sd, p));
+            println!("{:>6} {:>10.1} {:>10.1} {:>9.3}x", fmt_pct(p), o, d, o / d);
+        }
+        // Ratio of the whole set, and the ratio a user actually waits on.
+        let sum_o: f64 = ours.iter().sum();
+        let sum_d: f64 = dds_ms.iter().sum();
+        println!(
+            "\ntotal    {sum_o:>9.0} {sum_d:>10.0} {:>9.3}x",
+            sum_o / sum_d
+        );
+    }
+    Ok(())
+}
+
+/// `p100` reads badly as a percentile; it is the maximum.
+fn fmt_pct(p: f64) -> String {
+    if p >= 100.0 {
+        "max".to_string()
+    } else {
+        format!("p{p:.0}")
     }
 }

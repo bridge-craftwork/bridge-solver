@@ -1,0 +1,77 @@
+--- a/solver.cc
++++ b/solver.cc
+@@ -2203,12 +2203,74 @@
+   }
+ }
+ #else  // _WEB
++// Instrumentation only -- no algorithmic change. Solves every deal in a file
++// of four-line hands, repeating each until a time budget is spent (minimum
++// three repeats, maximum LAT_RUNS) and reporting the fastest, so that per-deal
++// latency percentiles can be taken. Matches solver-bench's `latency`
++// subcommand exactly, including the adaptive repeat rule.
++//
++// Timing has to be in-process. Invoking the solver once per deal would add
++// process startup and a cache re-grow to every measurement, which on a median
++// deal of about 90 ms is several percent -- larger than the differences being
++// measured.
++static int LatencyMain(const char* path, const std::vector<int>& trumps,
++                       const std::vector<int>& lead_seats) {
++  auto* f = fopen(path, "rt");
++  if (!f) { fprintf(stderr, "Input file not found: '%s'.\n", path); return -1; }
++  const char* runs_env = getenv("LAT_RUNS");
++  const char* budget_env = getenv("LAT_BUDGET_MS");
++  int max_runs = runs_env ? atoi(runs_env) : 15;
++  double budget_ms = budget_env ? atof(budget_env) : 300.0;
++  if (max_runs < 1) max_runs = 1;
++  // Floor of three repeats, unless fewer were asked for on purpose:
++  // LAT_RUNS=1 makes this a plain single-process pass over the whole file,
++  // which is how the bulk-throughput comparison drives it.
++  int floor_runs = max_runs < 3 ? max_runs : 3;
++
++  auto do_nothing_trump = [](int trump) {};
++  auto do_nothing_seat = [](int trump, int lead_seat, int ns_tricks) {};
++
++  char line[NUM_SEATS][120];
++  int deal_no = 0;
++  printf("deal\tref_ms\truns\n");
++  while (fgets(line[NORTH], sizeof(line[0]), f)) {
++    if (!fgets(line[WEST], sizeof(line[0]), f)) break;
++    if (!fgets(line[EAST], sizeof(line[0]), f)) break;
++    if (!fgets(line[SOUTH], sizeof(line[0]), f)) break;
++    Hands hands;
++    Cards all_cards;
++    for (int seat = 0; seat < NUM_SEATS; ++seat) {
++      hands[seat] = ParseHand(line[seat], all_cards);
++      all_cards.Add(hands[seat]);
++    }
++    ++deal_no;
++    double best = 1e18, spent = 0;
++    int used = 0;
++    for (int i = 0; i < max_runs; ++i) {
++      double t0 = Now();
++      Solve(hands, trumps, lead_seats, do_nothing_trump, do_nothing_seat, do_nothing_trump);
++      double ms = (Now() - t0) * 1000.0;
++      if (ms < best) best = ms;
++      spent += ms;
++      ++used;
++      if (used >= floor_runs && spent >= budget_ms) break;
++    }
++    printf("%d\t%.3f\t%d\n", deal_no, best, used);
++    fflush(stdout);
++  }
++  fclose(f);
++  fprintf(stderr, "%d deals\n", deal_no);
++  return 0;
++}
++
+ int main(int argc, char* argv[]) {
+   options.Read(argc, argv);
+ 
+   Hands hands;
+   std::vector<int> trumps = {NOTRUMP, SPADE, HEART, DIAMOND, CLUB};
+   std::vector<int> lead_seats = {WEST, EAST, NORTH, SOUTH};
++  if (const char* lat = getenv("LATENCY_FILE"))
++    return LatencyMain(lat, trumps, lead_seats);
+   if (options.code)
+     hands.Decode(options.code);
+   else if (options.input_file)
