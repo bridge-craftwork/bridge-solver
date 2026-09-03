@@ -33,6 +33,8 @@ use std::time::{Duration, Instant};
 #[cfg(feature = "dds-reference")]
 mod dds;
 
+#[cfg(feature = "dds-reference")]
+use bridge_solver::{solve_dd_strain, STRAINS};
 use bridge_solver::{solve_dd_table, solve_dd_table_cells, solve_dd_table_with_nodes};
 use bridge_types::Deal;
 use clap::{Args, Parser, Subcommand};
@@ -992,13 +994,14 @@ fn reference(args: &ReferenceArgs) -> Result<(), String> {
 /// deal at a time it has five work items to spread over N threads and the
 /// result measures load imbalance rather than scaling.
 ///
-/// Each solver parallelises however it likes. Ours takes deals off a shared
-/// cursor, which is work-stealing in all but name and so tolerates the 18x
-/// spread in board cost. DDS is handed the list in chunks of forty and
-/// schedules the (deal, strain) pairs itself.
+/// Each solver parallelises however it likes, and both take the same unit: a
+/// (deal, strain) pair off a shared cursor, which is work-stealing in all but
+/// name. Whole deals were the unit here until the case-2 measurement showed
+/// what that costs on a small batch -- see `throughput_ours` -- and DDS is
+/// handed the list in chunks of forty and schedules the pairs itself.
 #[cfg(feature = "dds-reference")]
 fn throughput(args: &ReferenceArgs, threads: usize) -> Result<(), String> {
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicU8, Ordering};
 
     let generated = match &args.throughput_pbn {
         Some(path) => {
@@ -1028,6 +1031,7 @@ fn throughput(args: &ReferenceArgs, threads: usize) -> Result<(), String> {
     // wrongly ordered deals would still parse, still solve, and still produce
     // plausible timings -- of a workload that is not the one being reported.
     let sample = work.len().min(5);
+    let mut agreed = Vec::with_capacity(sample);
     for (i, (pbn, deal)) in generated.iter().take(sample).enumerate() {
         let ours = encode_ddtricks(&solve_dd_table(deal).tricks);
         let theirs = encode_ddtricks(&dds::solve_table(pbn)?);
@@ -1037,6 +1041,7 @@ fn throughput(args: &ReferenceArgs, threads: usize) -> Result<(), String> {
                  the same work for both solvers\n  ours {ours}\n  dds  {theirs}\n  {pbn}"
             ));
         }
+        agreed.push(ours);
     }
 
     println!(
@@ -1046,18 +1051,33 @@ fn throughput(args: &ReferenceArgs, threads: usize) -> Result<(), String> {
         args.runs
     );
 
-    let ours = best_of(args.runs, || {
-        let cursor = AtomicUsize::new(0);
-        std::thread::scope(|scope| {
-            for _ in 0..threads {
-                scope.spawn(|| loop {
-                    let i = cursor.fetch_add(1, Ordering::Relaxed);
-                    let Some(deal) = work.get(i) else { break };
-                    let _ = solve_dd_table(deal);
-                });
+    // Twenty cells per deal, laid out as `DdTricks::tricks` is: cell
+    // `[dir][strain]` of deal `d` at `d * 20 + dir * 5 + strain`. Filling it
+    // rather than discarding the answers is what DDS is doing in the column
+    // beside us, and a byte store against a millisecond search is free.
+    let table: Vec<AtomicU8> = (0..work.len() * 20).map(|_| AtomicU8::new(0)).collect();
+    let ours = best_of(args.runs, || throughput_ours(&work, threads, &table));
+
+    // The split is only a speed-up if the pieces still add up to the table the
+    // serial path produces. Twenty cells written from five threads is exactly
+    // where an index slip hides, and it would show as a wrong answer rather
+    // than a wrong time -- so re-read the cells the sample above already
+    // agreed on, and require the parallel assembly to reproduce them.
+    for (i, expected) in agreed.iter().enumerate() {
+        let mut cells = [[0u8; 5]; 4];
+        for (dir, row) in cells.iter_mut().enumerate() {
+            for (strain, cell) in row.iter_mut().enumerate() {
+                *cell = table[i * 20 + dir * 5 + strain].load(Ordering::Relaxed);
             }
-        });
-    });
+        }
+        let assembled = encode_ddtricks(&cells);
+        if &assembled != expected {
+            return Err(format!(
+                "deal {i}: solving by (deal, strain) pair did not reproduce the \n\
+                 serial table\n  serial   {expected}\n  parallel {assembled}"
+            ));
+        }
+    }
 
     let mut err = None;
     let dds = best_of(args.runs, || {
@@ -1086,6 +1106,49 @@ fn throughput(args: &ReferenceArgs, threads: usize) -> Result<(), String> {
     let ratio = ours.best.wall_ms / dds.best.wall_ms;
     println!("\nOn {threads} thread(s) we take {ratio:.2}x DDS's wall clock for the same deals.");
     Ok(())
+}
+
+/// One timed pass of this port over the whole work list, filling `table`.
+///
+/// **The unit of parallel work is a (deal, strain) pair, not a deal.** That is
+/// the only thing this function does differently from the obvious loop, and on
+/// a small batch it is the difference between using the machine and waiting on
+/// one board. Twenty-seven deals is twenty-seven items to spread over twelve
+/// threads when deal cost spans roughly tenfold: the run ends when the slowest
+/// deal ends, and threads that finished early sit idle. The same twenty-seven
+/// are 135 pairs, each a fifth the size, and the expensive deal's five strains
+/// now run beside each other instead of one after another. Whole deals scaled
+/// 5.9x on twelve threads against DDS's 7.9x; pairs scale 7.6x. See case 2 of
+/// `bench/comparison/RESULTS.md` for the measurement, before and after.
+///
+/// A strain is the *smallest* honest unit. Its four declarers share reset
+/// caches and a chain of MTD(f) seeds, so splitting further would change the
+/// search rather than merely reschedule it; `TableSolver::solve_strain` is
+/// where that is guaranteed. Between strains nothing is shared -- each thread
+/// solves on its own thread-local `TableSolver`, which resets both caches on
+/// entry exactly as the serial path does at every strain boundary -- so
+/// strains of one deal may run concurrently on different threads.
+#[cfg(feature = "dds-reference")]
+fn throughput_ours(work: &[&Deal], threads: usize, table: &[std::sync::atomic::AtomicU8]) {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let items = work.len() * STRAINS.len();
+    let cursor = AtomicUsize::new(0);
+    std::thread::scope(|scope| {
+        for _ in 0..threads {
+            scope.spawn(|| loop {
+                let i = cursor.fetch_add(1, Ordering::Relaxed);
+                if i >= items {
+                    break;
+                }
+                let (deal, strain) = (i / STRAINS.len(), i % STRAINS.len());
+                let column = solve_dd_strain(work[deal], STRAINS[strain]);
+                for (dir, tricks) in column.iter().enumerate() {
+                    table[deal * 20 + dir * 5 + strain].store(*tricks, Ordering::Relaxed);
+                }
+            });
+        }
+    });
 }
 
 /// Deterministic pseudo-random deals for the throughput measurement.
