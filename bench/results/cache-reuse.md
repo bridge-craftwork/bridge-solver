@@ -149,6 +149,33 @@ none of them grows a cache, so B never pays its tax there. It takes a run of
 *varied* deals to expose it. A benchmark that repeats one workload cannot see a
 cost that only a change of workload creates.
 
+## Confirmed by instruction count, which the clock could not settle
+
+Re-measured after the fact with `solver-bench cost`, which reports instructions
+retired and cycles alongside wall (see `bench/README.md`). Two hundred varied
+random deals, three interleaved rounds a side, on a machine at load average 7:
+
+| | before | after | |
+|---|---|---|---|
+| instructions | 233,590,715,238 | 230,179,229,905 | **-1.46%** |
+| cycles (min) | 84,909,621,173 | 84,622,826,303 | -0.34% |
+| wall (min) | 21,019.6 ms | 20,943.2 ms | -0.36% |
+
+The instruction figure is the one worth having. Its three readings a side do not
+overlap -- 233.59, 233.59, 233.61 against 230.18, 230.20, 230.22 billion -- so
+the reduction in work is not in question. The clock, on that machine, could not
+have settled it: two of the three rounds put the new code *ahead* on cycles,
+and only the minimum favours it. This is the case instruction counting exists
+for.
+
+It also explains the gap between the two corpora above rather than adding to
+it. The saving is a fixed allocation per solve, so it is a large fraction of a
+14 ms board and a small one of a 105 ms average random deal. Removing 1.46% of
+the instructions buys about 0.35% of the time here because what was removed was
+`memset`-shaped work over memory that was already resident -- cheap per
+instruction, which is the same reason `convert_suit` returned -5.94%
+instructions for -1.89% wall.
+
 ## What this does not do
 
 It does not touch `Solver::solve`, `analyse_play`, or `solver-diag`, all of
