@@ -99,18 +99,20 @@ was tried and found worthless, and where the remaining gap is.
 
 ## Performance work
 
-Current standing, single-threaded over those 200 deals, all three measured in
-one sitting on 2026-09-02, best of five interleaved rounds: the reference
-**21,980 ms**, this port **22,420 ms**, DDS 2.9 **20,250 ms**. With identical
-node counts, **1.02x is pure per-node cost** with nothing else mixed in.
+Current standing, single-threaded over those 200 deals, measured 2026-09-02:
+the reference **21,640 ms**, this port **23,090 ms**, DDS 2.9 **20,250 ms**.
+With identical node counts, **1.067x is pure per-node cost** with nothing else
+mixed in.
 
-Charge the reference for the 200 process startups its one-deal-per-process model
-costs it (0.39 s, measured) and the port is 1.04x. Against that, the port's
-figure comes from the node-counting path and the reference's `-S` was off, so
-the two asymmetries pull opposite ways: **the honest range is 1.02x to 1.04x.**
-See "Where the three solvers stand, measured together" in `release-profile.md`
-for the method and for how to rebuild the reference (`75b4619`, which is the
-2026-01-31 state, plus the PBN-to-reference-format conversion).
+**Run both solvers the way you would actually run them.** The reference must be
+built with the PGO its own makefile defaults to, and pointed at a multi-deal
+file so it solves all 200 in one process — its caches are globals that `Reset()`
+without shrinking, so a process per deal makes it re-grow them 200 times and
+costs it 2.2%. Timing it one deal per process against this port's single-process
+run produced a 1.02x that was wrong in our favour. See "Where the three solvers
+stand, measured together" and "The reference was being timed one process per
+deal" in `release-profile.md` for the method, and for how to rebuild the
+reference (`75b4619`, the 2026-01-31 state) and convert deals to its format.
 
 Before optimising, read the "tried and found worthless" list in
 `release-profile.md`. Hoisting the per-node atomics, deleting ~4,000

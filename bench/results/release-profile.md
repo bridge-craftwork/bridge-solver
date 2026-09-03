@@ -943,6 +943,38 @@ aarch64 has no equivalent and takes the loop. DDS, by contrast, has no
 architecture-specific code at all, so the same hardware does nothing for it.
 The asymmetry is entirely on the solver's side, and it is in its favour on x86.
 
+### The reference was being timed one process per deal, and that was wrong
+
+The first pass here ran the reference as `solver -f <deal>` once per deal, 500
+times, and charged it 0.98 s of process startup measured with `-o`. Both halves
+of that were wrong. `-o` prints the deal and exits without solving, so it never
+allocates the caches, and the real cost is larger.
+
+The reference's `common_bounds_cache` and `cutoff_cache` are **globals**, and
+`Solve` calls `Reset()` on them per trump — which clears the entries but keeps
+whatever size `Resize()` has grown them to. So a process that solves many deals
+allocates once and runs every deal after the first with pre-grown tables, while
+a process per deal starts from `bits = 15`/`16` and re-grows every time.
+
+Patching `main` to read a multi-deal hands file — four lines a deal, the format
+it already parses, caches still reset per trump inside `Solve` — gives
+byte-identical tables and is **4.5% faster**: 500 random deals in 55.23 s as 500
+processes against 52.75 s in one. On the 200-deal corpus it is 2.2%.
+
+That matters twice over. It was unfair to the reference, because DDS was
+already being measured in one process by a harness that links it. And it was
+unfair in *our* favour on the headline ratio, since this port also runs all its
+deals in one process. Every reference figure quoted here is now single-process.
+
+**A second asymmetry it exposed, in the reference's favour and still standing.**
+`solve_table_inner` in `src/par.rs` builds `CutoffCache::new(16)` and
+`PatternCache::new(16)` fresh for every strain — five allocations a deal, a
+thousand over the 200-deal corpus — where the reference allocates once for the
+life of the process and resets. Cache size demonstrably does not affect node
+counts here (we hold exact lock-step at 296,689,028 while starting from
+different sizes than the reference), so hoisting those allocations should be
+pure profit. Untried, and the most concrete lead currently open.
+
 **The measurement.** Patching the reference's `ConvertToRelativeSuit` to walk
 the shared mask once for all four seats instead of once per seat — the same
 change this port made, verified to give identical tables on 25 deals — is worth
@@ -969,9 +1001,11 @@ that self time is the per-seat `ClearSuit`/`Add`/shift work that PEXT does not
 touch — which is exactly why the 2.0% patch measurement is the number to trust
 over the profile share.
 
-**So the architecture is a real effect and much too small.** It moves the
-solver-to-DDS ratio here from about 1.00x to about 1.05x. Upstream claims 1.36x.
-Roughly 5 points of a 36-point gap are explained; 30 are not.
+**So the architecture is a real effect and much too small.** It would move the
+solver-to-DDS ratio here from about 1.01x to about 1.06x. Upstream claims 1.36x.
+Roughly 5 points of a 36-point gap are explained by the missing PEXT, another 1
+to 2 by PGO, and the 4.5% process-per-deal error was mine rather than anything
+about the machine. Around 30 points are not explained.
 
 **What has been ruled out as well.** PGO, which upstream's default `make` target
 uses and this comparison originally did not: rebuilding the reference with
@@ -996,14 +1030,15 @@ converted to the reference's format; the conversion round-trips exactly.
 
 | | 500 deals | vs DDS |
 |---|---|---|
-| DDS 2.9 | **52.9–53.3 s** | 1.00x |
-| C++ reference, PGO | **53.8 s** | 1.01x slower |
-| C++ reference, plain `-O3` | 54.2 s | 1.02x slower |
-| this port | 57.0 s | 1.07x slower |
+| C++ reference, PGO, one process | **52.3 s** | **1.01x faster** |
+| DDS 2.9 | 52.9–53.3 s | 1.00x |
+| C++ reference, plain `-O3`, one process | 53.3 s | 1.01x slower |
+| C++ reference, plain `-O3`, 500 processes | 55.2 s | 1.04x slower |
+| this port | 57.1 s | 1.08x slower |
 
-The reference's figures include 500 process startups, measured at 0.98 s with
-`-o`; net of that it is level with DDS rather than 1% behind. Either way it is
-not 1.36x ahead.
+Given every advantage its own build system offers — PGO, and one process
+reading a multi-deal file — the reference edges DDS by about 1%. Upstream
+claims 36%.
 
 ## Where the three solvers stand, measured together
 
@@ -1014,15 +1049,22 @@ together.
 
 | | 200 deals | vs reference | |
 |---|---|---|---|
-| C++ reference | **21.98 s** | 1.000x | `macroxue/bridge-solver` at `75b4619`, `clang++ -std=c++17 -O3` |
-| **this port** | **22.42 s** | **1.020x** | |
-| this port, before `convert_suit` | 23.39 s | 1.064x | |
-| DDS 2.9 | **20.25 s** | 1.085x faster | in-process, STL threading, 1 thread |
+| C++ reference | **21.64 s** | 1.000x | `75b4619`, clang PGO, one process over a multi-deal file |
+| C++ reference, one process per deal | 22.11 s | 0.979x | the same binary, invoked 200 times |
+| **this port** | **23.09 s** | **1.067x** | |
+| DDS 2.9 | **20.25 s** | 1.069x faster | in-process, STL threading, 1 thread |
 
-Node counts are identical between the first two — 296,689,028 either way — so
-the 1.020x is per-node cost with nothing else in it. The `convert_suit` change
-is what moved it from 1.064x, and that is the whole of the movement: nothing
-else about the search changed.
+Node counts are identical between the reference and this port — 296,689,028
+either way — so the 1.067x is per-node cost with nothing else in it.
+
+**This supersedes a 1.020x figure recorded earlier the same day.** That one
+compared this port, which solves all 200 deals in one process, against the
+reference invoked 200 times, and so charged the reference a process startup and
+a cache re-grow per deal that this port never paid. Correcting it, and building
+the reference with the PGO its own makefile defaults to, moves the honest
+number from 1.02x to **1.07x**. The lesson is the ordinary one and it was
+learned the wrong way round here: a ratio between two programs is only a
+measurement when both are run the way you would actually run them.
 
 **Method.** Five interleaved rounds, best of five, alternating within each
 round rather than run in blocks; the machine was not idle, and the ordering is
@@ -1033,13 +1075,12 @@ reference --throughput-pbn` links it in-process so both solvers are timed by
 the same code on the same deals, which is worth more than putting it in the
 same table as an external process.
 
-**Two asymmetries, both small and in opposite directions.** The reference
-solves one deal per process, so its 21.98 s includes 200 process startups —
-measured separately at 0.39 s with `-o`, which solves nothing. Net of that it
-is 21.59 s and the port is 1.038x. Against that, the port's figure is taken
-from the node-counting path, which the reference is not paying for (`-S` was
-off). So the honest range is **1.02x to 1.04x**, and it is not worth pretending
-to more precision than that.
+**One asymmetry left, and it runs against this port.** Its figure is taken from
+the node-counting path, which the reference is not paying for (`-S` was off).
+That flatters the reference slightly, so 1.067x is if anything a mild
+overstatement of the gap. The process-per-deal asymmetry that used to sit here
+has been removed rather than corrected for: see "The reference was being timed
+one process per deal" below.
 
 **Reproducing the reference.** `solver.cc` was untouched upstream from
 2025-09-01 to 2026-01-31, so `75b4619` *is* the 2026-01-31 state this port
