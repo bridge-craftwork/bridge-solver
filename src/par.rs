@@ -13,6 +13,7 @@
 use crate::{direction_to_seat, get_node_count, CutoffCache, Hands, PatternCache, Solver};
 use crate::{CLUB, DIAMOND, HEART, NOTRUMP, SPADE};
 use bridge_types::{Contract, Deal, Direction, Doubled, Strain};
+use std::cell::Cell;
 
 /// Max DD tricks per seat × strain. Seat order N,E,S,W and strain order
 /// C,D,H,S,NT (bridge-types enum order).
@@ -68,7 +69,7 @@ impl DdTricks {
 
 /// Solve the full 20-entry DD table for a complete deal.
 pub fn solve_dd_table(deal: &Deal) -> DdTricks {
-    solve_dd_table_with_nodes(deal).0
+    with_shared(|s| s.solve(deal))
 }
 
 /// Solve the full table, and report how many nodes it took.
@@ -79,9 +80,7 @@ pub fn solve_dd_table(deal: &Deal) -> DdTricks {
 /// reference is only meaningful if the count covers exactly the work the
 /// timing covers, cache reuse and MTD(f) seeding included.
 pub fn solve_dd_table_with_nodes(deal: &Deal) -> (DdTricks, u64) {
-    let mut nodes = 0;
-    let tricks = solve_table_inner(deal, |_, _, n| nodes += n);
-    (tricks, nodes)
+    with_shared(|s| s.solve_with_nodes(deal))
 }
 
 /// Solve the full table, reporting each cell's nodes as it is finished.
@@ -89,45 +88,150 @@ pub fn solve_dd_table_with_nodes(deal: &Deal) -> (DdTricks, u64) {
 /// For localising a divergence against the C++ reference: a whole-table count
 /// says the trees differ, a per-cell one says *which* search to trace.
 pub fn solve_dd_table_cells(deal: &Deal) -> (DdTricks, Vec<(Strain, Direction, u64)>) {
-    let mut cells = Vec::with_capacity(20);
-    let tricks = solve_table_inner(deal, |s, d, n| cells.push((s, d, n)));
-    (tricks, cells)
+    with_shared(|s| s.solve_cells(deal))
 }
 
-/// The one table-solving loop. `on_cell` sees each cell's node count; passing a
-/// closure that ignores it compiles the reporting away entirely, so
-/// [`solve_dd_table`] pays nothing for the instrumentation.
-fn solve_table_inner(deal: &Deal, mut on_cell: impl FnMut(Strain, Direction, u64)) -> DdTricks {
-    let hands = Hands::from_deal(deal);
-    let total = hands.num_tricks() as u8;
-    let mut tricks = [[0u8; 5]; 4];
-    for strain in STRAINS {
-        let trump = strain_trump(strain);
-        let mut cutoff = CutoffCache::new(16);
-        let mut pattern = PatternCache::new(16);
-        // The four declarers in a strain give similar counts, so each cell
-        // seeds the next one's MTD(f) search. The seed cannot change an
-        // answer, only how many iterations reaching it takes.
-        let mut seed: Option<usize> = None;
-        for dir in DIRECTIONS {
-            let seat = direction_to_seat(dir);
-            let leader = (seat + 1) % 4;
-            let solver = Solver::new(hands, trump, leader);
-            let ns = match seed {
-                Some(g) => solver.solve_with_caches_seeded(&mut cutoff, &mut pattern, g),
-                None => solver.solve_with_caches(&mut cutoff, &mut pattern),
-            };
-            on_cell(strain, dir, get_node_count());
-            seed = Some(Solver::seed_from(ns));
-            let declarer_tricks = if matches!(dir, Direction::North | Direction::South) {
-                ns
-            } else {
-                total - ns
-            };
-            tricks[dir_index(dir)][strain_index(strain)] = declarer_tricks;
+/// The size both caches start at, in bits. The reference starts its
+/// `cutoff_cache` at 16 and its `common_bounds_cache` at 15; both grow on
+/// demand, and the starting size is not something the search can see.
+const CACHE_BITS: usize = 16;
+
+/// Reusable storage for solving tables.
+///
+/// The two caches a table solve needs are the solver's whole memory footprint,
+/// and building them is not free: `CutoffCache::new(16)` alone is a megabyte,
+/// and both then double their way up to whatever the deal wants. Solving each
+/// strain with a fresh pair means five of those a deal -- a thousand over the
+/// 200-deal lock-step corpus -- and throws away the grown capacity every time.
+///
+/// The C++ reference does not. Its `common_bounds_cache` and `cutoff_cache`
+/// are process globals, and `Solve` only calls `Reset()` on them per trump, so
+/// it allocates once for the life of the process. Timing it the way it is
+/// actually run rather than one process per deal is worth 4.5% to it over 500
+/// random deals; part of that is exactly this. See
+/// `bench/results/release-profile.md`.
+///
+/// So: one pair, reset between strains. Holding a `TableSolver` across deals
+/// is the point -- the free functions in this module do it through a
+/// thread-local -- but the storage it keeps is the peak of the hardest deal it
+/// has seen, which for a freakish distribution is large. A long-lived thread
+/// that wants that back calls [`crate::drain_pool`].
+pub struct TableSolver {
+    cutoff: CutoffCache,
+    pattern: PatternCache,
+}
+
+impl Default for TableSolver {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl TableSolver {
+    /// Storage for one thread's solves, at the size the reference starts at.
+    pub fn new() -> Self {
+        TableSolver {
+            cutoff: CutoffCache::new(CACHE_BITS),
+            pattern: PatternCache::new(CACHE_BITS),
         }
     }
-    DdTricks { tricks }
+
+    /// Solve the full 20-entry DD table for a complete deal.
+    pub fn solve(&mut self, deal: &Deal) -> DdTricks {
+        self.solve_inner(deal, |_, _, _| {})
+    }
+
+    /// Solve the full table, and report how many nodes it took.
+    pub fn solve_with_nodes(&mut self, deal: &Deal) -> (DdTricks, u64) {
+        let mut nodes = 0;
+        let tricks = self.solve_inner(deal, |_, _, n| nodes += n);
+        (tricks, nodes)
+    }
+
+    /// Solve the full table, reporting each cell's nodes as it is finished.
+    pub fn solve_cells(&mut self, deal: &Deal) -> (DdTricks, Vec<(Strain, Direction, u64)>) {
+        let mut cells = Vec::with_capacity(20);
+        let tricks = self.solve_inner(deal, |s, d, n| cells.push((s, d, n)));
+        (tricks, cells)
+    }
+
+    /// The one table-solving loop. `on_cell` sees each cell's node count;
+    /// passing a closure that ignores it compiles the reporting away entirely,
+    /// so [`Self::solve`] pays nothing for the instrumentation.
+    fn solve_inner(
+        &mut self,
+        deal: &Deal,
+        mut on_cell: impl FnMut(Strain, Direction, u64),
+    ) -> DdTricks {
+        let hands = Hands::from_deal(deal);
+        let total = hands.num_tricks() as u8;
+        let mut tricks = [[0u8; 5]; 4];
+        for strain in STRAINS {
+            let trump = strain_trump(strain);
+            // Per strain, as the reference resets per trump. The entries go
+            // and the capacity stays, which is the whole point; see
+            // `CutoffCache::reset` for why the size cannot reach the answers.
+            self.cutoff.reset();
+            self.pattern.reset();
+            // The four declarers in a strain give similar counts, so each cell
+            // seeds the next one's MTD(f) search. The seed cannot change an
+            // answer, only how many iterations reaching it takes.
+            let mut seed: Option<usize> = None;
+            for dir in DIRECTIONS {
+                let seat = direction_to_seat(dir);
+                let leader = (seat + 1) % 4;
+                let solver = Solver::new(hands, trump, leader);
+                let ns = match seed {
+                    Some(g) => {
+                        solver.solve_with_caches_seeded(&mut self.cutoff, &mut self.pattern, g)
+                    }
+                    None => solver.solve_with_caches(&mut self.cutoff, &mut self.pattern),
+                };
+                on_cell(strain, dir, get_node_count());
+                seed = Some(Solver::seed_from(ns));
+                let declarer_tricks = if matches!(dir, Direction::North | Direction::South) {
+                    ns
+                } else {
+                    total - ns
+                };
+                tricks[dir_index(dir)][strain_index(strain)] = declarer_tricks;
+            }
+        }
+        DdTricks { tricks }
+    }
+}
+
+thread_local! {
+    /// The [`TableSolver`] the free functions in this module share, so that a
+    /// caller solving deal after deal allocates once without having to thread
+    /// a context through. Per-thread because a `TableSolver` is exclusive
+    /// storage, and `None` while a solve is using it.
+    static SHARED: Cell<Option<Box<TableSolver>>> = const { Cell::new(None) };
+}
+
+/// Run `f` against this thread's shared [`TableSolver`].
+///
+/// Taken out of the cell for the duration rather than borrowed, so that a
+/// re-entrant call gets storage of its own instead of a panic, and an unwind
+/// out of `f` leaves the cell empty rather than poisoned -- the next call
+/// simply builds a fresh one.
+fn with_shared<R>(f: impl FnOnce(&mut TableSolver) -> R) -> R {
+    let mut solver = SHARED
+        .with(|cell| cell.take())
+        .unwrap_or_else(|| Box::new(TableSolver::new()));
+    let out = f(&mut solver);
+    SHARED.with(|cell| cell.set(Some(solver)));
+    out
+}
+
+/// Drop this thread's shared [`TableSolver`], returning its pattern-tree blocks
+/// to the pool.
+///
+/// Called by [`crate::drain_pool`], which cannot do what it promises without
+/// it: the blocks a retained cache holds are live, so draining the pool around
+/// them would free everything except the peak that actually matters.
+pub(crate) fn release_shared() {
+    SHARED.with(|cell| cell.set(None));
 }
 
 fn strain_trump(strain: Strain) -> usize {

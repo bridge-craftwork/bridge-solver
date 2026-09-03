@@ -354,6 +354,9 @@ impl ShapeEntry {
 pub struct PatternCache {
     entries: Box<[ShapeEntry]>,
     bits: usize,
+    /// The size this cache was built at, and the floor [`Self::reset`] shrinks
+    /// back to; see [`crate::search::CutoffCache::reset`].
+    base_bits: usize,
     probe_distance: usize,
     load_count: usize,
 }
@@ -368,9 +371,62 @@ impl PatternCache {
         PatternCache {
             entries: entries.into_boxed_slice(),
             bits,
+            base_bits: bits,
             probe_distance: 0,
             load_count: 0,
         }
+    }
+
+    /// Empty the cache, ready for the next search, without giving up the
+    /// allocation.
+    ///
+    /// The counterpart of [`crate::search::CutoffCache::reset`], and reset for
+    /// the same reason and on the same terms: the reference's
+    /// `common_bounds_cache` is a global that `Solve` only clears per trump.
+    /// See that method for why the size cannot reach the answers -- this table
+    /// never evicts either -- and for why the capacity is kept only as far as
+    /// the last search justified it.
+    ///
+    /// The in-place scan skips slots whose hash is zero. That is not an
+    /// approximation: a zero hash already reads as empty everywhere, since
+    /// [`Self::lookup`] stops at one and [`Self::get_or_create`] overwrites it
+    /// before handing it back. So an untouched slot needs nothing done to it,
+    /// and clearing costs one read per slot rather than a rewritten pattern
+    /// tree.
+    pub fn reset(&mut self) {
+        let bits = self.bits_for(self.load_count);
+        if bits == self.bits {
+            for entry in self.entries.iter_mut() {
+                if entry.hash != 0 {
+                    entry.reset(0);
+                }
+            }
+        } else {
+            // Dropping the old table hands its pattern-tree blocks back to the
+            // pool, so the shrink costs the allocator one table and nothing
+            // else.
+            let size = 1 << bits;
+            let mut entries = Vec::with_capacity(size);
+            for _ in 0..size {
+                entries.push(ShapeEntry::default());
+            }
+            self.entries = entries.into_boxed_slice();
+            self.bits = bits;
+        }
+        self.probe_distance = 0;
+        self.load_count = 0;
+    }
+
+    /// The smallest table, never below the size this cache was built at, that
+    /// holds `load` entries without tripping the resize in
+    /// [`Self::get_or_create`]. The threshold is written the way that method
+    /// writes it so the two cannot drift apart.
+    fn bits_for(&self, load: usize) -> usize {
+        let mut bits = self.base_bits;
+        while load >= (1usize << bits) / 4 * 3 {
+            bits += 1;
+        }
+        bits
     }
 
     /// Hash function matching C++ Cache template

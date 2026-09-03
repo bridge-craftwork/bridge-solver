@@ -58,10 +58,22 @@ struct CutoffEntry {
     card: [u8; 4],
 }
 
+impl CutoffEntry {
+    /// A slot holding nothing: zero hash, and no card for any seat.
+    const EMPTY: CutoffEntry = CutoffEntry {
+        hash: 0,
+        card: [255; 4],
+    };
+}
+
 /// Cutoff cache with linear probing (matching C++ Cache behavior)
 pub struct CutoffCache {
     entries: Box<[CutoffEntry]>,
     bits: usize,
+    /// The size this cache was built at, and the floor [`Self::reset`] shrinks
+    /// back to. A table that grew for one hard strain must not charge every
+    /// easy strain after it for the space.
+    base_bits: usize,
     probe_distance: usize,
     load_count: usize,
 }
@@ -97,16 +109,59 @@ impl CutoffCache {
 
     pub fn new(bits: usize) -> Self {
         let size = 1 << bits;
-        let default_entry = CutoffEntry {
-            hash: 0,
-            card: [255, 255, 255, 255],
-        };
         CutoffCache {
-            entries: vec![default_entry; size].into_boxed_slice(),
+            entries: vec![CutoffEntry::EMPTY; size].into_boxed_slice(),
             bits,
+            base_bits: bits,
             probe_distance: 0,
             load_count: 0,
         }
+    }
+
+    /// Empty the cache, ready for the next search, without giving up the
+    /// allocation.
+    ///
+    /// The C++ reference's `cutoff_cache` is a process global that `Solve`
+    /// only calls `Reset()` on, per trump: the entries go, the capacity
+    /// stays. That is what lets `par::TableSolver` hold one cache for the life
+    /// of a run instead of building five a deal.
+    ///
+    /// Keeping the capacity cannot change what the search finds. Entries are
+    /// never evicted -- a full table doubles rather than replacing anything --
+    /// and probing stops at the first empty slot, which insertion never skips
+    /// over. So a lookup hits exactly when the key was stored, whatever the
+    /// table's size, and the size only decides how often `resize` runs.
+    ///
+    /// **Capacity is kept only as far as the last search justified it.**
+    /// Keeping it unconditionally, as the reference does, is a bad trade here
+    /// and was measured to be one: over the 200-deal lock-step corpus 99% of
+    /// strains never grow past the base size, but a handful that do leave the
+    /// table at four times it, and every later strain then pays to clear four
+    /// megabytes it will use one of. Sizing to the load just seen keeps the
+    /// in-place clear for the overwhelmingly common case and re-grows for a
+    /// run of genuinely hard deals, at one allocation per change of size.
+    pub fn reset(&mut self) {
+        let bits = self.bits_for(self.load_count);
+        if bits == self.bits {
+            self.entries.fill(CutoffEntry::EMPTY);
+        } else {
+            self.entries = vec![CutoffEntry::EMPTY; 1 << bits].into_boxed_slice();
+            self.bits = bits;
+        }
+        self.probe_distance = 0;
+        self.load_count = 0;
+    }
+
+    /// The smallest table, never below the size this cache was built at, that
+    /// holds `load` entries without tripping the resize in [`Self::store`].
+    /// The threshold is written the way `store` writes it so the two cannot
+    /// drift apart.
+    fn bits_for(&self, load: usize) -> usize {
+        let mut bits = self.base_bits;
+        while load >= (1usize << bits) * 3 / 4 {
+            bits += 1;
+        }
+        bits
     }
 
     #[inline]
@@ -176,11 +231,7 @@ impl CutoffCache {
         let old_entries = std::mem::take(&mut self.entries);
         let new_bits = self.bits + 1;
         let new_size = 1 << new_bits;
-        let default_entry = CutoffEntry {
-            hash: 0,
-            card: [255, 255, 255, 255],
-        };
-        self.entries = vec![default_entry; new_size].into_boxed_slice();
+        self.entries = vec![CutoffEntry::EMPTY; new_size].into_boxed_slice();
         self.bits = new_bits;
         self.probe_distance = 0;
         self.load_count = 0;

@@ -64,6 +64,11 @@ thread_local! {
 /// The call itself is safe: only blocks already returned to the pool are freed,
 /// and live [`PatternVec`]s hold theirs. It is sound to call at any time.
 pub fn drain_pool() {
+    // A retained table cache holds live blocks, and live blocks are exactly
+    // the ones a drain cannot touch. Dropping this thread's shared
+    // `TableSolver` first returns them, so what follows frees the peak rather
+    // than everything around it.
+    crate::par::release_shared();
     POOL.with(|pool| {
         let mut pool = pool.borrow_mut();
         for (class, list) in pool.iter_mut().enumerate() {
@@ -123,7 +128,15 @@ fn pool_alloc(class: usize) -> *mut Pattern {
 
 /// Give a block back. It is not freed, only made available again.
 fn pool_free(block: *mut Pattern, class: usize) {
-    POOL.with(|pool| pool.borrow_mut()[class].push(block));
+    // `try_with` rather than `with`, because this runs from `Drop` and one of
+    // the trees reaching it is the thread's shared `TableSolver`, whose
+    // thread-local is registered before the pool's and so torn down after it.
+    // On that last pass the pool is already gone and the block is dropped on
+    // the floor -- which is what happens to every pooled block at thread exit
+    // anyway, since the free lists hold raw pointers and free nothing when
+    // they drop. `with` would panic here, and a panic in a destructor during
+    // cleanup aborts the process.
+    let _ = POOL.try_with(|pool| pool.borrow_mut()[class].push(block));
 }
 
 /// `log2` of the capacity needed to hold `n`, rounded up, minimum one element.

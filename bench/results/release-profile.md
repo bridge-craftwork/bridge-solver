@@ -966,14 +966,18 @@ already being measured in one process by a harness that links it. And it was
 unfair in *our* favour on the headline ratio, since this port also runs all its
 deals in one process. Every reference figure quoted here is now single-process.
 
-**A second asymmetry it exposed, in the reference's favour and still standing.**
-`solve_table_inner` in `src/par.rs` builds `CutoffCache::new(16)` and
+**A second asymmetry it exposed, in the reference's favour. Now closed.**
+`solve_table_inner` in `src/par.rs` built `CutoffCache::new(16)` and
 `PatternCache::new(16)` fresh for every strain — five allocations a deal, a
 thousand over the 200-deal corpus — where the reference allocates once for the
 life of the process and resets. Cache size demonstrably does not affect node
 counts here (we hold exact lock-step at 296,689,028 while starting from
-different sizes than the reference), so hoisting those allocations should be
-pure profit. Untried, and the most concrete lead currently open.
+different sizes than the reference), so hoisting those allocations was expected
+to be pure profit. It largely is, and it came with one correction to the reading
+above: keeping the grown capacity *unconditionally*, the way the reference does,
+is a bad trade on a run of mixed deals, because over 99% of strains never grow
+past the base size and the few that do leave every later strain clearing a table
+four times the one it needs. See `cache-reuse.md`.
 
 **The measurement.** Patching the reference's `ConvertToRelativeSuit` to walk
 the shared mask once for all four seats instead of once per seat — the same
