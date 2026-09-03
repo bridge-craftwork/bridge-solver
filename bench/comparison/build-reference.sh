@@ -24,7 +24,12 @@ cp "$SRC/solver.cc" "$work/latency.cc"
 patch -s -p1 "$work/latency.cc" < "$PATCH"
 
 build_pgo() {  # build_pgo <source> <output name>
-  local src=$1 name=$2 prof="$work/prof-$name"
+  # Separate `local` statements: bash declares every name in one `local` before
+  # assigning any of them, so referring to `$name` in the same statement reads
+  # an unset variable, which `set -u` then makes fatal.
+  local src=$1
+  local name=$2
+  local prof="$work/prof-$name"
   rm -rf "$prof"; mkdir -p "$prof"
   clang++ -std=c++17 -O3 -fprofile-generate="$prof" -o "$work/$name.pgen" "$src"
   # The training run its makefile uses. Output discarded; we want the profile.
