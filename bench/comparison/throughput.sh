@@ -59,7 +59,11 @@ for t in $THREADS; do
   python3 - "$t" "$o" "$d" "$r" "$NDEALS" <<'PY'
 import sys
 t, o, d, r, n = sys.argv[1], *map(float, sys.argv[2:5]), int(sys.argv[5])
+# Ratios of throughput, not of time, so they read the same direction as the
+# columns beside them: above 1.00 is faster than DDS. Printing a time ratio
+# next to a deals-per-second column invites reading 1.24x as a win when it is
+# the opposite, which is exactly what happened the first time these were read.
 print(f"{t:<8} {n/(o/1000):10.1f} {n/(d/1000):10.1f} {n/(r/1000):10.1f}"
-      f"   ours {o/d:.3f}x dds, ref {r/d:.3f}x dds")
+      f"   vs dds: ours {d/o:.2f}x, ref {d/r:.2f}x")
 PY
 done
