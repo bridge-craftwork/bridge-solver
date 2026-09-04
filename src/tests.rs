@@ -1039,7 +1039,7 @@ fn test_hands_parsing() {
 /// what else the machine is doing, and a speedup threshold would be flaky.
 #[cfg(test)]
 mod concurrency {
-    use crate::{get_node_count, solve_dd_table};
+    use crate::{get_node_count, solve_dd_strain, solve_dd_table, STRAINS};
     use bridge_types::Deal;
 
     const DEALS: &[&str] = &[
@@ -1083,6 +1083,50 @@ mod concurrency {
         for _ in 0..2 {
             assert_eq!(first, solve_all_concurrently(&deals));
         }
+    }
+
+    /// A table may be solved as five independent (deal, strain) work items
+    /// rather than as one deal, which is what lets a small batch keep every
+    /// thread busy -- `throughput_ours` in the benchmark harness does exactly
+    /// this. It rests on a strain owning its cache state and its whole MTD(f)
+    /// seed chain, and if that ever stops holding the symptom is a wrong table
+    /// rather than a slow one. So: gather every cell from `solve_dd_strain`
+    /// with all five strains of every deal in flight at once, and require it
+    /// to rebuild what `solve_dd_table` produces serially.
+    #[test]
+    fn per_strain_solves_rebuild_the_serial_table() {
+        let deals = deals();
+        let serial: Vec<_> = deals.iter().map(|d| solve_dd_table(d).tricks).collect();
+
+        let split: Vec<[[u8; 5]; 4]> = std::thread::scope(|scope| {
+            // Every handle is spawned before any is joined, so the strains of
+            // one deal really do overlap -- the case solving a deal per thread
+            // could never produce.
+            let spawned: Vec<Vec<_>> = deals
+                .iter()
+                .map(|deal| {
+                    STRAINS
+                        .iter()
+                        .map(|&strain| scope.spawn(move || solve_dd_strain(deal, strain)))
+                        .collect()
+                })
+                .collect();
+            spawned
+                .into_iter()
+                .map(|columns| {
+                    let mut tricks = [[0u8; 5]; 4];
+                    for (strain, handle) in columns.into_iter().enumerate() {
+                        let column = handle.join().expect("solver thread panicked");
+                        for (dir, row) in tricks.iter_mut().enumerate() {
+                            row[strain] = column[dir];
+                        }
+                    }
+                    tricks
+                })
+                .collect()
+        });
+
+        assert_eq!(serial, split);
     }
 
     /// The node count reports this thread's own last solve. It used to be a

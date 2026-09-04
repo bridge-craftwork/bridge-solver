@@ -21,6 +21,15 @@ steps are GCC-shaped (`-fprofile-generate`, then `mv solver.p-solver.gcda`), so
 on macOS they are done with the clang equivalents — `-fprofile-generate=DIR`,
 `llvm-profdata merge`, `-fprofile-use=` — training on the same deal.
 
+This port is *not* built with PGO, which leaves the comparison asymmetric on
+paper. Both sides of that have been measured, so the size of it is known: PGO
+is worth about 1% to the reference and 1.7% to this port. Building both with it
+would move the tables by about a point and reorder nothing. It is left off here
+because this port ships as a crate whose users get plain `cargo build
+--release`, and a table quoting a build they cannot get is the same error this
+section refuses to make about the reference. `bench/results/release-profile.md`
+has the measurement and the reasoning.
+
 DDS is the reference point in every table because it is the one everybody
 already has.
 

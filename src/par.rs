@@ -22,7 +22,9 @@ pub struct DdTricks {
     pub tricks: [[u8; 5]; 4],
 }
 
-const STRAINS: [Strain; 5] = [
+/// The five strains, in the column order of [`DdTricks::tricks`]'s second
+/// axis. A caller splitting a table into per-strain work items indexes this.
+pub const STRAINS: [Strain; 5] = [
     Strain::Clubs,
     Strain::Diamonds,
     Strain::Hearts,
@@ -91,6 +93,21 @@ pub fn solve_dd_table_cells(deal: &Deal) -> (DdTricks, Vec<(Strain, Direction, u
     with_shared(|s| s.solve_cells(deal))
 }
 
+/// Solve one strain of a deal on this thread's shared [`TableSolver`].
+///
+/// The parallel counterpart to [`solve_dd_table`]: five of these fill the same
+/// table as one of those, and a caller with more deals than it has patience
+/// can spread the (deal, strain) pairs over threads rather than the deals. On
+/// a small batch that is the difference between keeping every thread busy and
+/// waiting on the last deal -- 27 boards are 27 work items but 135 pairs, and
+/// deal cost spans roughly tenfold. See `bench/comparison/RESULTS.md`, case 2.
+///
+/// Returns tricks indexed N, E, S, W; the column belongs at
+/// `DdTricks::tricks[dir][i]` for the `i` at which [`STRAINS`] holds `strain`.
+pub fn solve_dd_strain(deal: &Deal, strain: Strain) -> [u8; 4] {
+    with_shared(|s| s.solve_strain(deal, strain))
+}
+
 /// The size both caches start at, in bits. The reference starts its
 /// `cutoff_cache` at 16 and its `common_bounds_cache` at 15; both grow on
 /// demand, and the starting size is not something the search can see.
@@ -155,6 +172,27 @@ impl TableSolver {
         (tricks, cells)
     }
 
+    /// Solve one strain of a deal: the four declarers' tricks in that strain,
+    /// indexed N, E, S, W -- the first axis of [`DdTricks::tricks`].
+    ///
+    /// This is the smallest self-contained piece of a table, and so the unit a
+    /// parallel caller should hand to a thread. A strain owns its cache state
+    /// -- both caches are reset here, as the reference resets per trump -- and
+    /// the MTD(f) seed chain runs from the first of its four declarers to the
+    /// last, so those four cells have to stay together. Nothing crosses a
+    /// strain boundary, so the five strains of a deal may be solved
+    /// concurrently, each on its own `TableSolver`, and
+    /// [`Self::solve`] is exactly the five of them in [`STRAINS`] order.
+    ///
+    /// Re-deriving [`Hands`] per strain rather than once per deal is the whole
+    /// cost of the split: a bitmask fill against a search measured in
+    /// milliseconds.
+    pub fn solve_strain(&mut self, deal: &Deal, strain: Strain) -> [u8; 4] {
+        let hands = Hands::from_deal(deal);
+        let total = hands.num_tricks() as u8;
+        self.solve_strain_inner(hands, total, strain, |_, _, _| {})
+    }
+
     /// The one table-solving loop. `on_cell` sees each cell's node count;
     /// passing a closure that ignores it compiles the reporting away entirely,
     /// so [`Self::solve`] pays nothing for the instrumentation.
@@ -167,37 +205,56 @@ impl TableSolver {
         let total = hands.num_tricks() as u8;
         let mut tricks = [[0u8; 5]; 4];
         for strain in STRAINS {
-            let trump = strain_trump(strain);
-            // Per strain, as the reference resets per trump. The entries go
-            // and the capacity stays, which is the whole point; see
-            // `CutoffCache::reset` for why the size cannot reach the answers.
-            self.cutoff.reset();
-            self.pattern.reset();
-            // The four declarers in a strain give similar counts, so each cell
-            // seeds the next one's MTD(f) search. The seed cannot change an
-            // answer, only how many iterations reaching it takes.
-            let mut seed: Option<usize> = None;
-            for dir in DIRECTIONS {
-                let seat = direction_to_seat(dir);
-                let leader = (seat + 1) % 4;
-                let solver = Solver::new(hands, trump, leader);
-                let ns = match seed {
-                    Some(g) => {
-                        solver.solve_with_caches_seeded(&mut self.cutoff, &mut self.pattern, g)
-                    }
-                    None => solver.solve_with_caches(&mut self.cutoff, &mut self.pattern),
-                };
-                on_cell(strain, dir, get_node_count());
-                seed = Some(Solver::seed_from(ns));
-                let declarer_tricks = if matches!(dir, Direction::North | Direction::South) {
-                    ns
-                } else {
-                    total - ns
-                };
-                tricks[dir_index(dir)][strain_index(strain)] = declarer_tricks;
+            let column = self.solve_strain_inner(hands, total, strain, &mut on_cell);
+            // Both are indexed by `dir_index`, so the column drops straight in.
+            for (row, cell) in tricks.iter_mut().zip(column) {
+                row[strain_index(strain)] = cell;
             }
         }
         DdTricks { tricks }
+    }
+
+    /// One strain's four cells, solved in `DIRECTIONS` order into a column
+    /// indexed by `dir_index`. The single implementation behind both
+    /// [`Self::solve`] and [`Self::solve_strain`], so that splitting a table
+    /// across threads cannot quietly become a different search from solving it
+    /// in one.
+    fn solve_strain_inner(
+        &mut self,
+        hands: Hands,
+        total: u8,
+        strain: Strain,
+        mut on_cell: impl FnMut(Strain, Direction, u64),
+    ) -> [u8; 4] {
+        let trump = strain_trump(strain);
+        // Per strain, as the reference resets per trump. The entries go
+        // and the capacity stays, which is the whole point; see
+        // `CutoffCache::reset` for why the size cannot reach the answers.
+        self.cutoff.reset();
+        self.pattern.reset();
+        // The four declarers in a strain give similar counts, so each cell
+        // seeds the next one's MTD(f) search. The seed cannot change an
+        // answer, only how many iterations reaching it takes.
+        let mut seed: Option<usize> = None;
+        let mut column = [0u8; 4];
+        for dir in DIRECTIONS {
+            let seat = direction_to_seat(dir);
+            let leader = (seat + 1) % 4;
+            let solver = Solver::new(hands, trump, leader);
+            let ns = match seed {
+                Some(g) => solver.solve_with_caches_seeded(&mut self.cutoff, &mut self.pattern, g),
+                None => solver.solve_with_caches(&mut self.cutoff, &mut self.pattern),
+            };
+            on_cell(strain, dir, get_node_count());
+            seed = Some(Solver::seed_from(ns));
+            let declarer_tricks = if matches!(dir, Direction::North | Direction::South) {
+                ns
+            } else {
+                total - ns
+            };
+            column[dir_index(dir)] = declarer_tricks;
+        }
+        column
     }
 }
 

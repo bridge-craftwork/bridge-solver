@@ -47,8 +47,8 @@ pub use cards::Cards;
 pub use convert::{direction_to_seat, seat_to_direction};
 pub use hands::Hands;
 pub use par::{
-    par, solve_dd_table, solve_dd_table_cells, solve_dd_table_with_nodes, DdTricks, ParContract,
-    ParResult, Side, TableSolver,
+    par, solve_dd_strain, solve_dd_table, solve_dd_table_cells, solve_dd_table_with_nodes,
+    DdTricks, ParContract, ParResult, Side, TableSolver, STRAINS,
 };
 pub use pattern::{type_sizes, PatternCache};
 pub use pattern_vec::drain_pool;

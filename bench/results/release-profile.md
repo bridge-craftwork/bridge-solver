@@ -1186,6 +1186,85 @@ Already clean, and worth not re-checking: there is **no per-node allocation**
 `PartialTrick`'s `Vec` is construction-only) and **no `HashMap`** —
 `CutoffCache` is a hand-rolled open-addressed table with linear probing.
 
+## PGO on this port: 7.5% of the instructions, 1.7% of the time
+
+Measured 2026-09-04, M4 Pro, rustc 1.96.0. Left undone until now because the
+comparison in `bench/comparison/RESULTS.md` builds the C++ reference with the
+PGO its makefile defaults to and this port with plain `cargo build --release`,
+which is an asymmetry the document admits but never quantified.
+
+Two-stage build, entirely conventional:
+
+```bash
+RUSTFLAGS="-Cprofile-generate=$PROF" cargo build --release --features bench --bin solver-bench
+$BIN nodes train/deals.pbn                     # 150 random deals, seed 777001
+llvm-profdata merge -o merged.profdata "$PROF"/*.profraw
+RUSTFLAGS="-Cprofile-use=$PWD/merged.profdata" cargo build --release ...
+```
+
+`llvm-profdata` must be the one from `rustup component add llvm-tools-preview`
+(here LLVM 22.1.2-rust-1.96.0), not Homebrew's or Xcode's -- the profile format
+is versioned against rustc's LLVM. The training deals are from a seed nothing
+else in this repo uses, so the profile is not fitted to the boards it is then
+scored on.
+
+**It changes no answers.** Both binaries report 296,689,028 nodes on
+`lockstep-200.pbn` and 439,977,777 on the 300-deal scoring corpus. PGO is
+codegen only; it cannot reach the search, which is why this experiment was safe
+to run against the lock-step invariants rather than around them.
+
+| | plain | PGO | |
+|---|---|---|---|
+| instructions, 300 deals | 379.96 G | 351.45 G | **-7.50%** |
+| cycles per node | 313.91 | 310.11 | **-1.21%** |
+| wall, 300 deals | 34,084 ms | 33,726 ms | -1.05% |
+| wall, curated corpus, geomean | | | **-1.69%** |
+| IPC | 2.65 | 2.50 | |
+
+Best of five interleaved rounds for the first three, and for the last, four
+interleaved `run --no-sweep --runs 5` rounds over the ten curated boards. That
+row is the trustworthy one: **all ten boards improved**, in a band from -3.9% to
+-0.1%. The instruction figure is trustworthy in a different way -- five rounds
+spread 0.06%, because it is a property of the code.
+
+**The instruction count overstates the win by more than fourfold, and that is
+the finding.** PGO deleted 7.5% of the instructions retired and bought 1.7% of
+the time, because IPC fell from 2.65 to 2.50: what it removed was cheap work the
+machine was already doing in parallel with something else. This is the same
+shape as the `convert_suit` change (-5.94% instructions, -1.89% wall) and more
+extreme -- 4.4x overstatement against that one's 3.1x.
+
+Read the other way, it is a statement about where the remaining per-node cost
+lives: **this search is not front-end bound.** Better branch layout, better
+inlining and hot/cold splitting -- everything PGO has to offer -- are worth
+under two points here, so the residue against the C++ reference is not going to
+be found in instruction count or code layout. That is worth knowing before the
+next attempt at it, and it is consistent with `## Where the per-node time
+actually goes`.
+
+**Declined, on a threshold set before the numbers were in.** Under 3% was to be
+dropped; 5% or more was to be productionised as an opt-in build path. It landed
+at 1.7%, and the costs are not nominal:
+
+* **It would describe a binary this crate's users never build.** `dealer3` and
+  `bridge-wrangler` get whatever `cargo build --release` gives them. Reporting a
+  PGO number in `RESULTS.md` would be exactly the error `METHODOLOGY.md` refuses
+  to make about the reference, inverted -- and fixing that means a supported
+  `--pgo` path, a regenerable profile and documentation, not a benchmark flag.
+* **It would blunt `solver-bench cost`, which the rest of this document runs
+  on.** Instruction counts are trustworthy to 0.015% here, and that is what
+  makes small changes attributable at all. Under PGO an unrelated edit shifts
+  which code is hot, the profile fits worse, and a phantom regression appears
+  that has nothing to do with the change. Retraining per A/B is the fix and it
+  is not free.
+* **CI carries it forever after.** Either a checked-in `.profdata` that goes
+  quietly stale, or a doubled build.
+
+For the record on the other side of the comparison: PGO on the C++ reference
+measured about 1% and nothing on best-of (21.24 s plain, 21.27 s PGO, above).
+So the build asymmetry in `RESULTS.md` is worth roughly a point in the
+reference's favour, not the seven that separate us.
+
 ## Still open
 
 - **The per-board spread** against DDS, above: 0.73x to 1.76x on the curated
@@ -1201,9 +1280,8 @@ Already clean, and worth not re-checking: there is **no per-node allocation**
 - **`panic = "abort"`** was not tried. It would remove the unwind landing pads
   behind those checks, but it changes `cargo test` semantics and needs its own
   profile.
-- **PGO** was considered and declined: real gains are plausible on a search this
-  branchy, but the two-stage build is ongoing overhead this project does not
-  want yet.
+- **PGO** is now measured rather than assumed. See the section above: 7.5% of
+  the instructions, 1.7% of the time, and declined on that basis.
 
 ## A note on method
 
