@@ -428,9 +428,11 @@ mod tests {
             parse_lin_call("p").map(|c| c.to_pbn()).as_deref(),
             Some("Pass")
         );
+        // LIN writes notrump as `N`; PBN 2.1 writes it as `NT`, which is what
+        // `bridge_types::Call::to_pbn` produces since bridge-types d9a37ae.
         assert_eq!(
             parse_lin_call("1N").map(|c| c.to_pbn()).as_deref(),
-            Some("1N")
+            Some("1NT")
         );
         assert_eq!(
             parse_lin_call("3C!").map(|c| c.to_pbn()).as_deref(),
