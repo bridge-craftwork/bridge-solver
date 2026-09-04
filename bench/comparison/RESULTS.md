@@ -5,6 +5,10 @@ macOS 25.5. Method, and why each choice was made, in `METHODOLOGY.md`. Each
 solver is built the way its own project builds it: DDS 2.9 with its
 `Makefile_Mac_clang_static` (`-O3 -flto`), macroxue's reference at `75b4619`
 with the PGO its makefile defaults to, this port with `cargo build --release`.
+That last asymmetry is measured rather than waved at: PGO is worth about 1% to
+the reference and 1.7% to this port, so building both with it would move these
+tables by about a point and not change any ordering in them. See "PGO on this
+port" in `bench/results/release-profile.md` for why this port does not ship it.
 Cases 2 and 3 were re-measured later the same day, after this port changed its
 unit of parallel work; case 2 says what that was and what it moved. Case 1 is
 unaffected by it -- one board on one thread has nothing to schedule -- and its
