@@ -212,7 +212,9 @@ pub fn order_leads(
             q
         };
         let all_minus_akqj = all_minus_akq.different(Cards::from_bits(1u64 << j));
-        let t = if !all_minus_akqj.is_empty() {
+        // Unused now that the (j, t) test collapses to `Have(1)`, but kept so
+        // the A-K-Q-J-T chain still mirrors the reference line for line.
+        let _t = if !all_minus_akqj.is_empty() {
             all_minus_akqj.top()
         } else {
             j
@@ -223,20 +225,27 @@ pub fn order_leads(
         // Check for good leads (finesse positions)
         // Partner has K and LHO has A, etc.
         if pd_suit.size() >= 2 && lho_suit.size() >= 2 {
-            let mut qj = Cards::new();
-            qj.add(q);
-            qj.add(j);
-            let mut jt = Cards::new();
-            jt.add(j);
-            jt.add(t);
-
+            // The reference reads `our_suits.Have(Cards().Add(q).Add(j))`, and
+            // that does not test what it looks like it tests. `Have` takes an
+            // `int`; `Cards` has a non-explicit `operator bool()`. So the card
+            // *set* collapses to `true`, promotes to `1`, and the call is
+            // `Have(1)` -- "do we hold card index 1" -- for both this branch
+            // and the `(j, t)` one below. The q/j and j/t tests never happen.
+            //
+            // We had implemented the intent, which is better bridge and the
+            // wrong answer: it put whole suits in a higher lead bucket than the
+            // reference does, and that reordering was the earliest divergence
+            // in two of the seven fixtures. `deal.134` reaches lock-step with
+            // this, `deal.1`'s first divergence moves from iteration 29 to
+            // 6735, and node counts over 200 deals go from 0.9911x of the
+            // reference to 1.0011x.
+            //
+            // Deterministic, not undefined: the set is never empty, so it is
+            // always exactly `Have(1)`. Restoring the intended test is a
+            // one-line change when matching stops being the goal.
             if (pd_suit.have(k) && lho_suit.have(a))
-                || (pd_suit.have(a)
-                    && lho_suit.have(k)
-                    && (pd_suit.have(q) || our_suits.include(qj)))
-                || (pd_suit.have(k)
-                    && lho_suit.have(q)
-                    && (pd_suit.have(j) || our_suits.include(jt)))
+                || (pd_suit.have(a) && lho_suit.have(k) && (pd_suit.have(q) || our_suits.have(1)))
+                || (pd_suit.have(k) && lho_suit.have(q) && (pd_suit.have(j) || our_suits.have(1)))
             {
                 good_leads.add(my_suit.top());
                 if my_suit.size() > 1 {
@@ -515,6 +524,11 @@ thread_local! {
 
 pub(crate) static XRAY_COUNT: AtomicUsize = AtomicUsize::new(0);
 pub(crate) static XRAY_LIMIT: AtomicUsize = AtomicUsize::new(0);
+/// Cache-digest window: emit every STEP iterations from START to END.
+/// STEP 0 disables it; END 0 means no upper bound.
+pub(crate) static XRAY_CACHE_START: AtomicUsize = AtomicUsize::new(0);
+pub(crate) static XRAY_CACHE_END: AtomicUsize = AtomicUsize::new(0);
+pub(crate) static XRAY_CACHE_STEP: AtomicUsize = AtomicUsize::new(0);
 pub(crate) static NO_PRUNING: AtomicBool = AtomicBool::new(false);
 pub(crate) static NO_TT: AtomicBool = AtomicBool::new(false);
 pub(crate) static NO_RANK_SKIP: AtomicBool = AtomicBool::new(false);
@@ -535,6 +549,26 @@ pub fn set_xray_limit(limit: usize) {
 pub(crate) fn xray_should_log() -> bool {
     let limit = XRAY_LIMIT.load(Ordering::Relaxed);
     limit > 0 && XRAY_COUNT.load(Ordering::Relaxed) <= limit
+}
+
+/// Emit a cache content digest every `step` iterations from `start` to `end`.
+///
+/// The trace records what the search *did*; this records what its caches
+/// *hold*. Those diverge at different moments: two searches can take the same
+/// decisions for a long time while their caches drift apart through different
+/// eviction, resizing or pattern-tree shape, and the first visible symptom is
+/// then a lookup that hits on one side and misses on the other -- far too late
+/// to say why.
+///
+/// The window exists so the drift can be bisected. A digest is O(table size),
+/// so emitting one per node is far too slow to run to completion; instead sweep
+/// coarsely, find the interval where the two solvers stop agreeing, and narrow
+/// into it. `step` of 0 disables, `end` of 0 means no upper bound, and the
+/// first emission lands exactly on `start`.
+pub fn set_xray_cache_window(start: usize, end: usize, step: usize) {
+    XRAY_CACHE_START.store(start, Ordering::Relaxed);
+    XRAY_CACHE_END.store(end, Ordering::Relaxed);
+    XRAY_CACHE_STEP.store(step, Ordering::Relaxed);
 }
 
 /// Set no-pruning mode (disables fast/slow tricks pruning for debugging)

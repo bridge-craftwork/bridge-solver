@@ -33,19 +33,25 @@ mod convert;
 mod hands;
 pub mod par;
 mod pattern;
+mod pattern_vec;
 mod play;
 mod search;
 pub mod types;
 
 pub use bridge_solver::{
     get_node_count, order_follows, order_leads, set_no_pruning, set_no_rank_skip, set_no_tt,
-    set_show_perf, set_xray_limit, OrderedCards, PartialTrick, PlayedCard, Solver,
+    set_show_perf, set_xray_cache_window, set_xray_limit, OrderedCards, PartialTrick, PlayedCard,
+    Solver,
 };
 pub use cards::Cards;
 pub use convert::{direction_to_seat, seat_to_direction};
 pub use hands::Hands;
-pub use par::{par, solve_dd_table, DdTricks, ParContract, ParResult, Side};
-pub use pattern::PatternCache;
+pub use par::{
+    par, solve_dd_table, solve_dd_table_cells, solve_dd_table_with_nodes, DdTricks, ParContract,
+    ParResult, Side, TableSolver,
+};
+pub use pattern::{type_sizes, PatternCache};
+pub use pattern_vec::drain_pool;
 pub use search::{slow_trump_tricks_opponent, CutoffCache};
 pub use types::{Seat, Suit, NOTRUMP, NUM_RANKS, NUM_SEATS, NUM_SUITS, TOTAL_CARDS, TOTAL_TRICKS};
 pub use types::{CLUB, DIAMOND, HEART, SPADE};

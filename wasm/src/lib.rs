@@ -124,9 +124,20 @@ impl Analyzer {
         self.positions.len()
     }
 
-    /// Forget every cached position.
+    /// Forget every cached position, and hand the solver's pooled memory back
+    /// to the allocator.
+    ///
+    /// The two are separate stores and only one of them is obvious. Beyond this
+    /// position cache, the solver keeps a free list of pattern-tree blocks that
+    /// it recycles rather than freeing, which is right for a process solving
+    /// deal after deal and wrong for a browser tab. A freakish distribution --
+    /// voids in several hands -- can build a pattern tree of fifteen million
+    /// nodes and over a gigabyte of blocks, and without this that peak is held
+    /// for as long as the page is open, on a heap that is capped at four
+    /// gigabytes and in practice cut off well below it.
     pub fn clear_cache(&mut self) {
         self.positions.clear();
+        bridge_solver::drain_pool();
     }
 
     /// Solve the full 20-cell double-dummy table for a deal.
@@ -241,6 +252,16 @@ impl Analyzer {
 /// the contract, seat names, auction and claim a UI wants to display. Nothing
 /// is fetched: a URL is decoded locally, so a shortened link must be expanded
 /// before it gets here.
+/// Hand the solver's pooled pattern-tree memory back to the allocator.
+///
+/// Available without an [`Analyzer`], because the pool is per-thread and global
+/// to the module: a caller that only ever asked for `dd_table` still has one.
+/// Worth calling after a hard deal, or on a page-visibility change.
+#[wasm_bindgen]
+pub fn release_memory() {
+    bridge_solver::drain_pool();
+}
+
 #[wasm_bindgen]
 pub fn parse_lin(input: &str) -> Result<String, JsError> {
     let parsed = lin_input::parse(input).map_err(|e| JsError::new(&e))?;

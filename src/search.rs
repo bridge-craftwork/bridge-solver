@@ -14,7 +14,8 @@ use std::sync::atomic::Ordering;
 
 // Re-export atomic counters from bridge_solver module
 use super::bridge_solver::{
-    xray_should_log, NO_PRUNING, NO_RANK_SKIP, NO_TT, XRAY_COUNT, XRAY_LIMIT,
+    xray_should_log, NO_PRUNING, NO_RANK_SKIP, NO_TT, XRAY_CACHE_END, XRAY_CACHE_START,
+    XRAY_CACHE_STEP, XRAY_COUNT, XRAY_LIMIT,
 };
 
 /// Search result - NS tricks and rank winners (cards whose rank affected the outcome)
@@ -57,29 +58,110 @@ struct CutoffEntry {
     card: [u8; 4],
 }
 
+impl CutoffEntry {
+    /// A slot holding nothing: zero hash, and no card for any seat.
+    const EMPTY: CutoffEntry = CutoffEntry {
+        hash: 0,
+        card: [255; 4],
+    };
+}
+
 /// Cutoff cache with linear probing (matching C++ Cache behavior)
 pub struct CutoffCache {
     entries: Box<[CutoffEntry]>,
     bits: usize,
-    mask: usize,
+    /// The size this cache was built at, and the floor [`Self::reset`] shrinks
+    /// back to. A table that grew for one hard strain must not charge every
+    /// easy strain after it for the space.
+    base_bits: usize,
     probe_distance: usize,
     load_count: usize,
 }
 
 impl CutoffCache {
+    /// Live entries, and a digest of their contents. See
+    /// `pattern::PatternCache::digest` for the rules the value obeys.
+    pub fn digest(&self) -> (usize, u64) {
+        let mut count = 0;
+        let mut digest = 0u64;
+        for entry in self.entries.iter() {
+            if entry.hash == 0 {
+                continue;
+            }
+            count += 1;
+            let mut h = super::pattern::mix_for_digest(entry.hash);
+            for (i, card) in entry.card.iter().enumerate() {
+                // "No card" is 255 here and TOTAL_CARDS in the C++ reference,
+                // so canonicalise it or the digests could never agree.
+                let c = if (*card as usize) < TOTAL_CARDS {
+                    *card as u64
+                } else {
+                    64
+                };
+                h = super::pattern::mix_for_digest(
+                    h ^ super::pattern::mix_for_digest((c << 8) | i as u64),
+                );
+            }
+            digest ^= h;
+        }
+        (count, digest)
+    }
+
     pub fn new(bits: usize) -> Self {
         let size = 1 << bits;
-        let default_entry = CutoffEntry {
-            hash: 0,
-            card: [255, 255, 255, 255],
-        };
         CutoffCache {
-            entries: vec![default_entry; size].into_boxed_slice(),
+            entries: vec![CutoffEntry::EMPTY; size].into_boxed_slice(),
             bits,
-            mask: size - 1,
+            base_bits: bits,
             probe_distance: 0,
             load_count: 0,
         }
+    }
+
+    /// Empty the cache, ready for the next search, without giving up the
+    /// allocation.
+    ///
+    /// The C++ reference's `cutoff_cache` is a process global that `Solve`
+    /// only calls `Reset()` on, per trump: the entries go, the capacity
+    /// stays. That is what lets `par::TableSolver` hold one cache for the life
+    /// of a run instead of building five a deal.
+    ///
+    /// Keeping the capacity cannot change what the search finds. Entries are
+    /// never evicted -- a full table doubles rather than replacing anything --
+    /// and probing stops at the first empty slot, which insertion never skips
+    /// over. So a lookup hits exactly when the key was stored, whatever the
+    /// table's size, and the size only decides how often `resize` runs.
+    ///
+    /// **Capacity is kept only as far as the last search justified it.**
+    /// Keeping it unconditionally, as the reference does, is a bad trade here
+    /// and was measured to be one: over the 200-deal lock-step corpus 99% of
+    /// strains never grow past the base size, but a handful that do leave the
+    /// table at four times it, and every later strain then pays to clear four
+    /// megabytes it will use one of. Sizing to the load just seen keeps the
+    /// in-place clear for the overwhelmingly common case and re-grows for a
+    /// run of genuinely hard deals, at one allocation per change of size.
+    pub fn reset(&mut self) {
+        let bits = self.bits_for(self.load_count);
+        if bits == self.bits {
+            self.entries.fill(CutoffEntry::EMPTY);
+        } else {
+            self.entries = vec![CutoffEntry::EMPTY; 1 << bits].into_boxed_slice();
+            self.bits = bits;
+        }
+        self.probe_distance = 0;
+        self.load_count = 0;
+    }
+
+    /// The smallest table, never below the size this cache was built at, that
+    /// holds `load` entries without tripping the resize in [`Self::store`].
+    /// The threshold is written the way `store` writes it so the two cannot
+    /// drift apart.
+    fn bits_for(&self, load: usize) -> usize {
+        let mut bits = self.base_bits;
+        while load >= (1usize << bits) * 3 / 4 {
+            bits += 1;
+        }
+        bits
     }
 
     #[inline]
@@ -92,9 +174,13 @@ impl CutoffCache {
     #[inline]
     pub fn lookup(&self, hash: u64, seat: Seat) -> Option<usize> {
         let base_index = self.index(hash);
+        // The mask is derived from the length rather than stored beside it so
+        // that LLVM can see `idx <= len - 1` and drop the bounds check on the
+        // probe; from a separate field it cannot know the two agree.
+        let mask = self.entries.len() - 1;
         // Linear probing like C++
         for d in 0..self.probe_distance {
-            let entry = &self.entries[(base_index + d) & self.mask];
+            let entry = &self.entries[(base_index + d) & mask];
             if entry.hash == hash {
                 if entry.card[seat] != 255 {
                     return Some(entry.card[seat] as usize);
@@ -112,15 +198,17 @@ impl CutoffCache {
     #[inline]
     pub fn store(&mut self, hash: u64, seat: Seat, card: usize) {
         // Resize if needed (at 75% load)
-        let size = self.mask + 1;
+        let size = self.entries.len();
         if self.load_count >= size * 3 / 4 {
             self.resize();
         }
 
         let base_index = self.index(hash);
+        // See `lookup` for why the mask comes from the length.
+        let mask = self.entries.len() - 1;
         // Linear probing to find or create entry
         for d in 0.. {
-            let idx = (base_index + d) & self.mask;
+            let idx = (base_index + d) & mask;
             let entry = &mut self.entries[idx];
             if entry.hash == hash {
                 // Found existing entry for this hash
@@ -143,13 +231,8 @@ impl CutoffCache {
         let old_entries = std::mem::take(&mut self.entries);
         let new_bits = self.bits + 1;
         let new_size = 1 << new_bits;
-        let default_entry = CutoffEntry {
-            hash: 0,
-            card: [255, 255, 255, 255],
-        };
-        self.entries = vec![default_entry; new_size].into_boxed_slice();
+        self.entries = vec![CutoffEntry::EMPTY; new_size].into_boxed_slice();
         self.bits = new_bits;
-        self.mask = new_size - 1;
         self.probe_distance = 0;
         self.load_count = 0;
 
@@ -494,6 +577,26 @@ impl<'a> Search<'a> {
             if count == limit + 1 {
                 eprintln!("XRAY_LIMIT_REACHED: {} iterations", limit);
             }
+            let step = XRAY_CACHE_STEP.load(Ordering::Relaxed);
+            let start = XRAY_CACHE_START.load(Ordering::Relaxed);
+            let end = XRAY_CACHE_END.load(Ordering::Relaxed);
+            if step > 0
+                && count <= limit
+                && count >= start
+                && (end == 0 || count <= end)
+                && (count - start).is_multiple_of(step)
+            {
+                let (cutoff_n, cutoff_h) = self.cutoff_cache.digest();
+                let (pattern_n, pattern_h) = self.pattern_cache.digest();
+                eprintln!(
+                    "CACHE: iter={count} cutoff={cutoff_n}/{cutoff_h:016x} pattern={pattern_n}/{pattern_h:016x}"
+                );
+                // A window of exactly one iteration means "show me this one",
+                // so break the pattern cache out entry by entry.
+                if start == end && start > 0 {
+                    self.pattern_cache.dump(count);
+                }
+            }
         }
 
         // Mid-trick: get state from previous play
@@ -625,10 +728,12 @@ impl<'a> Search<'a> {
 
         // Pattern cache lookup (matching C++ common_bounds_cache)
         let shape_value = self.tricks[trick_idx].shape.value();
+        // Hashed once for both the lookup below and the store further down.
+        let pattern_hash = PatternCache::hash_for(shape_value, seat_to_play);
         let mut pattern_cutoff = false;
         let rel_beta = beta - ns_tricks_won as i8;
         if !NO_TT.load(Ordering::Relaxed) {
-            if let Some(entry) = self.pattern_cache.lookup(shape_value, seat_to_play) {
+            if let Some(entry) = self.pattern_cache.lookup(pattern_hash) {
                 // Create pattern from current relative hands for lookup
                 let new_pattern = Pattern::new(
                     self.tricks[trick_idx].relative_hands.hands,
@@ -707,7 +812,7 @@ impl<'a> Search<'a> {
                     result.rank_winners.value()
                 );
             }
-            let entry = self.pattern_cache.get_or_create(shape_value, seat_to_play);
+            let entry = self.pattern_cache.get_or_create(pattern_hash);
             entry.pattern.update(new_pattern);
 
             // Return with extended_rank_winners instead of raw rank_winners
@@ -1663,11 +1768,11 @@ impl<'a> Search<'a> {
             my_tricks
         };
 
-        // Total fast tricks = trump tricks + side suit tricks, capped by our hand size
-        (
-            (trump_tricks + side_suit_tricks).min(my_hand.size()),
-            rank_winners,
-        )
+        // Uncapped. The reference caps at the call site, and reports the
+        // number from *before* that cap as `raw`; capping here made our `raw`
+        // mean something different from theirs, which read as a divergence in
+        // five of the seven fixtures when the two searches in fact agreed.
+        (trump_tricks + side_suit_tricks, rank_winners)
     }
 
     /// Fast tricks estimation - returns (count, rank_winners)
@@ -1676,14 +1781,18 @@ impl<'a> Search<'a> {
         let all_cards = self.hands.all_cards();
         let trick_idx = depth / 4;
         let max_tricks = self.num_tricks - trick_idx;
-        let (tricks, rank_winners) = self.fast_tricks_from_seat(seat_to_play, all_cards);
-        let result = tricks.min(max_tricks);
+        let (raw, rank_winners) = self.fast_tricks_from_seat(seat_to_play, all_cards);
+        // `min(raw, my_hand.Size())` in the reference. The further clamp to the
+        // tricks left in the deal cannot bite -- a hand never holds more cards
+        // than there are tricks remaining -- but it is kept as a guard.
+        let capped = raw.min(self.hands[seat_to_play].size());
+        let result = capped.min(max_tricks);
 
         // Debug logging when XRAY is enabled and under limit
         if xray_should_log() {
             eprintln!(
                 "FAST_TRICKS: depth={} seat={} raw={} capped={} trump={}",
-                depth, seat_to_play, tricks, result, self.trump
+                depth, seat_to_play, raw, capped, self.trump
             );
         }
         (result, rank_winners)

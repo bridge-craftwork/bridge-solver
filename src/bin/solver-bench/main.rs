@@ -33,7 +33,7 @@ use std::time::{Duration, Instant};
 #[cfg(feature = "dds-reference")]
 mod dds;
 
-use bridge_solver::solve_dd_table;
+use bridge_solver::{solve_dd_table, solve_dd_table_cells, solve_dd_table_with_nodes};
 use bridge_types::Deal;
 use clap::{Args, Parser, Subcommand};
 use serde::{Deserialize, Serialize};
@@ -155,6 +155,65 @@ fn cpu_time() -> Duration {
 #[cfg(not(unix))]
 fn cpu_time() -> Duration {
     Duration::ZERO
+}
+
+/// Instructions retired and CPU cycles consumed by this process so far.
+///
+/// Wall clock answers "how long did the user wait", which is the question that
+/// matters to a user and the one that needs repeats, a quiet machine and a
+/// minimum-of-N to ask honestly. Instructions retired answers a different and
+/// much cheaper question: *how much work did the program actually do*. It is a
+/// property of the executed code, not of the machine's mood, so it does not
+/// care about scheduling, frequency, or what else is running -- which makes a
+/// single run of it worth more than fifteen wall-clock runs when the question
+/// is "did my change remove work".
+///
+/// The two are not interchangeable, and the gap between them is informative
+/// rather than noise. A change that removes instructions but adds cache misses
+/// is slower despite counting better; the cycles figure catches that, and
+/// cycles-per-instruction says which way a change traded.
+///
+/// macOS only. `proc_pid_rusage` with `RUSAGE_INFO_V4` needs no entitlement or
+/// root. The offsets are checked against `<libproc.h>` on this platform:
+/// `sizeof(rusage_info_v4)` is 296, `ri_instructions` at 248, `ri_cycles` at
+/// 256, and the struct is read as words rather than transcribed field by field
+/// because only those two are wanted and the rest are a long tail of
+/// QoS accounting that would be easy to get subtly wrong.
+#[cfg(target_os = "macos")]
+fn counters() -> Option<(u64, u64)> {
+    const RUSAGE_INFO_V4: libc::c_int = 4;
+    const WORDS: usize = 296 / 8;
+    const INSTRUCTIONS: usize = 248 / 8;
+    const CYCLES: usize = 256 / 8;
+    extern "C" {
+        fn proc_pid_rusage(
+            pid: libc::c_int,
+            flavor: libc::c_int,
+            buffer: *mut libc::c_void,
+        ) -> libc::c_int;
+    }
+    let mut buf = [0u64; WORDS];
+    // SAFETY: `proc_pid_rusage` writes at most `sizeof(rusage_info_v4)` bytes
+    // through the pointer, and `buf` is exactly that size and 8-aligned, which
+    // is the struct's alignment since every field past the leading uuid is a
+    // `uint64_t`. It reads nothing else and cannot retain the pointer.
+    let rc = unsafe {
+        proc_pid_rusage(
+            std::process::id() as libc::c_int,
+            RUSAGE_INFO_V4,
+            buf.as_mut_ptr() as *mut libc::c_void,
+        )
+    };
+    if rc != 0 {
+        return None;
+    }
+    Some((buf[INSTRUCTIONS], buf[CYCLES]))
+}
+
+/// No equivalent elsewhere; the wall and CPU figures stand alone.
+#[cfg(not(target_os = "macos"))]
+fn counters() -> Option<(u64, u64)> {
+    None
 }
 
 /// Time one closure, wall and CPU together.
@@ -316,6 +375,41 @@ struct Cli {
     command: Cmd,
 }
 
+/// Options for `latency`.
+#[derive(Parser)]
+struct LatencyArgs {
+    /// A file of PBN deal strings, one per line.
+    pbn: PathBuf,
+    /// Most repeats of any one deal; the fastest is kept.
+    ///
+    /// The minimum, not the mean: a single-threaded solve on an 8P+4E machine
+    /// is occasionally scheduled onto an efficiency core at roughly a third
+    /// the speed, and that does not average out, it just adds a slow mode.
+    /// The fastest run is the one that got a performance core and an
+    /// uncontended cache.
+    #[arg(long, default_value_t = 15)]
+    runs: usize,
+    /// Stop repeating a deal once it has had this many milliseconds, after a
+    /// floor of three repeats.
+    ///
+    /// Deals in this workload span more than tenfold, and the two ends need
+    /// opposite treatment. A deal near the median is short enough that
+    /// scheduling noise is a large fraction of it, so it wants many repeats --
+    /// and being short, they are cheap. A deal in the slow tail is long enough
+    /// that a real difference is visible immediately, and repeating it fifteen
+    /// times would dominate the run for no gain. Budgeting the time per deal
+    /// rather than fixing the count gives each end what it needs.
+    #[arg(long, default_value_t = 300.0)]
+    budget_ms: f64,
+    /// Also measure DDS on each deal, for the same-timing-code comparison.
+    #[cfg(feature = "dds-reference")]
+    #[arg(long)]
+    dds: bool,
+    /// Write per-deal milliseconds here as TSV: index, ours, dds.
+    #[arg(long)]
+    tsv: Option<PathBuf>,
+}
+
 #[derive(Subcommand)]
 enum Cmd {
     /// Measure each board single-threaded, and optionally sweep thread counts.
@@ -327,6 +421,40 @@ enum Cmd {
     /// Measure DDS on the same corpus, with the same timing code.
     #[cfg(feature = "dds-reference")]
     Reference(ReferenceArgs),
+    /// Report nodes searched per deal, for comparison against the C++
+    /// reference's `-S` output. Timing tells you the cost of the search;
+    /// this tells you its size, and only both together say whether a gap is
+    /// per-node execution or extra work.
+    Nodes {
+        /// A file of PBN deal strings, one per line.
+        pbn: PathBuf,
+        /// Break each deal down by cell (strain and declarer), which is what
+        /// says *which* search to trace when a total diverges.
+        #[arg(long)]
+        per_cell: bool,
+    },
+    /// Per-deal latency over a file of deals, for the percentile view.
+    ///
+    /// The mean over a corpus is a tail measurement in disguise -- on random
+    /// deals the slowest fifth is about half of all the work -- so what a
+    /// person waiting on one board experiences is a distribution, not an
+    /// average. This reports one time per deal so the percentiles can be
+    /// taken, rather than a single figure.
+    Latency(LatencyArgs),
+    /// Instructions and cycles for a whole corpus, in one pass.
+    ///
+    /// The quick answer to "did my change remove work". Instructions retired
+    /// are a property of the code rather than of the machine, so one run of
+    /// this says more than fifteen wall-clock runs, and it can be trusted on a
+    /// busy machine. Confirm anything it likes with `run`, because fewer
+    /// instructions is not the same as less time.
+    Cost {
+        /// A file of PBN deal strings, one per line.
+        pbn: PathBuf,
+        /// Repeats; the lowest instruction count is reported.
+        #[arg(long, default_value_t = 1)]
+        runs: usize,
+    },
     /// Compare two results files.
     Compare {
         /// The earlier results file (the baseline).
@@ -354,10 +482,30 @@ struct ReferenceArgs {
     #[arg(long, default_value_t = 3)]
     runs: usize,
 
-    /// Thread counts to measure DDS at. DDS parallelises *within* one table,
-    /// so this is its intra-solve scaling, not deal-level throughput.
-    #[arg(long, value_delimiter = ',', default_values_t = [1usize, 4, 12])]
+    /// Thread count to measure at. Both solvers get the same one.
+    ///
+    /// Exactly one value: DDS cannot survive a second `SetResources`, so
+    /// measuring a curve means one process per thread count.
+    #[arg(long, value_delimiter = ',', default_values_t = [1usize])]
     dds_threads: Vec<usize>,
+
+    /// DDS threading backend: 3 = GCD, 5 = STL. GCD is DDS's own default on
+    /// macOS and dispatches at background priority, which Apple Silicon
+    /// confines to the efficiency cores; STL is the like-for-like choice.
+    #[arg(long, default_value_t = 5)]
+    dds_threading: usize,
+
+    /// Solve these deals instead of generated ones: a file of PBN deal
+    /// strings, one per line. Lets an external solver be measured on exactly
+    /// the same deals.
+    #[arg(long)]
+    throughput_pbn: Option<std::path::PathBuf>,
+
+    /// Distinct deals to generate for the throughput measurement. Ten boards
+    /// is not enough work to keep twelve threads busy, and the corpus cannot
+    /// simply be repeated -- see `generated_deals`.
+    #[arg(long, default_value_t = 120)]
+    throughput_deals: usize,
 }
 
 #[derive(Args, Clone)]
@@ -736,14 +884,39 @@ fn reference(args: &ReferenceArgs) -> Result<(), String> {
     // DDS allocates its per-thread working memory when resources are set, and
     // faults with "Memory::GetPtr" if a solve is attempted before that. It is
     // process-global state, so it is set here once before any call.
-    dds::set_threads(1);
+    //
+    // Set it to the *first* configuration we will measure rather than to 1, so
+    // that a single-valued `--dds-threads` needs only one `SetResources` for
+    // the whole run. DDS cannot survive a second one -- it tears its thread
+    // memory down before rebuilding it, and the rebuild does not always
+    // happen -- so measuring several thread counts means one process each.
+    if args.dds_threads.len() > 1 {
+        return Err(
+            "--dds-threads takes one value. DDS tears its thread memory down on a \n\
+             second SetResources and does not always rebuild it, so a thread-count \n\
+             curve means one process per point."
+                .into(),
+        );
+    }
+    let threads = args.dds_threads.first().copied().unwrap_or(1);
+    dds::set_backend(args.dds_threading as i32)?;
+    dds::set_threads(threads);
+    let (backend, dds_cores, dds_threads) = dds::info();
+    println!(
+        "dds      : {backend} threading, {dds_cores} cores seen, {dds_threads} threads made\n"
+    );
 
     // Agreement first: a timing comparison between two solvers that disagree
     // is meaningless.
+    // Solved as one batch, so this doubles as the check on the batched result
+    // indexing that the throughput measurement below depends on.
+    let all_pbns: Vec<&str> = corpus.boards.iter().map(|b| b.pbn.as_str()).collect();
+    let dds_tables = dds::solve_tables(&all_pbns)?;
+
     let mut disagreements = 0;
-    for (board, deal) in corpus.boards.iter().zip(&deals) {
+    for ((board, deal), dds_table) in corpus.boards.iter().zip(&deals).zip(&dds_tables) {
         let ours = encode_ddtricks(&solve_dd_table(deal).tricks);
-        let theirs = encode_ddtricks(&dds::solve_table(&board.pbn)?);
+        let theirs = encode_ddtricks(dds_table);
         if ours != theirs {
             println!(
                 "board {}: DISAGREEMENT\n  ours {ours}\n  dds  {theirs}",
@@ -806,23 +979,238 @@ fn reference(args: &ReferenceArgs) -> Result<(), String> {
             ratios.len()
         );
     }
+
+    throughput(args, threads)
+}
+
+/// Deal-level throughput: the whole corpus, both solvers, at the same thread
+/// count, over one shared work list.
+///
+/// This is the comparison someone choosing a solver for their own machine
+/// actually cares about, and it is the one the per-board table above cannot
+/// answer. It is only honest because DDS gets the deals in a batch: given one
+/// deal at a time it has five work items to spread over N threads and the
+/// result measures load imbalance rather than scaling.
+///
+/// Each solver parallelises however it likes. Ours takes deals off a shared
+/// cursor, which is work-stealing in all but name and so tolerates the 18x
+/// spread in board cost. DDS is handed the list in chunks of forty and
+/// schedules the (deal, strain) pairs itself.
+#[cfg(feature = "dds-reference")]
+fn throughput(args: &ReferenceArgs, threads: usize) -> Result<(), String> {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let generated = match &args.throughput_pbn {
+        Some(path) => {
+            let text = std::fs::read_to_string(path)
+                .map_err(|e| format!("reading {}: {e}", path.display()))?;
+            let mut v = Vec::new();
+            for (i, line) in text.lines().enumerate() {
+                let line = line.trim();
+                if line.is_empty() {
+                    continue;
+                }
+                let deal = Deal::from_pbn(line)
+                    .ok_or_else(|| format!("{}:{}: unparseable deal", path.display(), i + 1))?;
+                v.push((line.to_string(), deal));
+            }
+            if v.is_empty() {
+                return Err(format!("{} held no deals", path.display()));
+            }
+            v
+        }
+        None => generated_deals(args.throughput_deals.max(1))?,
+    };
+    let pbns: Vec<&str> = generated.iter().map(|(p, _)| p.as_str()).collect();
+    let work: Vec<&Deal> = generated.iter().map(|(_, d)| d).collect();
+
+    // Check a sample before timing. A generator that emitted well-formed but
+    // wrongly ordered deals would still parse, still solve, and still produce
+    // plausible timings -- of a workload that is not the one being reported.
+    let sample = work.len().min(5);
+    for (i, (pbn, deal)) in generated.iter().take(sample).enumerate() {
+        let ours = encode_ddtricks(&solve_dd_table(deal).tricks);
+        let theirs = encode_ddtricks(&dds::solve_table(pbn)?);
+        if ours != theirs {
+            return Err(format!(
+                "generated deal {i} disagrees, so the throughput workload is not \n\
+                 the same work for both solvers\n  ours {ours}\n  dds  {theirs}\n  {pbn}"
+            ));
+        }
+    }
+
+    println!(
+        "\ndeal-level throughput: {} deals ({sample} checked), \
+         {threads} thread(s), best of {}",
+        work.len(),
+        args.runs
+    );
+
+    let ours = best_of(args.runs, || {
+        let cursor = AtomicUsize::new(0);
+        std::thread::scope(|scope| {
+            for _ in 0..threads {
+                scope.spawn(|| loop {
+                    let i = cursor.fetch_add(1, Ordering::Relaxed);
+                    let Some(deal) = work.get(i) else { break };
+                    let _ = solve_dd_table(deal);
+                });
+            }
+        });
+    });
+
+    let mut err = None;
+    let dds = best_of(args.runs, || {
+        if let Err(e) = dds::solve_tables(&pbns) {
+            err = Some(e);
+        }
+    });
+    if let Some(e) = err {
+        return Err(e);
+    }
+
+    println!(
+        "{:>8}  {:>10}  {:>10}  {:>7}  {:>11}",
+        "", "wall ms", "cpu ms", "cores", "deals/sec"
+    );
+    for (name, m) in [("ours", &ours), ("dds", &dds)] {
+        println!(
+            "{:>8}  {:>10.1}  {:>10.1}  {:>7.2}  {:>11.1}",
+            name,
+            m.best.wall_ms,
+            m.best.cpu_ms,
+            m.best.cpu_ms / m.best.wall_ms,
+            work.len() as f64 * 1000.0 / m.best.wall_ms,
+        );
+    }
+    let ratio = ours.best.wall_ms / dds.best.wall_ms;
+    println!("\nOn {threads} thread(s) we take {ratio:.2}x DDS's wall clock for the same deals.");
     Ok(())
 }
 
-/// Index of the median-cost board, chosen deterministically so that two
-/// `--quick` runs measure the same thing.
+/// Deterministic pseudo-random deals for the throughput measurement.
+///
+/// The corpus cannot be used for this, and neither can repeats of it. DDS
+/// de-duplicates identical deals inside a batch -- `DetectCalcDuplicates` and
+/// `CopyCalcSingle` -- and copies a result rather than solving again. Eight
+/// copies of the ten-board corpus is eighty solves for us and ten for DDS,
+/// which measured as a 4.7x win for DDS that was entirely an artefact of the
+/// workload. Distinct deals are the only honest comparison; generating them
+/// from a fixed seed keeps runs comparable without committing a large fixture.
+///
+/// Random deals are also the better workload here on their own merits: the
+/// corpus was curated to span 16 ms to 300 ms, which is what makes it a good
+/// per-board fixture and a poor model of a real file.
+#[cfg(feature = "dds-reference")]
+fn generated_deals(count: usize) -> Result<Vec<(String, Deal)>, String> {
+    // Index 0 is the ace, so sorting ascending yields PBN's descending ranks.
+    const RANK_CHARS: [u8; 13] = *b"AKQJT98765432";
+
+    let mut state: u64 = 0x2545_f491_4f6c_dd1d;
+    let mut rand = move || {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        state
+    };
+
+    let mut out = Vec::with_capacity(count);
+    for _ in 0..count {
+        let mut deck: [usize; 52] = std::array::from_fn(|i| i);
+        for i in (1..52).rev() {
+            let j = (rand() % (i as u64 + 1)) as usize;
+            deck.swap(i, j);
+        }
+
+        // Thirteen cards per seat in PBN's N,E,S,W order; card = suit * 13 +
+        // rank, with suit 0 spades so the suit loop emits S.H.D.C as PBN wants.
+        let mut pbn = String::from("N:");
+        for seat in 0..4 {
+            if seat > 0 {
+                pbn.push(' ');
+            }
+            let hand = &deck[seat * 13..seat * 13 + 13];
+            for suit in 0..4 {
+                if suit > 0 {
+                    pbn.push('.');
+                }
+                let mut ranks: Vec<usize> = hand
+                    .iter()
+                    .filter(|c| *c / 13 == suit)
+                    .map(|c| c % 13)
+                    .collect();
+                ranks.sort_unstable();
+                for r in ranks {
+                    pbn.push(RANK_CHARS[r] as char);
+                }
+            }
+        }
+
+        let deal =
+            Deal::from_pbn(&pbn).ok_or_else(|| format!("generated an unparseable deal: {pbn}"))?;
+        out.push((pbn, deal));
+    }
+    Ok(out)
+}
+
+/// Print nodes searched per deal, and the total.
+fn nodes_report(path: &PathBuf, per_cell: bool) -> Result<(), String> {
+    let text =
+        std::fs::read_to_string(path).map_err(|e| format!("reading {}: {e}", path.display()))?;
+    let mut total = 0u64;
+    let mut count = 0usize;
+    for (i, line) in text.lines().enumerate() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let deal = Deal::from_pbn(line)
+            .ok_or_else(|| format!("{}:{}: unparseable deal", path.display(), i + 1))?;
+        let nodes = if per_cell {
+            let (_, cells) = solve_dd_table_cells(&deal);
+            for (strain, dir, n) in &cells {
+                println!("{} {strain:?} {dir:?} {n}", i + 1);
+            }
+            cells.iter().map(|(_, _, n)| n).sum()
+        } else {
+            let (_, n) = solve_dd_table_with_nodes(&deal);
+            println!("{} {n}", i + 1);
+            n
+        };
+        total += nodes;
+        count += 1;
+    }
+    eprintln!(
+        "{count} deals, {total} nodes, {:.0} per deal",
+        total as f64 / count as f64
+    );
+    Ok(())
+}
+
+/// Index of the median-cost board.
+///
+/// Cost is nodes searched, not wall time. Both need the same ten solves, but
+/// nodes is a property of the deal and the search, so the answer is the same
+/// on a loaded machine as on an idle one -- which is the whole point of a
+/// board that two `--quick` runs can agree on.
+///
+/// It was wall time, ranked from a single unrepeated timing per board. Boards
+/// 4 and 7 of `corpus-v1` sit about 6% apart, which is inside the drift on a
+/// busy machine, so the median flipped between them from run to run and an A/B
+/// silently averaged two different workloads. That cost a real measurement
+/// before it was noticed; see "Two ways the harness will mislead you" in
+/// `bench/results/release-profile.md`.
 fn median_board(deals: &[Deal]) -> usize {
-    let mut costs: Vec<(usize, f64)> = deals
+    let mut costs: Vec<(usize, u64)> = deals
         .iter()
         .enumerate()
         .map(|(i, d)| {
-            let (_, s) = measure(|| {
-                let _ = solve_dd_table(d);
-            });
-            (i, s.wall_ms)
+            let (_, nodes) = solve_dd_table_with_nodes(d);
+            (i, nodes)
         })
         .collect();
-    costs.sort_by(|a, b| a.1.total_cmp(&b.1));
+    // Tie-break on index so the order is total, not merely deterministic-ish.
+    costs.sort_by_key(|&(i, nodes)| (nodes, i));
     costs[costs.len() / 2].0
 }
 
@@ -902,10 +1290,206 @@ fn main() {
         }),
         #[cfg(feature = "dds-reference")]
         Cmd::Reference(args) => reference(args),
+        Cmd::Nodes { pbn, per_cell } => nodes_report(pbn, *per_cell),
+        Cmd::Latency(args) => latency_report(args),
+        Cmd::Cost { pbn, runs } => cost_report(pbn, *runs),
         Cmd::Compare { baseline, current } => compare(baseline, current),
     };
     if let Err(e) = outcome {
         eprintln!("solver-bench: {e}");
         std::process::exit(1);
     }
+}
+
+/// Percentiles of a sorted slice, by nearest-rank.
+fn percentile(sorted: &[f64], p: f64) -> f64 {
+    if sorted.is_empty() {
+        return 0.0;
+    }
+    let i = ((p / 100.0) * sorted.len() as f64).ceil() as usize;
+    sorted[i.saturating_sub(1).min(sorted.len() - 1)]
+}
+
+/// Per-deal latency over a file of deals.
+fn latency_report(args: &LatencyArgs) -> Result<(), String> {
+    let text = std::fs::read_to_string(&args.pbn)
+        .map_err(|e| format!("reading {}: {e}", args.pbn.display()))?;
+    let mut deals = Vec::new();
+    for (i, line) in text.lines().enumerate() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let deal = Deal::from_pbn(line)
+            .ok_or_else(|| format!("{}:{}: unparseable deal", args.pbn.display(), i + 1))?;
+        deals.push((line.to_string(), deal));
+    }
+    if deals.is_empty() {
+        return Err(format!("{}: no deals", args.pbn.display()));
+    }
+
+    println!("deals    : {}", deals.len());
+    println!(
+        "runs     : best of up to {}, or until a deal has had {:.0} ms",
+        args.runs, args.budget_ms
+    );
+    println!("machine  : {} ({} logical)", machine(), logical_cpus());
+
+    // DDS's resources are process-global and must be set before the first
+    // solve; without this the first call dies with `Memory::GetPtr: 0 vs. 0`
+    // and DDS calls `exit(1)`, taking the harness with it. One thread, and
+    // the STL backend rather than DDS's macOS default of GCD, which
+    // dispatches at background priority and so lands on the efficiency cores.
+    #[cfg(feature = "dds-reference")]
+    if args.dds {
+        dds::set_backend(5)?;
+        dds::set_threads(1);
+        let (backend, cores, threads) = dds::info();
+        println!("dds      : {backend} threading, {cores} cores seen, {threads} threads made");
+    }
+
+    let mut ours = Vec::with_capacity(deals.len());
+    let mut dds_ms: Vec<f64> = Vec::new();
+
+    // Interleaved by deal rather than by solver: a deal's two figures are then
+    // taken under the same machine conditions, which is what makes the
+    // per-deal ratio meaningful even when the machine drifts over the run.
+    /// Repeat until the budget is spent, keeping the fastest. At least three,
+    /// at most `runs`.
+    fn best_of(runs: usize, budget_ms: f64, mut once: impl FnMut() -> f64) -> f64 {
+        let (mut best, mut spent) = (f64::MAX, 0.0);
+        for i in 0..runs.max(3) {
+            let ms = once();
+            best = best.min(ms);
+            spent += ms;
+            if i + 1 >= 3 && spent >= budget_ms {
+                break;
+            }
+        }
+        best
+    }
+
+    for (pbn, deal) in &deals {
+        ours.push(best_of(args.runs, args.budget_ms, || {
+            measure(|| {
+                let _ = solve_dd_table(deal);
+            })
+            .1
+            .wall_ms
+        }));
+
+        #[cfg(feature = "dds-reference")]
+        if args.dds {
+            dds_ms.push(best_of(args.runs, args.budget_ms, || {
+                measure(|| {
+                    let _ = dds::solve_table(pbn);
+                })
+                .1
+                .wall_ms
+            }));
+        }
+        let _ = pbn;
+    }
+
+    if let Some(path) = &args.tsv {
+        let mut out = String::from("deal\tours_ms\tdds_ms\n");
+        for (i, o) in ours.iter().enumerate() {
+            let d = dds_ms.get(i).map(|v| format!("{v:.3}")).unwrap_or_default();
+            out.push_str(&format!("{}\t{o:.3}\t{d}\n", i + 1));
+        }
+        std::fs::write(path, out).map_err(|e| format!("writing {}: {e}", path.display()))?;
+        println!("wrote {}", path.display());
+    }
+
+    let mut so = ours.clone();
+    so.sort_by(f64::total_cmp);
+    let mut sd = dds_ms.clone();
+    sd.sort_by(f64::total_cmp);
+
+    println!();
+    if sd.is_empty() {
+        println!("{:>6} {:>10}", "pct", "ours ms");
+        for p in [50.0, 80.0, 90.0, 95.0, 99.0, 100.0] {
+            println!("{:>6} {:>10.1}", fmt_pct(p), percentile(&so, p));
+        }
+    } else {
+        println!(
+            "{:>6} {:>10} {:>10} {:>10}",
+            "pct", "ours ms", "dds ms", "ours/dds"
+        );
+        for p in [50.0, 80.0, 90.0, 95.0, 99.0, 100.0] {
+            let (o, d) = (percentile(&so, p), percentile(&sd, p));
+            println!("{:>6} {:>10.1} {:>10.1} {:>9.3}x", fmt_pct(p), o, d, o / d);
+        }
+        // Ratio of the whole set, and the ratio a user actually waits on.
+        let sum_o: f64 = ours.iter().sum();
+        let sum_d: f64 = dds_ms.iter().sum();
+        println!(
+            "\ntotal    {sum_o:>9.0} {sum_d:>10.0} {:>9.3}x",
+            sum_o / sum_d
+        );
+    }
+    Ok(())
+}
+
+/// `p100` reads badly as a percentile; it is the maximum.
+fn fmt_pct(p: f64) -> String {
+    if p >= 100.0 {
+        "max".to_string()
+    } else {
+        format!("p{p:.0}")
+    }
+}
+
+/// Instructions, cycles and nodes for a whole corpus.
+fn cost_report(path: &PathBuf, runs: usize) -> Result<(), String> {
+    let text =
+        std::fs::read_to_string(path).map_err(|e| format!("reading {}: {e}", path.display()))?;
+    let mut deals = Vec::new();
+    for (i, line) in text.lines().enumerate() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        deals.push(
+            Deal::from_pbn(line)
+                .ok_or_else(|| format!("{}:{}: unparseable deal", path.display(), i + 1))?,
+        );
+    }
+    if deals.is_empty() {
+        return Err(format!("{}: no deals", path.display()));
+    }
+    if counters().is_none() {
+        return Err("instruction counters are unavailable on this platform".into());
+    }
+
+    let (mut best_ins, mut best_cyc, mut best_ms, mut nodes) = (u64::MAX, u64::MAX, f64::MAX, 0u64);
+    for _ in 0..runs.max(1) {
+        let before = counters().unwrap_or((0, 0));
+        let mut n = 0u64;
+        let (_, sample) = measure(|| {
+            for deal in &deals {
+                let (_, c) = solve_dd_table_with_nodes(deal);
+                n += c;
+            }
+        });
+        let after = counters().unwrap_or((0, 0));
+        best_ins = best_ins.min(after.0.saturating_sub(before.0));
+        best_cyc = best_cyc.min(after.1.saturating_sub(before.1));
+        best_ms = best_ms.min(sample.wall_ms);
+        nodes = n;
+    }
+
+    println!("deals        {:>18}", deals.len());
+    println!("nodes        {nodes:>18}");
+    println!("instructions {best_ins:>18}");
+    println!("cycles       {best_cyc:>18}");
+    println!("wall ms      {best_ms:>18.1}");
+    println!();
+    println!("ins/node     {:>18.2}", best_ins as f64 / nodes as f64);
+    println!("cycles/node  {:>18.2}", best_cyc as f64 / nodes as f64);
+    // Below about 1.0 the search is stalling rather than computing, which is
+    // what separates "removed instructions" from "made it faster".
+    println!("IPC          {:>18.2}", best_ins as f64 / best_cyc as f64);
+    Ok(())
 }

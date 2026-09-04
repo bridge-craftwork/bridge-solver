@@ -1,0 +1,41 @@
+# Positions where our search diverges from the C++ reference.
+#
+# deal    the deal, in the reference's own file format, with trump and opening
+#         leader appended so both solvers do exactly one search
+# trump   trump suit for that search (N = notrump)
+# lead    opening leader
+# line    xray trace line of the first divergence, with `remaining=[...]`
+#         normalised out (the two solvers format that field differently)
+# iter    xray iteration of that line
+# cache   xray iteration at which the cache digests first differ (-C 10)
+# mech    the trace record type where they part company
+#
+# Every row is one search from a cold cache, so it reproduces standalone: no
+# preceding cells, no shared cache state, no ordering to set up.
+#
+# ALL SEVEN ARE NOW IN LOCK-STEP, trace and caches both, to 200,000 iterations.
+# They are kept as regression cases: every row must report `none`.
+#
+# The freak.* rows come from the reference's own `deals/freak`: distributions
+# with voids in every hand, which the 1k corpus never generates and which its
+# ultra-freakish cache-reset commits exist for. freak.0 and freak.1 are also
+# the two deal files that our parser could not read at all -- one uses suit
+# symbols, the other puts East on its own line.
+#
+# Over the 200-deal corpus, ALL 200 deals now match the reference node for node:
+# 296,689,028 against 296,689,028, exactly. deal.54 is the trump fixture that
+# got the last of it -- diamonds, declarer South -- and the rest are notrump.
+#
+# deal	trump	lead	line	iter	cache	mech
+deal.72	N	W	-	-	-	FIXED
+deal.12	N	W	-	-	-	FIXED
+deal.1	N	W	-	-	-	FIXED
+deal.10	N	W	-	-	-	FIXED
+deal.4	N	W	-	-	-	FIXED
+deal.134	N	W	-	-	-	FIXED
+deal.38	N	W	-	-	-	FIXED
+deal.54	D	W	-	-	-	FIXED
+freak.0	N	W	-	-	-	FIXED
+freak.1	S	W	-	-	-	FIXED
+freak.2	N	N	-	-	-	FIXED
+freak.3	N	N	-	-	-	FIXED

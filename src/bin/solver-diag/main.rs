@@ -12,9 +12,9 @@
 use bridge_solver::cards::card_of;
 use bridge_solver::types::rank_name;
 use bridge_solver::{
-    set_no_pruning, set_no_rank_skip, set_no_tt, set_show_perf, set_xray_limit, Cards, CutoffCache,
-    Hands, PatternCache, Solver, CLUB, DIAMOND, EAST, HEART, NORTH, NOTRUMP, NUM_RANKS, SOUTH,
-    SPADE, WEST,
+    set_no_pruning, set_no_rank_skip, set_no_tt, set_show_perf, set_xray_cache_window,
+    set_xray_limit, Cards, CutoffCache, Hands, PatternCache, Solver, CLUB, DIAMOND, EAST, HEART,
+    NORTH, NOTRUMP, NUM_RANKS, SOUTH, SPADE, WEST,
 };
 use std::env;
 use std::fs;
@@ -26,6 +26,7 @@ fn main() {
     // Parse arguments
     let mut file_path = None;
     let mut xray_iterations = 0usize;
+    let mut cache_spec: (usize, usize, usize) = (0, 0, 0);
     let mut no_pruning = false;
     let mut no_tt = false;
     let mut no_rank_skip = false;
@@ -37,6 +38,9 @@ fn main() {
             i += 2;
         } else if args[i] == "-X" && i + 1 < args.len() {
             xray_iterations = args[i + 1].parse().unwrap_or(0);
+            i += 2;
+        } else if args[i] == "-C" && i + 1 < args.len() {
+            cache_spec = parse_cache_spec(&args[i + 1]);
             i += 2;
         } else if args[i] == "-P" {
             no_pruning = true;
@@ -58,7 +62,9 @@ fn main() {
     let file_path = match file_path {
         Some(p) => p,
         None => {
-            eprintln!("Usage: solver -f <file> [-X <iterations>] [-P] [-T] [-R] [-V]");
+            eprintln!(
+                "Usage: solver -f <file> [-X <iterations>] [-C <interval>] [-P] [-T] [-R] [-V]"
+            );
             std::process::exit(1);
         }
     };
@@ -66,6 +72,12 @@ fn main() {
     // Set xray limit if specified
     if xray_iterations > 0 {
         set_xray_limit(xray_iterations);
+    }
+
+    // Digest the caches over a window, for locating cache drift that the
+    // decision trace does not show.
+    if cache_spec.2 > 0 {
+        set_xray_cache_window(cache_spec.0, cache_spec.1, cache_spec.2);
     }
 
     // Set no-pruning mode if specified
@@ -82,6 +94,7 @@ fn main() {
     if show_perf {
         set_show_perf(true);
     }
+    let report_footprint = show_perf;
 
     // Set no-rank-skip mode if specified
     if no_rank_skip {
@@ -97,20 +110,43 @@ fn main() {
         std::process::exit(1);
     }
 
-    // Parse hands
+    // Parse hands. West and East may share a line or occupy one each; the
+    // reference decides by looking for a four-space gap in the West line, and
+    // reads another line when there is none. Its `freak` deals use both forms.
     let north_str = lines[0].trim();
-    let west_east_str = lines[1];
-    let south_str = lines[2].trim();
+    let (west_str, east_str, south_index) = match split_west_east(lines[1]) {
+        Some((west, east)) => (west, east, 2),
+        None => {
+            if lines.len() < 4 {
+                eprintln!(
+                    "Error: East is on its own line, so the file needs four hand \
+                     lines (N, W, E, S); '{file_path}' has {}.",
+                    lines.len()
+                );
+                std::process::exit(1);
+            }
+            (lines[1].trim().to_string(), lines[2].trim().to_string(), 3)
+        }
+    };
+    let south_str = lines[south_index].trim();
 
-    // Split west and east from line 2 (they're separated by multiple spaces)
-    let (west_str, east_str) = parse_west_east(west_east_str);
-
-    let hands = Hands::from_solver_format(north_str, &west_str, &east_str, south_str)
-        .expect("Failed to parse hands");
+    let hands = match Hands::from_solver_format(north_str, &west_str, &east_str, south_str) {
+        Some(h) => h,
+        None => {
+            eprintln!(
+                "Error: could not read the hands in '{file_path}'.\n\
+                 Expected four space-separated suits per hand, high to low, \
+                 with '-' for a void:\n\
+                 \x20 AQT62 - Q97 AT832\n\
+                 Suit symbols are accepted and ignored; 'x' wildcards are not."
+            );
+            std::process::exit(1);
+        }
+    };
 
     // Parse optional trump (line 4)
-    let trump: Option<usize> = if lines.len() > 3 {
-        let trump_str = lines[3].trim();
+    let trump: Option<usize> = if lines.len() > south_index + 1 {
+        let trump_str = lines[south_index + 1].trim();
         if !trump_str.is_empty() {
             Some(parse_trump(trump_str.chars().next().unwrap()))
         } else {
@@ -121,8 +157,8 @@ fn main() {
     };
 
     // Parse optional leader (line 5)
-    let leader: Option<usize> = if lines.len() > 4 {
-        let leader_str = lines[4].trim();
+    let leader: Option<usize> = if lines.len() > south_index + 2 {
+        let leader_str = lines[south_index + 2].trim();
         if !leader_str.is_empty() {
             Some(parse_seat(leader_str.chars().next().unwrap()))
         } else {
@@ -208,45 +244,55 @@ fn main() {
                 trump_char, results[0], results[1], results[2], results[3], total_time
             );
         }
+        if report_footprint {
+            let (cap, live, nodes, entry_bytes) = pattern_cache.footprint();
+            let table_mb = cap as f64 * entry_bytes as f64 / (1024.0 * 1024.0);
+            eprintln!(
+                "[FOOTPRINT] pattern cache: capacity {cap} x {entry_bytes} B = {table_mb:.0} MB \
+                 table, {live} live entries, {nodes} pattern nodes ({} below the roots, \
+                 each owning a separate Vec)",
+                nodes.saturating_sub(live)
+            );
+            let (pat, vec, hands_sz) = bridge_solver::type_sizes();
+            eprintln!(
+                "[FOOTPRINT] Pattern = {pat} B (Hands {hands_sz} + children {vec} + bounds/padding), \
+                 so {nodes} nodes are {:.0} MB of structs alone",
+                nodes as f64 * pat as f64 / (1024.0 * 1024.0)
+            );
+        }
     }
 }
 
 /// Parse the West/East line which has both hands separated by 2+ spaces
-fn parse_west_east(line: &str) -> (String, String) {
-    // Find the first run of 2+ spaces (the separator between West and East)
+/// Split a West/East line, or report that East is on the next line.
+///
+/// The reference looks for four consecutive spaces (or a tab) that are not at
+/// the very start of the line: a gap that wide is the space between the two
+/// hands of a diagram, while leading spaces are only indentation. When there is
+/// no such gap the East hand is on a line of its own, and `None` says so.
+fn split_west_east(line: &str) -> Option<(String, String)> {
     let bytes = line.as_bytes();
     let mut i = 0;
     while i < bytes.len() {
+        if bytes[i] == b'\t' && i > 0 {
+            return Some((line[..i].trim().to_string(), line[i..].trim().to_string()));
+        }
         if bytes[i] == b' ' {
             let start = i;
             while i < bytes.len() && bytes[i] == b' ' {
                 i += 1;
             }
-            // If we found 2+ spaces, split here
-            if i - start >= 2 {
-                let west = line[..start].trim().to_string();
-                let east = line[i..].trim().to_string();
-                return (west, east);
+            if start > 0 && i - start >= 4 {
+                return Some((
+                    line[..start].trim().to_string(),
+                    line[i..].trim().to_string(),
+                ));
             }
-        } else {
-            i += 1;
+            continue;
         }
+        i += 1;
     }
-
-    // Fallback: try splitting by tab
-    let trimmed = line.trim();
-    if let Some(pos) = trimmed.find('\t') {
-        let west = trimmed[..pos].trim().to_string();
-        let east = trimmed[pos..].trim().to_string();
-        (west, east)
-    } else {
-        // Last resort: split by whitespace and divide in half
-        let tokens: Vec<&str> = trimmed.split_whitespace().collect();
-        let mid = tokens.len() / 2;
-        let west = tokens[0..mid].join(" ");
-        let east = tokens[mid..].join(" ");
-        (west, east)
-    }
+    None
 }
 
 fn parse_trump(c: char) -> usize {
@@ -323,4 +369,23 @@ fn format_suit_cards(cards: Cards, suit: usize) -> String {
         s.push('-');
     }
     s
+}
+
+/// Parse `-C`: `STEP`, `START:END`, or `START:END:STEP`.
+///
+/// The three forms are the three stages of a bisection — sweep the whole run
+/// coarsely, then every iteration of the interval that disagreed, then narrow.
+/// `START:END` defaults to a step of 1 because that is what the last stage
+/// wants. Returns `(start, end, step)` with a step of 0 meaning "off".
+fn parse_cache_spec(arg: &str) -> (usize, usize, usize) {
+    let parts: Vec<usize> = arg
+        .split(':')
+        .map(|p| p.trim().parse().unwrap_or(0))
+        .collect();
+    match parts.as_slice() {
+        [step] => (0, 0, *step),
+        [start, end] => (*start, *end, 1),
+        [start, end, step] => (*start, *end, *step),
+        _ => (0, 0, 0),
+    }
 }

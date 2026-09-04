@@ -29,9 +29,76 @@ Release matters. A debug build is roughly two orders of magnitude slower and
 does not even rank the boards in the same order, so its "hardest board" is not
 the release build's hardest board.
 
-`--quick` measures only the median-cost board, chosen deterministically so two
-quick runs are comparable with each other. Use it while iterating; use the full
-corpus for anything recorded or compared across revisions.
+`--quick` measures only the median-cost board, where cost is **nodes searched**
+rather than wall time. Both rank the same ten solves, but nodes is a property of
+the deal and the search, so two `--quick` runs agree on which board they mean
+however busy the machine is. Ranking by a single unrepeated timing did not: two
+boards 6% apart traded places from run to run, and an A/B over them averaged two
+different workloads.
+
+Use `--quick` while iterating. Use the full corpus for anything recorded, and
+for any A/B -- ten paired per-board ratios are what make a difference
+attributable, because a real change moves every board by roughly the same
+fraction and noise does not.
+
+## Instructions, when the question is "did I remove work"
+
+```bash
+solver-bench cost <file.pbn>
+```
+
+Instructions retired, cycles, nodes and wall for a corpus, in one pass. The
+first of those is nearly deterministic -- 0.015% over five repeats on a machine
+at load average 5, against 1.45% for wall clock -- because it is a property of
+the code rather than of the machine. One run of it beats fifteen timed ones for
+the question "does this change do less work", and it survives a busy machine.
+
+It is not a substitute for timing. Instructions are not time, and the ratio
+between them is the interesting part: the `convert_suit` change measured -5.94%
+instructions but -2.12% cycles and -1.89% wall, because what it deleted was
+cheap parallel ALU work and IPC fell from 2.80 to 2.70. Fewer instructions with
+*more* cycles means a change traded compute for stalls, which is worth knowing
+early. Iterate with `cost`, record with `run`.
+
+### Prefer cycles to wall clock for "is it faster"
+
+Cycles are the middle term, and they are the one to quote. Twelve repeats on a
+loaded machine:
+
+| | spread | CV |
+|---|---|---|
+| instructions | 0.017% | 0.004% |
+| cycles | 1.010% | 0.344% |
+| wall | 1.131% | 0.404% |
+| **wall per cycle** | **0.270%** | 0.080% |
+
+That last row is the important one. Wall per cycle is nearly constant, so on a
+machine whose work stays on the performance cores, cycles and wall carry the
+same information and cycles buys almost nothing -- and the 1% both of them
+still wander is *real*, not jitter: it is `cycles/instruction` moving by the
+same 1.007%, which is cache and predictor state genuinely differing as other
+processes come and go. No counter averages that away.
+
+Cycles earn their keep in the case that silently ruins a wall-clock result:
+work landing on an efficiency core. The same corpus, forced there with
+`taskpolicy -b`:
+
+| | P-cores | E-cores | inflated by |
+|---|---|---|---|
+| instructions | 31.219e9 | 31.451e9 | 0.74% |
+| cycles | 11.629e9 | 15.881e9 | 36.6% |
+| wall | 2,918 ms | 12,014 ms | **312%** |
+
+Effective clock 3.99 GHz against 1.32 GHz. Cycles absorb the frequency
+difference entirely and leave only the efficiency core's lower IPC, so an
+excursion that makes wall clock wrong by a factor of four makes cycles wrong by
+a factor of 1.4 -- and a minimum-of-three rejects it easily, where in wall
+clock it can hide inside a mean.
+
+So: **cycles as the headline for speed, wall for anything user-facing** (a
+person waits on seconds, not cycles), and instructions to ask whether the work
+itself changed. Cycles are never worse than wall and occasionally much better,
+which is the whole argument for them.
 
 ## Wall clock and CPU, always both
 
@@ -102,12 +169,27 @@ converted from the LIN fixture and confirmed to reproduce them exactly. So the
 corpus is a correctness fixture as well as a workload, and a run that is fast
 and wrong says so.
 
+## Comparing against other solvers
+
+Everything above is this port measured against itself, which is what the ten
+curated boards are for. Comparing *products* -- this port, DDS 2.9 and the C++
+reference -- is a different job with a different corpus and different
+methodology, and it lives in `comparison/`. Start with
+`comparison/METHODOLOGY.md`.
+
 ## Files
 
 ```
 bench/
   corpus.json                     the boards, with their pinned DD tables
   README.md                       this file
+  comparison/
+    METHODOLOGY.md                how the three-solver comparison is measured
+    RESULTS.md                    what it currently says
+    gen-corpus.py                 the shared random corpus, from a seed
+    build-reference.sh            build macroxue/bridge-solver for comparison
+    ref-latency.patch             its per-deal timing instrumentation
+    throughput.sh                 whole-set wall clock at N threads
   results/
     BASELINE.md                   the current reference numbers, and what they mean
     <name>.json                   a recorded run
