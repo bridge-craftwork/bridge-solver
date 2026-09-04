@@ -62,6 +62,27 @@ bridge-solver -w -i a.pbn b.pbn Extra/     # several inputs at once
 A file is taken as given whatever its extension, so a `.txt` full of PBN can be
 named directly; the `*.pbn` filter applies only when walking a directory.
 
+## Vulnerability, and when par appears
+
+`OptimumScore` and `ParContract` need to know who is vulnerable, so they are
+written only for a board carrying a `[Vulnerable]` tag the parser recognises.
+The `DoubleDummyTricks` table and `OptimumResultTable` do not depend on it and
+are written either way.
+
+The accepted values are the ones PBN 2.1 §3.4.10 defines:
+
+| Tag value | Meaning |
+|---|---|
+| `None`, `Love`, `-` | neither side |
+| `NS` | North-South |
+| `EW` | East-West |
+| `All`, `Both` | both sides |
+
+Case is not significant, and the hyphenated `N-S` and `E-W` are accepted too as
+a common informal spelling. Anything else — including bare `N` or `E`, which the
+spec does not define — is treated as "no vulnerability stated": the board keeps
+its double-dummy table and simply gets no par.
+
 ## What it will not touch
 
 The pass is designed to be safe to run over source material you care about.
