@@ -18,6 +18,7 @@ use bridge_solver::{
     par, CutoffCache, DdTricks, Hands, PatternCache, Solver, CLUB, DIAMOND, EAST, HEART, NORTH,
     NOTRUMP, SOUTH, SPADE, WEST,
 };
+use bridge_types::{Direction, Vulnerability};
 use clap::Parser;
 use std::fs;
 use std::io::{self, Write};
@@ -73,15 +74,6 @@ struct Args {
     /// order the work finished, so any thread count produces identical bytes.
     #[arg(short = 'j', long = "threads", value_name = "N")]
     threads: Option<usize>,
-}
-
-/// Vulnerability state
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Vulnerability {
-    None,
-    NS,
-    EW,
-    All,
 }
 
 /// Double-dummy results for all 20 combinations
@@ -650,14 +642,12 @@ fn extract_vulnerability_tag(line: &str) -> Option<Vulnerability> {
         return None;
     }
 
-    let value = &trimmed[start..end];
-    match value.to_uppercase().as_str() {
-        "NONE" | "LOVE" | "-" => Some(Vulnerability::None),
-        "NS" | "N" => Some(Vulnerability::NS),
-        "EW" | "E" => Some(Vulnerability::EW),
-        "ALL" | "BOTH" => Some(Vulnerability::All),
-        _ => None,
-    }
+    // `bridge_types` owns the spelling table, and is what `bridge-encodings`
+    // and `pbn-to-pdf` already parse this tag with. Keeping a private copy here
+    // is how this binary came to accept `"N"` and `"E"` — which PBN 2.1 §3.4.10
+    // does not define — while rejecting the `"N-S"` and `"E-W"` that everything
+    // else in the family accepts.
+    Vulnerability::from_pbn(&trimmed[start..end])
 }
 
 /// Extract the tag name from a tag line like "[TagName ...]"
@@ -852,13 +842,11 @@ fn generate_dd_tags(results: &DdResults, vulnerability: Option<Vulnerability>) -
 
     // 2. Par: OptimumScore + ParContract (needs vulnerability to score).
     if let Some(vul) = vulnerability {
-        let (vul_ns, vul_ew) = match vul {
-            Vulnerability::None => (false, false),
-            Vulnerability::NS => (true, false),
-            Vulnerability::EW => (false, true),
-            Vulnerability::All => (true, true),
-        };
-        let p = par(&to_par_table(results), vul_ns, vul_ew);
+        let p = par(
+            &to_par_table(results),
+            vul.is_vulnerable(Direction::North),
+            vul.is_vulnerable(Direction::East),
+        );
         output.push_str(&format!("[OptimumScore \"{}\"]\n", p.optimum_score()));
         if let Some(c) = p.contract {
             output.push_str(&format!("[ParContract \"{}\"]\n", c.describe()));
@@ -916,28 +904,69 @@ mod tests {
         assert!(extract_deal_tag("N NT 3").is_none());
     }
 
+    /// Every spelling PBN 2.1 §3.4.10 defines, and nothing else.
     #[test]
     fn test_extract_vulnerability() {
+        use Vulnerability::{Both, EastWest, None as NoneVul, NorthSouth};
+        for (value, expected) in [
+            ("None", NoneVul),
+            ("Love", NoneVul),
+            ("-", NoneVul),
+            ("NS", NorthSouth),
+            ("EW", EastWest),
+            ("All", Both),
+            ("Both", Both),
+        ] {
+            assert_eq!(
+                extract_vulnerability_tag(&format!("[Vulnerable \"{value}\"]")),
+                Some(expected),
+                "{value}"
+            );
+        }
+    }
+
+    /// Case is not significant, which the spec's own mixed-case examples imply.
+    #[test]
+    fn vulnerability_is_case_insensitive() {
         assert_eq!(
-            extract_vulnerability_tag("[Vulnerable \"None\"]"),
+            extract_vulnerability_tag("[Vulnerable \"none\"]"),
             Some(Vulnerability::None)
         );
         assert_eq!(
-            extract_vulnerability_tag("[Vulnerable \"NS\"]"),
-            Some(Vulnerability::NS)
+            extract_vulnerability_tag("[Vulnerable \"bOtH\"]"),
+            Some(Vulnerability::Both)
+        );
+    }
+
+    /// Gained by moving to `bridge_types`. Not in the spec, but every other
+    /// crate in the family accepts them, and this binary used to be the one
+    /// that silently emitted no par contract for a board written this way.
+    #[test]
+    fn vulnerability_accepts_the_hyphenated_forms() {
+        assert_eq!(
+            extract_vulnerability_tag("[Vulnerable \"N-S\"]"),
+            Some(Vulnerability::NorthSouth)
         );
         assert_eq!(
-            extract_vulnerability_tag("[Vulnerable \"EW\"]"),
-            Some(Vulnerability::EW)
+            extract_vulnerability_tag("[Vulnerable \"E-W\"]"),
+            Some(Vulnerability::EastWest)
         );
-        assert_eq!(
-            extract_vulnerability_tag("[Vulnerable \"All\"]"),
-            Some(Vulnerability::All)
-        );
-        assert_eq!(
-            extract_vulnerability_tag("[Vulnerable \"Both\"]"),
-            Some(Vulnerability::All)
-        );
+    }
+
+    /// Lost by moving to `bridge_types`, deliberately: PBN 2.1 §3.4.10 does not
+    /// define bare `"N"` or `"E"`, and nothing here ever produced them. An
+    /// unrecognised value means "no vulnerability stated", so such a board keeps
+    /// its double-dummy table and simply gets no par — the same treatment as a
+    /// board with no `[Vulnerable]` tag at all.
+    #[test]
+    fn vulnerability_rejects_undefined_spellings() {
+        for value in ["N", "E", "S", "W", "NorthSouth", ""] {
+            assert_eq!(
+                extract_vulnerability_tag(&format!("[Vulnerable \"{value}\"]")),
+                Option::None,
+                "{value}"
+            );
+        }
     }
 
     #[test]
