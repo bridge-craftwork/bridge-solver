@@ -317,6 +317,27 @@ fn process_pbn(content: &str, verbose: bool, recalculate: bool, mark_verified: b
 /// pass records the hands it is asked about, and a second pass — running the
 /// same code, so it makes the same decisions about which boards to skip — hands
 /// back the tables solved in between.
+///
+/// # Why this is still hand-rolled
+///
+/// `bridge_encodings::pbn::PbnDocument` exists to retire exactly this, and it
+/// was measured against the file below rather than argued about. It keeps every
+/// guarantee this code was written for: an untouched document round-trips
+/// byte-for-byte, `%` directives and `;` comments and `{...}` commentary all
+/// survive, `is_modified()` is false after re-annotating an annotated file so a
+/// re-run churns no mtimes, a board whose `[Deal]` will not parse comes back as
+/// an ordinary board to be skipped rather than failing the file, and an
+/// existing `OptimumResultTable` is replaced header and rows together.
+///
+/// What it cannot do is place a *group* of tags. `set_tag` ranks each tag on
+/// its own — mandatory tags in the standard's order, then supplemental tags
+/// alphabetically — so the four tags this binary writes come out as
+/// `DoubleDummyTricks, OptimumResultTable, OptimumScore, ParContract`, the
+/// twenty-row table wedged between the one-line summaries, whatever order the
+/// calls are made in. This binary writes them the other way round and has
+/// written them that way into every file it has ever annotated, so adopting
+/// `PbnDocument` today would rewrite every board it touches. Tracked as
+/// bridge-craftwork/bridge-encodings#13; when that lands, this goes.
 fn process_pbn_with(
     content: &str,
     verbose: bool,
