@@ -22,6 +22,7 @@ use clap::Parser;
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 #[derive(Parser)]
 #[command(name = "bridge-solver")]
@@ -57,6 +58,21 @@ struct Args {
     /// Verbose output - show progress
     #[arg(short = 'v', long = "verbose")]
     verbose: bool,
+
+    /// Worker threads used for solving. Defaults to the machine's available
+    /// parallelism; `1` solves serially.
+    ///
+    /// Work is spread over (deal, strain) pairs rather than whole deals. A
+    /// strain is the smallest piece of a table that can move to another thread
+    /// without changing the search: its four declarers share one pair of caches
+    /// and a chain of MTD(f) seeds, and nothing crosses the boundary from one
+    /// strain to the next. Deal cost spans roughly tenfold, so the finer unit is
+    /// what keeps the last threads busy instead of waiting on the slowest deal.
+    ///
+    /// Output does not depend on this: tables are assembled by index, not by the
+    /// order the work finished, so any thread count produces identical bytes.
+    #[arg(short = 'j', long = "threads", value_name = "N")]
+    threads: Option<usize>,
 }
 
 /// Vulnerability state
@@ -123,24 +139,109 @@ fn main() {
         std::process::exit(1);
     }
 
-    let mut changed = 0usize;
+    let threads = args
+        .threads
+        .unwrap_or_else(|| {
+            std::thread::available_parallelism()
+                .map(|n| n.get())
+                .unwrap_or(1)
+        })
+        .max(1);
+
+    // Read every input before solving any of it. The solve is one batch across
+    // all of them, so a directory of one-deal files spreads over the threads
+    // exactly as well as a single file of many deals does.
+    let mut contents = Vec::with_capacity(files.len());
     for path in &files {
-        let content = match fs::read_to_string(path) {
-            Ok(c) => c,
+        match fs::read_to_string(path) {
+            Ok(c) => contents.push(c),
             Err(e) => {
                 eprintln!("Error reading input file '{}': {}", path.display(), e);
                 std::process::exit(1);
             }
+        }
+    }
+
+    // Pass 1 finds the boards that need analysis without solving any of them.
+    // It runs the real processor with a recording stub rather than a separate
+    // scanner, so the boards it asks about are exactly the boards pass 2 will
+    // ask about — the "already analysed", "incomplete deal" and `--recalculate`
+    // decisions are made once, by one piece of code.
+    let mut pending: Vec<Hands> = Vec::new();
+    for content in &contents {
+        let mut collect = |hands: &Hands| {
+            pending.push(*hands);
+            DdResults {
+                tricks: [[0u8; 5]; 4],
+            }
         };
+        process_pbn_with(
+            content,
+            false,
+            args.recalculate,
+            args.mark_verified,
+            &mut collect,
+        );
+    }
+
+    let items = pending.len() * DENOMINATIONS.len();
+    let threads = threads.min(items.max(1));
+    if args.verbose {
+        eprintln!(
+            "{} board(s) to analyse in {} file(s), on {} thread(s)",
+            pending.len(),
+            files.len(),
+            threads
+        );
+    }
+
+    let solved: Vec<DdResults> = if threads > 1 {
+        solve_deals_parallel(&pending, threads, args.verbose)
+    } else {
+        let done = AtomicUsize::new(0);
+        pending
+            .iter()
+            .map(|hands| {
+                let table = solve_deal(hands);
+                if args.verbose {
+                    for _ in 0..DENOMINATIONS.len() {
+                        report_progress(&done, items);
+                    }
+                }
+                table
+            })
+            .collect()
+    };
+
+    // Pass 2 rebuilds each file, taking each board's table from the batch.
+    let mut tables = solved.into_iter();
+    let mut changed = 0usize;
+    for (path, content) in files.iter().zip(&contents) {
         if args.verbose {
             eprintln!("Processing {}...", path.display());
         }
-        let result = process_pbn(&content, args.verbose, args.recalculate, args.mark_verified);
+        let mut replay = |_: &Hands| match tables.next() {
+            Some(table) => table,
+            // Both passes run the same code over the same bytes, so they cannot
+            // disagree; if they ever did, stopping beats writing a table of
+            // zeroes over someone's file.
+            None => {
+                eprintln!("Error: internal mismatch between the analysis and writing passes");
+                std::process::exit(1);
+            }
+        };
+        let result = process_pbn_with(
+            content,
+            args.verbose,
+            args.recalculate,
+            args.mark_verified,
+            &mut replay,
+        );
 
         if args.in_place {
             // Unchanged files are left untouched so a re-run is a true no-op
             // and does not churn mtimes in a build.
-            if result == content {
+            if &result == content {
                 continue;
             }
             if let Err(e) = write_atomically(path, &result) {
@@ -236,8 +337,35 @@ fn with_verified_bit(line: &str) -> String {
     format!("[BCFlags \"{:x}\"]", current | BC_FLAG_DD_VERIFIED)
 }
 
-/// Process a PBN file: find deals, solve them, insert/replace DD tags
+/// Process a PBN file: find deals, solve them, insert/replace DD tags.
+///
+/// Solves each deal inline, on the calling thread. `main` goes through
+/// [`process_pbn_with`] in every case, so this is the tests' way in.
+#[cfg(test)]
 fn process_pbn(content: &str, verbose: bool, recalculate: bool, mark_verified: bool) -> String {
+    process_pbn_with(
+        content,
+        verbose,
+        recalculate,
+        mark_verified,
+        &mut solve_deal,
+    )
+}
+
+/// [`process_pbn`], with each deal's table supplied by the caller.
+///
+/// `solve` is called once per board that needs analysis, in file order, and its
+/// return value becomes that board's table. Threading is built on this: a first
+/// pass records the hands it is asked about, and a second pass — running the
+/// same code, so it makes the same decisions about which boards to skip — hands
+/// back the tables solved in between.
+fn process_pbn_with(
+    content: &str,
+    verbose: bool,
+    recalculate: bool,
+    mark_verified: bool,
+    solve: &mut dyn FnMut(&Hands) -> DdResults,
+) -> String {
     // Split into deal blocks (separated by blank lines outside of brace comments)
     let mut result = String::new();
     let mut deal_count = 0;
@@ -293,6 +421,7 @@ fn process_pbn(content: &str, verbose: bool, recalculate: bool, mark_verified: b
             verbose,
             recalculate,
             mark_verified,
+            solve,
         );
         result.push_str(&processed);
     }
@@ -311,6 +440,7 @@ fn process_deal_block(
     verbose: bool,
     recalculate: bool,
     mark_verified: bool,
+    solve: &mut dyn FnMut(&Hands) -> DdResults,
 ) -> String {
     // Find the Deal tag to extract hands
     let mut deal_str: Option<&str> = None;
@@ -382,7 +512,7 @@ fn process_deal_block(
     }
 
     // Solve the deal
-    let dd_results = solve_deal(&hands);
+    let dd_results = solve(&hands);
 
     // Generate the DD tags
     let dd_tags = generate_dd_tags(&dd_results, vulnerability);
@@ -574,48 +704,140 @@ fn is_optimum_result_data_line(line: &str) -> bool {
     parts[2].parse::<u8>().is_ok()
 }
 
-/// Solve a deal and return DD results
+/// The five strains, in the order the `DoubleDummyTricks` tag wants them.
+const DENOMINATIONS: [usize; 5] = [NOTRUMP, SPADE, HEART, DIAMOND, CLUB];
+
+/// The four declarers, in the order the `DoubleDummyTricks` tag wants them.
+const DECLARERS: [usize; 4] = [NORTH, SOUTH, EAST, WEST];
+
+/// Solve one strain of one deal: all four declarers, returned in `DECLARERS`
+/// order as declarer's tricks.
+///
+/// This is the unit of parallel work, and it is the smallest one that does not
+/// change the search. The four declarers share a single pair of caches and a
+/// chain of MTD(f) seeds — each cell seeds the next, see `Solver::seed_from` —
+/// while nothing at all crosses the boundary from one strain to the next, so
+/// strains may be solved in any order, on any thread, without affecting a
+/// single node visited.
+fn solve_strain(hands: &Hands, denom_idx: usize) -> [u8; 4] {
+    let trump = DENOMINATIONS[denom_idx];
+
+    // Fresh caches for each trump contract, shared across the four leaders.
+    let mut cutoff_cache = CutoffCache::new(16);
+    let mut pattern_cache = PatternCache::new(16);
+    let mut seed: Option<usize> = None;
+
+    let mut cells = [0u8; 4];
+    for (decl_idx, declarer_seat) in DECLARERS.iter().enumerate() {
+        // The leader is to the left of declarer
+        let leader = (*declarer_seat + 1) % 4;
+
+        let solver = Solver::new(*hands, trump, leader);
+        let ns_tricks = match seed {
+            Some(g) => solver.solve_with_caches_seeded(&mut cutoff_cache, &mut pattern_cache, g),
+            None => solver.solve_with_caches(&mut cutoff_cache, &mut pattern_cache),
+        };
+        seed = Some(Solver::seed_from(ns_tricks));
+
+        // Convert to declarer's tricks
+        cells[decl_idx] = if *declarer_seat == NORTH || *declarer_seat == SOUTH {
+            ns_tricks
+        } else {
+            hands.num_tricks() as u8 - ns_tricks
+        };
+    }
+    cells
+}
+
+/// Note one finished work item and, at each ten percent, say so.
+///
+/// The decile test is true for exactly one value of `n`, so exactly one thread
+/// prints each line however many are running and in whatever order they finish.
+fn report_progress(done: &AtomicUsize, items: usize) {
+    let n = done.fetch_add(1, Ordering::Relaxed) + 1;
+    if items > 0 && n * 10 / items != (n - 1) * 10 / items {
+        eprintln!("  {}% ({n} of {items} strains)", n * 100 / items);
+    }
+}
+
+/// Solve a deal and return DD results, on the calling thread.
 fn solve_deal(hands: &Hands) -> DdResults {
-    // Solve for each declarer (N, S, E, W) and denomination (NT, S, H, D, C)
-    let declarers = [NORTH, SOUTH, EAST, WEST];
-    let denominations = [NOTRUMP, SPADE, HEART, DIAMOND, CLUB];
+    let strains: [[u8; 4]; 5] = std::array::from_fn(|denom_idx| solve_strain(hands, denom_idx));
 
-    // Store results: [declarer][denomination] = tricks
+    // Transpose into [declarer][denomination], which is what the tags want.
     let mut results = [[0u8; 5]; 4];
-
-    // Solve for each denomination (caches are per-trump, shared across leaders)
-    for (denom_idx, trump) in denominations.iter().enumerate() {
-        // Create fresh caches for each trump contract
-        let mut cutoff_cache = CutoffCache::new(16);
-        let mut pattern_cache = PatternCache::new(16);
-        // Each cell seeds the next one's MTD(f) search; see `Solver::seed_from`.
-        let mut seed: Option<usize> = None;
-
-        for (decl_idx, declarer_seat) in declarers.iter().enumerate() {
-            // The leader is to the left of declarer
-            let leader = (*declarer_seat + 1) % 4;
-
-            let solver = Solver::new(*hands, *trump, leader);
-            let ns_tricks = match seed {
-                Some(g) => {
-                    solver.solve_with_caches_seeded(&mut cutoff_cache, &mut pattern_cache, g)
-                }
-                None => solver.solve_with_caches(&mut cutoff_cache, &mut pattern_cache),
-            };
-            seed = Some(Solver::seed_from(ns_tricks));
-
-            // Convert to declarer's tricks
-            let declarer_tricks = if *declarer_seat == NORTH || *declarer_seat == SOUTH {
-                ns_tricks
-            } else {
-                hands.num_tricks() as u8 - ns_tricks
-            };
-
-            results[decl_idx][denom_idx] = declarer_tricks;
+    for (denom_idx, cells) in strains.iter().enumerate() {
+        for (decl_idx, tricks) in cells.iter().enumerate() {
+            results[decl_idx][denom_idx] = *tricks;
         }
     }
-
     DdResults { tricks: results }
+}
+
+/// Solve every deal in `deals` across `threads` workers, returning one table per
+/// deal in the order given.
+///
+/// Work is handed out one (deal, strain) pair at a time from a shared counter,
+/// so a thread that draws a cheap strain comes straight back for another. That
+/// matters because deal cost spans roughly tenfold: scheduling whole deals ends
+/// the run when the slowest deal ends, with most threads long since idle, which
+/// is the load-imbalance signature `bench/comparison/RESULTS.md` measured.
+///
+/// Each worker accumulates its own results and they are merged after the join,
+/// so the only state shared between threads is the counter, and the merge is by
+/// index — the output is identical whatever order the work completed in.
+fn solve_deals_parallel(deals: &[Hands], threads: usize, verbose: bool) -> Vec<DdResults> {
+    let items = deals.len() * DENOMINATIONS.len();
+    let next = AtomicUsize::new(0);
+    let done = AtomicUsize::new(0);
+
+    let harvest = std::thread::scope(|scope| {
+        let workers: Vec<_> = (0..threads)
+            .map(|_| {
+                scope.spawn(|| {
+                    let mut mine: Vec<(usize, usize, [u8; 4])> = Vec::new();
+                    loop {
+                        let item = next.fetch_add(1, Ordering::Relaxed);
+                        if item >= items {
+                            break;
+                        }
+                        let (deal_idx, denom_idx) =
+                            (item / DENOMINATIONS.len(), item % DENOMINATIONS.len());
+                        mine.push((
+                            deal_idx,
+                            denom_idx,
+                            solve_strain(&deals[deal_idx], denom_idx),
+                        ));
+                        if verbose {
+                            report_progress(&done, items);
+                        }
+                    }
+                    mine
+                })
+            })
+            .collect();
+
+        workers.into_iter().map(|w| w.join()).collect::<Vec<_>>()
+    });
+
+    let mut tables = vec![[[0u8; 5]; 4]; deals.len()];
+    for worker in harvest {
+        // A worker only ends by panicking, which has already printed its own
+        // message; carrying on would silently write a table of zeroes.
+        let Ok(found) = worker else {
+            eprintln!("Error: a solver thread panicked; no files were written");
+            std::process::exit(1);
+        };
+        for (deal_idx, denom_idx, cells) in found {
+            for (decl_idx, tricks) in cells.iter().enumerate() {
+                tables[deal_idx][decl_idx][denom_idx] = *tricks;
+            }
+        }
+    }
+    tables
+        .into_iter()
+        .map(|tricks| DdResults { tricks })
+        .collect()
 }
 
 /// Generate all DD tags as a string
@@ -938,5 +1160,66 @@ W  C  0
         assert_eq!(result.matches("[DoubleDummyTricks").count(), 1);
         assert_eq!(result.matches("[OptimumScore").count(), 0);
         assert_eq!(result.matches("[ParContract").count(), 0);
+    }
+
+    /// A few deals of varying shape, including one with a void, since voids are
+    /// the case where the caches behave differently.
+    fn sample_deals() -> Vec<Hands> {
+        [
+            "N:62.JT765.AKJ5.Q3 KQ85.Q9.Q876.J75 J9743.K84.T2.K84 AT.A32.943.AT962",
+            "N:Q7432.85.J983.63 J65.64.AKT5.AK98 AK98.AKQJ7.6.QJ7 T.T932.Q742.T542",
+            "N:KJ86.KQ9.T3.JT76 QT53.JT74.87.A93 -.A83.AQJ642.K542 A9742.652.K95.Q8",
+        ]
+        .iter()
+        .filter_map(|d| Hands::from_pbn(d))
+        .collect()
+    }
+
+    /// The threaded path must agree with the serial one cell for cell. It is the
+    /// same search either way — a strain's four declarers stay together on one
+    /// thread — so this is an equality, not an approximation.
+    #[test]
+    fn parallel_solve_matches_serial() {
+        let deals = sample_deals();
+        assert_eq!(deals.len(), 3);
+
+        let serial: Vec<[[u8; 5]; 4]> = deals.iter().map(|h| solve_deal(h).tricks).collect();
+
+        for threads in [2, 4, 12] {
+            let threaded: Vec<[[u8; 5]; 4]> = solve_deals_parallel(&deals, threads, false)
+                .into_iter()
+                .map(|r| r.tricks)
+                .collect();
+            assert_eq!(threaded, serial, "disagreement on {threads} threads");
+        }
+    }
+
+    /// Results are placed by index, so they come back in the order the deals
+    /// were given however the work was scheduled.
+    #[test]
+    fn parallel_solve_keeps_deal_order() {
+        let deals = sample_deals();
+        let forward = solve_deals_parallel(&deals, 8, false);
+
+        let mut reversed_input = deals.clone();
+        reversed_input.reverse();
+        let mut reversed = solve_deals_parallel(&reversed_input, 8, false);
+        reversed.reverse();
+
+        let forward: Vec<_> = forward.into_iter().map(|r| r.tricks).collect();
+        let reversed: Vec<_> = reversed.into_iter().map(|r| r.tricks).collect();
+        assert_eq!(forward, reversed);
+    }
+
+    /// More threads than there is work to do must still terminate and be right.
+    #[test]
+    fn parallel_solve_with_more_threads_than_work() {
+        let deals = sample_deals();
+        let serial: Vec<_> = deals.iter().map(|h| solve_deal(h).tricks).collect();
+        let threaded: Vec<_> = solve_deals_parallel(&deals, 64, false)
+            .into_iter()
+            .map(|r| r.tricks)
+            .collect();
+        assert_eq!(threaded, serial);
     }
 }

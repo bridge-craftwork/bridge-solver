@@ -107,3 +107,58 @@ jobs:
           fail_on_unmatched_files: false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # The fifth target. The same engine as the CLIs, compiled to wasm32 and
+  # wrapped for JavaScript, so a browser or a Node process can solve without a
+  # native binary. This is what the demonstration site runs on; releasing it
+  # means someone can build against the exact engine a given tag shipped.
+  build-wasm:
+    name: Build WebAssembly package
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: wasm
+
+      # PINNED, not `latest`, for the reason spelled out in pages.yml: this
+      # action resolves `latest` through the GitHub API and, when that call
+      # fails, does not fail the step but silently falls back to wasm-pack
+      # v0.9.1, whose wasm-opt is too old to parse what wasm-bindgen emits.
+      - name: Install wasm-pack
+        uses: jetli/wasm-pack-action@v0.4.0
+        with:
+          version: 'v0.15.0'
+
+      # `--target web` loads from a plain <script type="module"> and through
+      # any bundler. Unlike the site build this keeps the TypeScript
+      # definitions, since the point of the artifact is other people writing
+      # against it.
+      - name: Build the WebAssembly package
+        run: wasm-pack build wasm --release --target web --out-dir pkg
+
+      - name: Create distribution package
+        shell: bash
+        run: |
+          mkdir -p dist
+          # wasm-pack writes a `.gitignore` of `*` into the output; it means
+          # nothing inside a tarball and only confuses whoever unpacks it.
+          rm -f wasm/pkg/.gitignore
+          cp LICENSE-MIT LICENSE-APACHE wasm/pkg/
+          tar -czf dist/bridge-solver-wasm.tar.gz -C wasm pkg
+
+      - name: Upload Release Assets
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/bridge-solver-wasm.tar.gz
+          fail_on_unmatched_files: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
