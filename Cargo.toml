@@ -66,6 +66,7 @@ required-features = ["play-analysis"]
 
 [dependencies]
 bridge-types = { git = "https://github.com/bridge-craftwork/bridge-types" }
+bridge-encodings = { git = "https://github.com/bridge-craftwork/bridge-encodings" }
 clap = { version = "4", features = ["derive"], optional = true }
 serde = { version = "1", features = ["derive"], optional = true }
 sha2 = { version = "0.10", optional = true }

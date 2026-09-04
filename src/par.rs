@@ -188,7 +188,23 @@ impl TableSolver {
     /// cost of the split: a bitmask fill against a search measured in
     /// milliseconds.
     pub fn solve_strain(&mut self, deal: &Deal, strain: Strain) -> [u8; 4] {
-        let hands = Hands::from_deal(deal);
+        self.solve_strain_hands(Hands::from_deal(deal), strain)
+    }
+
+    /// [`Self::solve_strain`] for a caller that already holds [`Hands`].
+    ///
+    /// The same search and the same column; what differs is what it will read.
+    /// [`Hands::from_pbn`] accepts deal strings that
+    /// [`Deal::from_pbn`](bridge_types::Deal::from_pbn) rejects — one with no
+    /// leading `N:` seat, one writing a void as `-` inside a suit rather than
+    /// as the whole suit — so a caller that parsed with the first and then
+    /// went through a `Deal` to reach this solver would silently stop
+    /// accepting files it reads today. This is the way in that does not narrow
+    /// them.
+    ///
+    /// It also skips re-deriving [`Hands`], which the `Deal` form pays on
+    /// every call — five times a table when a caller splits by strain.
+    pub fn solve_strain_hands(&mut self, hands: Hands, strain: Strain) -> [u8; 4] {
         let total = hands.num_tricks() as u8;
         self.solve_strain_inner(hands, total, strain, |_, _, _| {})
     }
