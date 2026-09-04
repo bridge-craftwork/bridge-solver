@@ -14,11 +14,14 @@
 //!   bridge-solver -i <file.pbn>                 # one file to stdout
 //!   bridge-solver -w -i <file.pbn> <dir> ...    # annotate in place, recursively
 
+use bridge_encodings::pbn::{
+    dd_table_to_pbn, is_optimum_result_row, optimum_result_table_rows, OPTIMUM_RESULT_TABLE_HEADER,
+};
 use bridge_solver::{
     par, CutoffCache, DdTricks, Hands, PatternCache, Solver, CLUB, DIAMOND, EAST, HEART, NORTH,
     NOTRUMP, SOUTH, SPADE, WEST,
 };
-use bridge_types::{Direction, Vulnerability};
+use bridge_types::{DdTable, Direction, Strain, Vulnerability};
 use clap::Parser;
 use std::fs;
 use std::io::{self, Write};
@@ -76,38 +79,6 @@ struct Args {
     threads: Option<usize>,
 }
 
-/// Double-dummy results for all 20 combinations
-#[derive(Debug, Clone)]
-struct DdResults {
-    /// results[declarer][denomination] = tricks (declarer: 0=N,1=S,2=E,3=W; denom: 0=NT,1=S,2=H,3=D,4=C)
-    tricks: [[u8; 5]; 4],
-}
-
-impl DdResults {
-    /// Encode as DoubleDummyTricks string (20 hex-like chars)
-    /// Format: N(NT,S,H,D,C) + S(NT,S,H,D,C) + E(NT,S,H,D,C) + W(NT,S,H,D,C)
-    fn encode_ddt(&self) -> String {
-        let mut s = String::with_capacity(20);
-        for decl in 0..4 {
-            for denom in 0..5 {
-                let tricks = self.tricks[decl][denom];
-                let ch = if tricks <= 9 {
-                    (b'0' + tricks) as char
-                } else {
-                    (b'a' + (tricks - 10)) as char
-                };
-                s.push(ch);
-            }
-        }
-        s
-    }
-
-    /// Get tricks for a specific declarer and denomination
-    fn get(&self, declarer: usize, denom: usize) -> u8 {
-        self.tricks[declarer][denom]
-    }
-}
-
 fn main() {
     let args = Args::parse();
 
@@ -163,9 +134,7 @@ fn main() {
     for content in &contents {
         let mut collect = |hands: &Hands| {
             pending.push(*hands);
-            DdResults {
-                tricks: [[0u8; 5]; 4],
-            }
+            DdTable::new()
         };
         process_pbn_with(
             content,
@@ -187,7 +156,7 @@ fn main() {
         );
     }
 
-    let solved: Vec<DdResults> = if threads > 1 {
+    let solved: Vec<DdTable> = if threads > 1 {
         solve_deals_parallel(&pending, threads, args.verbose)
     } else {
         let done = AtomicUsize::new(0);
@@ -356,7 +325,7 @@ fn process_pbn_with(
     verbose: bool,
     recalculate: bool,
     mark_verified: bool,
-    solve: &mut dyn FnMut(&Hands) -> DdResults,
+    solve: &mut dyn FnMut(&Hands) -> DdTable,
 ) -> String {
     // Split into deal blocks (separated by blank lines outside of brace comments)
     let mut result = String::new();
@@ -432,7 +401,7 @@ fn process_deal_block(
     verbose: bool,
     recalculate: bool,
     mark_verified: bool,
-    solve: &mut dyn FnMut(&Hands) -> DdResults,
+    solve: &mut dyn FnMut(&Hands) -> DdTable,
 ) -> String {
     // Find the Deal tag to extract hands
     let mut deal_str: Option<&str> = None;
@@ -555,7 +524,7 @@ fn process_deal_block(
 
         // Skip data lines that follow OptimumResultTable
         if skipping_optimum_data {
-            if is_optimum_result_data_line(line) {
+            if is_optimum_result_row(line) {
                 continue;
             } else {
                 // Stop skipping when we hit a non-data line
@@ -660,45 +629,32 @@ fn extract_tag_name(line: &str) -> Option<&str> {
     Some(&rest[..end])
 }
 
-/// Check if a line is OptimumResultTable data (e.g., "N NT  3")
-fn is_optimum_result_data_line(line: &str) -> bool {
-    let trimmed = line.trim();
-    if trimmed.is_empty() {
-        return false;
-    }
-
-    // Must start with a seat letter
-    let first_char = trimmed.chars().next().unwrap_or(' ');
-    if !['N', 'S', 'E', 'W'].contains(&first_char) {
-        return false;
-    }
-
-    let parts: Vec<&str> = trimmed.split_whitespace().collect();
-    if parts.len() != 3 {
-        return false;
-    }
-
-    // First part should be a seat (N/S/E/W)
-    let seat = parts[0];
-    if !["N", "S", "E", "W"].contains(&seat) {
-        return false;
-    }
-
-    // Second part should be a denomination (NT/S/H/D/C)
-    let denom = parts[1];
-    if !["NT", "S", "H", "D", "C"].contains(&denom) {
-        return false;
-    }
-
-    // Third part should be a number
-    parts[2].parse::<u8>().is_ok()
-}
-
-/// The five strains, in the order the `DoubleDummyTricks` tag wants them.
+/// The five strains, in the order this binary solves them, as the solver's own
+/// trump indices.
 const DENOMINATIONS: [usize; 5] = [NOTRUMP, SPADE, HEART, DIAMOND, CLUB];
 
-/// The four declarers, in the order the `DoubleDummyTricks` tag wants them.
+/// [`DENOMINATIONS`] as [`Strain`], so a solved column can be placed in a
+/// [`DdTable`] by name rather than by position.
+const DENOMINATION_STRAINS: [Strain; 5] = [
+    Strain::NoTrump,
+    Strain::Spades,
+    Strain::Hearts,
+    Strain::Diamonds,
+    Strain::Clubs,
+];
+
+/// The four declarers, in the order this binary solves them, as the solver's
+/// own seat indices.
 const DECLARERS: [usize; 4] = [NORTH, SOUTH, EAST, WEST];
+
+/// [`DECLARERS`] as [`Direction`], for the same reason as
+/// [`DENOMINATION_STRAINS`].
+const DECLARER_SEATS: [Direction; 4] = [
+    Direction::North,
+    Direction::South,
+    Direction::East,
+    Direction::West,
+];
 
 /// Solve one strain of one deal: all four declarers, returned in `DECLARERS`
 /// order as declarer's tricks.
@@ -750,18 +706,21 @@ fn report_progress(done: &AtomicUsize, items: usize) {
     }
 }
 
-/// Solve a deal and return DD results, on the calling thread.
-fn solve_deal(hands: &Hands) -> DdResults {
+/// Solve a deal and return its DD table, on the calling thread.
+fn solve_deal(hands: &Hands) -> DdTable {
     let strains: [[u8; 4]; 5] = std::array::from_fn(|denom_idx| solve_strain(hands, denom_idx));
 
-    // Transpose into [declarer][denomination], which is what the tags want.
-    let mut results = [[0u8; 5]; 4];
+    let mut table = DdTable::new();
     for (denom_idx, cells) in strains.iter().enumerate() {
         for (decl_idx, tricks) in cells.iter().enumerate() {
-            results[decl_idx][denom_idx] = *tricks;
+            table.set(
+                DECLARER_SEATS[decl_idx],
+                DENOMINATION_STRAINS[denom_idx],
+                *tricks,
+            );
         }
     }
-    DdResults { tricks: results }
+    table
 }
 
 /// Solve every deal in `deals` across `threads` workers, returning one table per
@@ -776,7 +735,7 @@ fn solve_deal(hands: &Hands) -> DdResults {
 /// Each worker accumulates its own results and they are merged after the join,
 /// so the only state shared between threads is the counter, and the merge is by
 /// index — the output is identical whatever order the work completed in.
-fn solve_deals_parallel(deals: &[Hands], threads: usize, verbose: bool) -> Vec<DdResults> {
+fn solve_deals_parallel(deals: &[Hands], threads: usize, verbose: bool) -> Vec<DdTable> {
     let items = deals.len() * DENOMINATIONS.len();
     let next = AtomicUsize::new(0);
     let done = AtomicUsize::new(0);
@@ -810,7 +769,7 @@ fn solve_deals_parallel(deals: &[Hands], threads: usize, verbose: bool) -> Vec<D
         workers.into_iter().map(|w| w.join()).collect::<Vec<_>>()
     });
 
-    let mut tables = vec![[[0u8; 5]; 4]; deals.len()];
+    let mut tables = vec![DdTable::new(); deals.len()];
     for worker in harvest {
         // A worker only ends by panicking, which has already printed its own
         // message; carrying on would silently write a table of zeroes.
@@ -820,30 +779,35 @@ fn solve_deals_parallel(deals: &[Hands], threads: usize, verbose: bool) -> Vec<D
         };
         for (deal_idx, denom_idx, cells) in found {
             for (decl_idx, tricks) in cells.iter().enumerate() {
-                tables[deal_idx][decl_idx][denom_idx] = *tricks;
+                tables[deal_idx].set(
+                    DECLARER_SEATS[decl_idx],
+                    DENOMINATION_STRAINS[denom_idx],
+                    *tricks,
+                );
             }
         }
     }
     tables
-        .into_iter()
-        .map(|tricks| DdResults { tricks })
-        .collect()
 }
 
-/// Generate all DD tags as a string
-fn generate_dd_tags(results: &DdResults, vulnerability: Option<Vulnerability>) -> String {
+/// Generate all DD tags as a string.
+///
+/// Both encodings of the table come from `bridge_encodings::pbn`, which is the
+/// one place that says how a `DdTable` is written down. What stays here is the
+/// choice of which tags to write and in what order — the CLI's job.
+fn generate_dd_tags(table: &DdTable, vulnerability: Option<Vulnerability>) -> String {
     let mut output = String::new();
 
     // 1. DoubleDummyTricks
     output.push_str(&format!(
         "[DoubleDummyTricks \"{}\"]\n",
-        results.encode_ddt()
+        dd_table_to_pbn(table)
     ));
 
     // 2. Par: OptimumScore + ParContract (needs vulnerability to score).
     if let Some(vul) = vulnerability {
         let p = par(
-            &to_par_table(results),
+            &to_par_table(table),
             vul.is_vulnerable(Direction::North),
             vul.is_vulnerable(Direction::East),
         );
@@ -854,34 +818,34 @@ fn generate_dd_tags(results: &DdResults, vulnerability: Option<Vulnerability>) -
     }
 
     // 3. OptimumResultTable
-    output.push_str("[OptimumResultTable \"Declarer;Denomination\\2R;Result\\2R\"]\n");
-
-    let decl_names = ["N", "S", "E", "W"];
-    let denom_names = ["NT", " S", " H", " D", " C"];
-
-    for (decl_idx, decl_name) in decl_names.iter().enumerate() {
-        for (denom_idx, denom_name) in denom_names.iter().enumerate() {
-            output.push_str(&format!(
-                "{} {} {:2}\n",
-                decl_name,
-                denom_name,
-                results.get(decl_idx, denom_idx)
-            ));
-        }
+    output.push_str(&format!(
+        "[OptimumResultTable \"{OPTIMUM_RESULT_TABLE_HEADER}\"]\n"
+    ));
+    for row in optimum_result_table_rows(table) {
+        output.push_str(&row);
+        output.push('\n');
     }
 
     output
 }
 
-/// Convert this bin's `DdResults` (declarer N,S,E,W × denom NT,S,H,D,C) into the
-/// library `DdTricks` (seat N,E,S,W × strain C,D,H,S,NT) expected by `par`.
-fn to_par_table(results: &DdResults) -> DdTricks {
-    const DECL_TO_DIR: [usize; 4] = [0, 2, 1, 3]; // N,S,E,W -> N,S,E,W indices
-    const DENOM_TO_STRAIN: [usize; 5] = [4, 3, 2, 1, 0]; // NT,S,H,D,C -> C..NT
+/// Copy a [`DdTable`] into the library's `DdTricks`, which [`par`] takes.
+///
+/// `DdTricks` is indexed positionally — seats N,E,S,W down the rows, strains
+/// C,D,H,S,NT across the columns — so the two orders have to meet somewhere,
+/// and this is the only place they do. `DdTable` cannot be indexed positionally
+/// at all, which is what keeps the transcription honest.
+fn to_par_table(table: &DdTable) -> DdTricks {
+    const SEATS: [Direction; 4] = [
+        Direction::North,
+        Direction::East,
+        Direction::South,
+        Direction::West,
+    ];
     let mut tricks = [[0u8; 5]; 4];
-    for d in 0..4 {
-        for n in 0..5 {
-            tricks[DECL_TO_DIR[d]][DENOM_TO_STRAIN[n]] = results.get(d, n);
+    for (row, declarer) in SEATS.iter().enumerate() {
+        for (column, strain) in bridge_solver::STRAINS.iter().enumerate() {
+            tricks[row][column] = table.tricks(*declarer, *strain);
         }
     }
     DdTricks { tricks }
@@ -980,30 +944,41 @@ mod tests {
         assert_eq!(extract_tag_name("N NT 3"), None);
     }
 
+    /// The rows this binary used to recognise, now recognised by the shared
+    /// predicate. Only the rows matter here: what follows an
+    /// `[OptimumResultTable]` header is skipped so the stale table can be
+    /// replaced, and a line wrongly kept would be duplicated into the output.
     #[test]
-    fn test_is_optimum_result_data_line() {
-        assert!(is_optimum_result_data_line("N NT  3"));
-        assert!(is_optimum_result_data_line("S  S 10"));
-        assert!(is_optimum_result_data_line("E  H  7"));
-        assert!(!is_optimum_result_data_line("[Deal \"...\"]"));
-        assert!(!is_optimum_result_data_line(""));
-        assert!(!is_optimum_result_data_line("[OptimumResultTable \"...\"]"));
+    fn test_is_optimum_result_row() {
+        assert!(is_optimum_result_row("N NT  3"));
+        assert!(is_optimum_result_row("S  S 10"));
+        assert!(is_optimum_result_row("E  H  7"));
+        assert!(!is_optimum_result_row("[Deal \"...\"]"));
+        assert!(!is_optimum_result_row(""));
+        assert!(!is_optimum_result_row("[OptimumResultTable \"...\"]"));
     }
 
+    /// A table this binary would have written before the codec moved, checked
+    /// against the value Bridge Composer writes for it. This is the guard that
+    /// the shared codec's row and column orders are the ones this CLI has
+    /// always emitted: `N,S,E,W` by row and `NT,S,H,D,C` by column.
     #[test]
     fn test_encode_ddt() {
-        // Test the encoding: 0-9 -> '0'-'9', 10-13 -> 'a'-'d'
-        // From Bridge Composer: "32691326914a74a4a74a"
-        // Format: N(NT,S,H,D,C) S(NT,S,H,D,C) E(NT,S,H,D,C) W(NT,S,H,D,C)
-        let results = DdResults {
-            tricks: [
-                [3, 2, 6, 9, 1],   // N: NT=3, S=2, H=6, D=9, C=1 -> "32691"
-                [3, 2, 6, 9, 1],   // S: same -> "32691"
-                [4, 10, 7, 4, 10], // E: NT=4, S=10, H=7, D=4, C=10 -> "4a74a"
-                [4, 10, 7, 4, 10], // W: same -> "4a74a"
-            ],
-        };
-        assert_eq!(results.encode_ddt(), "32691326914a74a4a74a");
+        // 0-9 -> '0'-'9', 10-13 -> 'a'-'d'. From Bridge Composer:
+        // "32691326914a74a4a74a".
+        let rows: [(Direction, [u8; 5]); 4] = [
+            (Direction::North, [3, 2, 6, 9, 1]),  // NT=3 S=2 H=6 D=9 C=1
+            (Direction::South, [3, 2, 6, 9, 1]),  // same
+            (Direction::East, [4, 10, 7, 4, 10]), // NT=4 S=10 H=7 D=4 C=10
+            (Direction::West, [4, 10, 7, 4, 10]), // same
+        ];
+        let mut table = DdTable::new();
+        for (declarer, cells) in rows {
+            for (strain, tricks) in DENOMINATION_STRAINS.iter().zip(cells) {
+                table.set(declarer, *strain, tricks);
+            }
+        }
+        assert_eq!(dd_table_to_pbn(&table), "32691326914a74a4a74a");
     }
 
     #[test]
@@ -1212,13 +1187,10 @@ W  C  0
         let deals = sample_deals();
         assert_eq!(deals.len(), 3);
 
-        let serial: Vec<[[u8; 5]; 4]> = deals.iter().map(|h| solve_deal(h).tricks).collect();
+        let serial: Vec<DdTable> = deals.iter().map(solve_deal).collect();
 
         for threads in [2, 4, 12] {
-            let threaded: Vec<[[u8; 5]; 4]> = solve_deals_parallel(&deals, threads, false)
-                .into_iter()
-                .map(|r| r.tricks)
-                .collect();
+            let threaded = solve_deals_parallel(&deals, threads, false);
             assert_eq!(threaded, serial, "disagreement on {threads} threads");
         }
     }
@@ -1235,8 +1207,6 @@ W  C  0
         let mut reversed = solve_deals_parallel(&reversed_input, 8, false);
         reversed.reverse();
 
-        let forward: Vec<_> = forward.into_iter().map(|r| r.tricks).collect();
-        let reversed: Vec<_> = reversed.into_iter().map(|r| r.tricks).collect();
         assert_eq!(forward, reversed);
     }
 
@@ -1244,11 +1214,8 @@ W  C  0
     #[test]
     fn parallel_solve_with_more_threads_than_work() {
         let deals = sample_deals();
-        let serial: Vec<_> = deals.iter().map(|h| solve_deal(h).tricks).collect();
-        let threaded: Vec<_> = solve_deals_parallel(&deals, 64, false)
-            .into_iter()
-            .map(|r| r.tricks)
-            .collect();
+        let serial: Vec<DdTable> = deals.iter().map(solve_deal).collect();
+        let threaded = solve_deals_parallel(&deals, 64, false);
         assert_eq!(threaded, serial);
     }
 }
