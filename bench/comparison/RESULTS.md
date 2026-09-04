@@ -33,25 +33,48 @@ time. Milliseconds, fastest of an adaptive number of repeats.
 | p99 | 637.6 &nbsp;`0.91x` | 703.2 | **569.6** &nbsp;`0.81x` |
 | max | 1480.0 &nbsp;`0.56x` | 2643.1 | **1278.6** &nbsp;`0.48x` |
 
+**Those rows are not paired.** Each column is its own percentile over its own
+2,000 timings, so `p95` compares the deal *we* find 95th-hardest with the deal
+*DDS* finds 95th-hardest, which are rarely the same deal. It is the right shape
+for "what does a user wait for", and the wrong one for "which is faster on this
+board" — read as a paired ratio it flatters whichever solver has the shorter
+tail. The table below is the paired view, and the two disagree by enough to
+matter: `p95` reads 0.99x for the reference, where paired it has been ahead of
+DDS since about DDS's p70.
+
 ![per-deal latency](case1-latency.svg)
 
 **There is a crossover, and it is the only finding here that matters.** Grouped
-by how hard DDS finds a deal:
+by how hard DDS finds a deal. The three ratio columns are each pair's total
+time over the same deals; the last two count deals on which that solver beat
+DDS outright:
 
-| DDS takes | deals | this port | C++ reference | this port wins | reference wins |
-|---|---|---|---|---|---|
-| under 50 ms | 774 | 1.32x | 1.28x | 26% | 25% |
-| 50–100 ms | 525 | 1.23x | 1.15x | 31% | 37% |
-| 100–200 ms | 450 | 1.08x | 0.99x | 47% | 56% |
-| 200–400 ms | 197 | 1.02x | 0.92x | 53% | 69% |
-| 400–800 ms | 40 | 0.92x | 0.82x | 72% | 75% |
-| over 800 ms | 14 | **0.73x** | **0.64x** | 86% | 86% |
+| DDS takes | deals | this port | C++ reference | ours/ref | this port wins | reference wins |
+|---|---|---|---|---|---|---|
+| under 50 ms (to DDS p39) | 774 | 1.32x | 1.28x | 1.03x | 26% | 25% |
+| 50–100 ms (to p65) | 525 | 1.23x | 1.15x | 1.06x | 31% | 37% |
+| 100–200 ms (to p87) | 450 | 1.08x | **0.99x** | 1.09x | 47% | 56% |
+| 200–400 ms (to p97) | 197 | **1.02x** | 0.92x | 1.11x | 53% | 69% |
+| 400–800 ms (to p99) | 40 | 0.92x | 0.82x | 1.13x | 72% | 75% |
+| over 800 ms | 14 | **0.73x** | **0.64x** | 1.14x | 86% | 86% |
 
 DDS is quickest on cheap deals and **nobody can perceive the difference** — 67
 ms against 79 ms is not a thing a person notices. The two tree searches pull
 ahead on expensive deals, which is exactly where a person does notice. Of these
 2,000 deals the one DDS finds hardest takes it **2.6 seconds**, where this port
-takes 1.5 and the reference 1.3.
+takes 1.5 and the reference 1.3. The reference crosses DDS at about DDS's p70
+and this port at about p75, so both spend the top quarter of the distribution
+ahead.
+
+**The `ours/ref` column runs the wrong way, and it is the one to watch.** We
+track the reference to within 3% where deals are cheap and fall to 14% behind
+where they are expensive, monotonically. The single figure in `CLAUDE.md` --
+1.067x over the lock-step corpus, 1.086x over these 2,000 -- averages that
+trend away. It is the same fact as the reference beating us by most on the
+hardest deals, seen from the other side, and it is the one place in this
+document where a user could plausibly notice the difference between the two
+tree searches: the remaining per-node cost is paid most where the search is
+longest.
 
 So the useful summary for a user is not a ratio, it is: **all three are
 instant on easy deals, and on the deals that make you wait, the tree searches
@@ -139,9 +162,10 @@ orchestration yourself, where DDS and this port are a library call.
 ## What to take away
 
 - **Solving one board for someone who is waiting**: all three are
-  indistinguishable on ordinary deals. On the hard ones — the top few percent,
-  which is where waiting is actually perceptible — the two tree searches finish
-  in about two thirds of DDS's time, and DDS's worst case here was 2.6 seconds
+  indistinguishable on ordinary deals. The tree searches move ahead over the
+  top quarter of the distribution and are furthest ahead at the very top —
+  about two thirds of DDS's time over the hardest one percent — which is where
+  waiting is actually perceptible. DDS's worst case here was 2.6 seconds
   against their 1.3–1.5.
 - **Solving one event**: any of them, well under a second. DDS is still ahead
   on a small machine, but by the same margin it holds everywhere else now that
