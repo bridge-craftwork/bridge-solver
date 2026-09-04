@@ -17,11 +17,8 @@
 use bridge_encodings::pbn::{
     dd_table_to_pbn, is_optimum_result_row, optimum_result_table_rows, OPTIMUM_RESULT_TABLE_HEADER,
 };
-use bridge_solver::{
-    par, CutoffCache, DdTricks, Hands, PatternCache, Solver, CLUB, DIAMOND, EAST, HEART, NORTH,
-    NOTRUMP, SOUTH, SPADE, WEST,
-};
-use bridge_types::{DdTable, Direction, Strain, Vulnerability};
+use bridge_solver::{par, DdTricks, Hands, TableSolver};
+use bridge_types::{DdTable, Direction, Strain, Vulnerability, DECLARERS};
 use clap::Parser;
 use std::fs;
 use std::io::{self, Write};
@@ -629,13 +626,14 @@ fn extract_tag_name(line: &str) -> Option<&str> {
     Some(&rest[..end])
 }
 
-/// The five strains, in the order this binary solves them, as the solver's own
-/// trump indices.
-const DENOMINATIONS: [usize; 5] = [NOTRUMP, SPADE, HEART, DIAMOND, CLUB];
-
-/// [`DENOMINATIONS`] as [`Strain`], so a solved column can be placed in a
-/// [`DdTable`] by name rather than by position.
-const DENOMINATION_STRAINS: [Strain; 5] = [
+/// The five strains, in the order this binary hands them out as work.
+///
+/// A strain is the unit of parallel work, and the smallest one that does not
+/// change the search: its four declarers share one pair of caches and a chain
+/// of MTD(f) seeds, and nothing crosses the boundary from one strain to the
+/// next. [`TableSolver::solve_strain_hands`] is that unit, so this array is
+/// only a work order — any order gives the same table.
+const DENOMINATIONS: [Strain; 5] = [
     Strain::NoTrump,
     Strain::Spades,
     Strain::Hearts,
@@ -643,56 +641,17 @@ const DENOMINATION_STRAINS: [Strain; 5] = [
     Strain::Clubs,
 ];
 
-/// The four declarers, in the order this binary solves them, as the solver's
-/// own seat indices.
-const DECLARERS: [usize; 4] = [NORTH, SOUTH, EAST, WEST];
-
-/// [`DECLARERS`] as [`Direction`], for the same reason as
-/// [`DENOMINATION_STRAINS`].
-const DECLARER_SEATS: [Direction; 4] = [
-    Direction::North,
-    Direction::South,
-    Direction::East,
-    Direction::West,
-];
-
-/// Solve one strain of one deal: all four declarers, returned in `DECLARERS`
-/// order as declarer's tricks.
+/// Place one strain's four solved cells into `table`.
 ///
-/// This is the unit of parallel work, and it is the smallest one that does not
-/// change the search. The four declarers share a single pair of caches and a
-/// chain of MTD(f) seeds — each cell seeds the next, see `Solver::seed_from` —
-/// while nothing at all crosses the boundary from one strain to the next, so
-/// strains may be solved in any order, on any thread, without affecting a
-/// single node visited.
-fn solve_strain(hands: &Hands, denom_idx: usize) -> [u8; 4] {
-    let trump = DENOMINATIONS[denom_idx];
-
-    // Fresh caches for each trump contract, shared across the four leaders.
-    let mut cutoff_cache = CutoffCache::new(16);
-    let mut pattern_cache = PatternCache::new(16);
-    let mut seed: Option<usize> = None;
-
-    let mut cells = [0u8; 4];
-    for (decl_idx, declarer_seat) in DECLARERS.iter().enumerate() {
-        // The leader is to the left of declarer
-        let leader = (*declarer_seat + 1) % 4;
-
-        let solver = Solver::new(*hands, trump, leader);
-        let ns_tricks = match seed {
-            Some(g) => solver.solve_with_caches_seeded(&mut cutoff_cache, &mut pattern_cache, g),
-            None => solver.solve_with_caches(&mut cutoff_cache, &mut pattern_cache),
-        };
-        seed = Some(Solver::seed_from(ns_tricks));
-
-        // Convert to declarer's tricks
-        cells[decl_idx] = if *declarer_seat == NORTH || *declarer_seat == SOUTH {
-            ns_tricks
-        } else {
-            hands.num_tricks() as u8 - ns_tricks
-        };
+/// [`TableSolver::solve_strain_hands`] returns its column in `N, E, S, W`
+/// order — [`Direction::to_index`], which is the order
+/// [`bridge_types::DECLARERS`] lists — so the two are zipped rather than
+/// transposed by hand. `solve_deal_matches_the_library_table` is the guard
+/// that they still agree.
+fn place_column(table: &mut DdTable, strain: Strain, column: [u8; 4]) {
+    for (declarer, tricks) in DECLARERS.into_iter().zip(column) {
+        table.set(declarer, strain, tricks);
     }
-    cells
 }
 
 /// Note one finished work item and, at each ten percent, say so.
@@ -708,17 +667,14 @@ fn report_progress(done: &AtomicUsize, items: usize) {
 
 /// Solve a deal and return its DD table, on the calling thread.
 fn solve_deal(hands: &Hands) -> DdTable {
-    let strains: [[u8; 4]; 5] = std::array::from_fn(|denom_idx| solve_strain(hands, denom_idx));
-
+    let mut solver = TableSolver::new();
     let mut table = DdTable::new();
-    for (denom_idx, cells) in strains.iter().enumerate() {
-        for (decl_idx, tricks) in cells.iter().enumerate() {
-            table.set(
-                DECLARER_SEATS[decl_idx],
-                DENOMINATION_STRAINS[denom_idx],
-                *tricks,
-            );
-        }
+    for strain in DENOMINATIONS {
+        place_column(
+            &mut table,
+            strain,
+            solver.solve_strain_hands(*hands, strain),
+        );
     }
     table
 }
@@ -735,6 +691,12 @@ fn solve_deal(hands: &Hands) -> DdTable {
 /// Each worker accumulates its own results and they are merged after the join,
 /// so the only state shared between threads is the counter, and the merge is by
 /// index — the output is identical whatever order the work completed in.
+///
+/// A worker keeps one [`TableSolver`] for its whole run rather than building a
+/// pair of caches per strain. `CutoffCache::new(16)` alone is a megabyte, and
+/// both caches then double their way up to whatever the deal wants; a solver
+/// held across items keeps the grown capacity and resets the entries, which is
+/// what the C++ reference does with its process globals.
 fn solve_deals_parallel(deals: &[Hands], threads: usize, verbose: bool) -> Vec<DdTable> {
     let items = deals.len() * DENOMINATIONS.len();
     let next = AtomicUsize::new(0);
@@ -744,6 +706,7 @@ fn solve_deals_parallel(deals: &[Hands], threads: usize, verbose: bool) -> Vec<D
         let workers: Vec<_> = (0..threads)
             .map(|_| {
                 scope.spawn(|| {
+                    let mut solver = TableSolver::new();
                     let mut mine: Vec<(usize, usize, [u8; 4])> = Vec::new();
                     loop {
                         let item = next.fetch_add(1, Ordering::Relaxed);
@@ -752,11 +715,9 @@ fn solve_deals_parallel(deals: &[Hands], threads: usize, verbose: bool) -> Vec<D
                         }
                         let (deal_idx, denom_idx) =
                             (item / DENOMINATIONS.len(), item % DENOMINATIONS.len());
-                        mine.push((
-                            deal_idx,
-                            denom_idx,
-                            solve_strain(&deals[deal_idx], denom_idx),
-                        ));
+                        let column =
+                            solver.solve_strain_hands(deals[deal_idx], DENOMINATIONS[denom_idx]);
+                        mine.push((deal_idx, denom_idx, column));
                         if verbose {
                             report_progress(&done, items);
                         }
@@ -777,14 +738,8 @@ fn solve_deals_parallel(deals: &[Hands], threads: usize, verbose: bool) -> Vec<D
             eprintln!("Error: a solver thread panicked; no files were written");
             std::process::exit(1);
         };
-        for (deal_idx, denom_idx, cells) in found {
-            for (decl_idx, tricks) in cells.iter().enumerate() {
-                tables[deal_idx].set(
-                    DECLARER_SEATS[decl_idx],
-                    DENOMINATION_STRAINS[denom_idx],
-                    *tricks,
-                );
-            }
+        for (deal_idx, denom_idx, column) in found {
+            place_column(&mut tables[deal_idx], DENOMINATIONS[denom_idx], column);
         }
     }
     tables
@@ -974,7 +929,7 @@ mod tests {
         ];
         let mut table = DdTable::new();
         for (declarer, cells) in rows {
-            for (strain, tricks) in DENOMINATION_STRAINS.iter().zip(cells) {
+            for (strain, tricks) in DENOMINATIONS.iter().zip(cells) {
                 table.set(declarer, *strain, tricks);
             }
         }
@@ -1168,15 +1123,17 @@ W  C  0
 
     /// A few deals of varying shape, including one with a void, since voids are
     /// the case where the caches behave differently.
+    const SAMPLE_PBN: [&str; 3] = [
+        "N:62.JT765.AKJ5.Q3 KQ85.Q9.Q876.J75 J9743.K84.T2.K84 AT.A32.943.AT962",
+        "N:Q7432.85.J983.63 J65.64.AKT5.AK98 AK98.AKQJ7.6.QJ7 T.T932.Q742.T542",
+        "N:KJ86.KQ9.T3.JT76 QT53.JT74.87.A93 -.A83.AQJ642.K542 A9742.652.K95.Q8",
+    ];
+
     fn sample_deals() -> Vec<Hands> {
-        [
-            "N:62.JT765.AKJ5.Q3 KQ85.Q9.Q876.J75 J9743.K84.T2.K84 AT.A32.943.AT962",
-            "N:Q7432.85.J983.63 J65.64.AKT5.AK98 AK98.AKQJ7.6.QJ7 T.T932.Q742.T542",
-            "N:KJ86.KQ9.T3.JT76 QT53.JT74.87.A93 -.A83.AQJ642.K542 A9742.652.K95.Q8",
-        ]
-        .iter()
-        .filter_map(|d| Hands::from_pbn(d))
-        .collect()
+        SAMPLE_PBN
+            .iter()
+            .filter_map(|d| Hands::from_pbn(d))
+            .collect()
     }
 
     /// The threaded path must agree with the serial one cell for cell. It is the
@@ -1208,6 +1165,45 @@ W  C  0
         reversed.reverse();
 
         assert_eq!(forward, reversed);
+    }
+
+    /// The table this binary assembles must be the library's own table, cell
+    /// for cell. `TableSolver::solve_strain_hands` returns a column in
+    /// `Direction::to_index` order and `place_column` places it by seat, so a
+    /// transposition here would be silent — every cell would still be a real
+    /// double-dummy result, just the wrong one's.
+    #[test]
+    fn solve_deal_matches_the_library_table() {
+        for (hands, pbn) in sample_deals().iter().zip(SAMPLE_PBN) {
+            let deal = bridge_types::Deal::from_pbn(pbn).expect("sample deal parses");
+            let reference = bridge_solver::solve_dd_table(&deal);
+            let ours = solve_deal(hands);
+            for (declarer, strain, tricks) in ours.cells() {
+                assert_eq!(
+                    tricks,
+                    reference.get(declarer, strain),
+                    "{declarer:?} in {strain:?} of {pbn}"
+                );
+            }
+        }
+    }
+
+    /// The deal strings this binary reads are parsed by `Hands::from_pbn`, and
+    /// they stay that way: it accepts PBN that `bridge_types::Deal::from_pbn`
+    /// does not, so routing the CLI through a `Deal` to reach `TableSolver`
+    /// would have quietly stopped annotating boards it annotates today. That is
+    /// why `TableSolver::solve_strain_hands` exists.
+    #[test]
+    fn the_cli_parser_accepts_more_than_the_typed_one() {
+        for lenient in [
+            // No leading seat: `Hands::from_pbn` defaults to North.
+            "AKQT3.J6.KJ42.95 652.AK42.AQ87.T4 J74.QT95.T.AK863 98.873.9653.QJ72",
+            // A void written inside the suit rather than as the whole suit.
+            "N:AKQT3.J6.KJ42.95 652.AK42.AQ87.T4 J74.QT95.T.AK863 98.873.-9653.QJ72",
+        ] {
+            assert!(Hands::from_pbn(lenient).is_some(), "{lenient}");
+            assert!(bridge_types::Deal::from_pbn(lenient).is_none(), "{lenient}");
+        }
     }
 
     /// More threads than there is work to do must still terminate and be right.
