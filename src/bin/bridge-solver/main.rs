@@ -16,6 +16,13 @@
 //!
 //! Boards whose deal is incomplete are passed through untouched.
 //!
+//! How a PBN file is shaped is `bridge_encodings::pbn::PbnDocument`'s: it holds
+//! the file as written and splices the tags in, so `%` directives, `;` comments
+//! and `{...}` commentary survive byte-for-byte, CRLF stays CRLF, a file that
+//! ended without a newline still does, and a file with nothing to add is not
+//! rewritten at all. What is this binary's is which tags to write and which
+//! boards to write them on.
+//!
 //! Usage:
 //!   bridge-solver -i <file.pbn> -o <file.pbn>   # one file to another
 //!   bridge-solver -i <file.pbn>                 # one file to stdout
@@ -23,7 +30,7 @@
 
 use bridge_encodings::pbn::{
     dd_table_to_pbn, is_optimum_result_row, optimum_result_table_header, optimum_result_table_rows,
-    prevailing_newline, split_lines,
+    PbnDocument,
 };
 use bridge_solver::{par, Hands, TableSolver};
 use bridge_types::{DdTable, Direction, Strain, Vulnerability, DECLARERS};
@@ -116,13 +123,20 @@ fn main() {
         })
         .max(1);
 
-    // Read every input before solving any of it. The solve is one batch across
-    // all of them, so a directory of one-deal files spreads over the threads
-    // exactly as well as a single file of many deals does.
-    let mut contents = Vec::with_capacity(files.len());
+    // Read and index every input before solving any of it. The solve is one
+    // batch across all of them, so a directory of one-deal files spreads over
+    // the threads exactly as well as a single file of many deals does.
+    let mut documents = Vec::with_capacity(files.len());
     for path in &files {
-        match fs::read_to_string(path) {
-            Ok(c) => contents.push(c),
+        let content = match fs::read_to_string(path) {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("Error reading input file '{}': {}", path.display(), e);
+                std::process::exit(1);
+            }
+        };
+        match PbnDocument::parse(&content) {
+            Ok(doc) => documents.push(doc),
             Err(e) => {
                 eprintln!("Error reading input file '{}': {}", path.display(), e);
                 std::process::exit(1);
@@ -130,25 +144,14 @@ fn main() {
         }
     }
 
-    // Pass 1 finds the boards that need analysis without solving any of them.
-    // It runs the real processor with a recording stub rather than a separate
-    // scanner, so the boards it asks about are exactly the boards pass 2 will
-    // ask about — the "already analysed", "incomplete deal" and `--recalculate`
-    // decisions are made once, by one piece of code.
-    let mut pending: Vec<Hands> = Vec::new();
-    for content in &contents {
-        let mut collect = |hands: &Hands| {
-            pending.push(*hands);
-            DdTable::new()
-        };
-        process_pbn_with(
-            content,
-            false,
-            args.recalculate,
-            args.mark_verified,
-            &mut collect,
-        );
-    }
+    // Which boards need analysis is decided once, before anything is solved, so
+    // the "already analysed", "incomplete deal" and `--recalculate` rulings are
+    // made by one piece of code and the write-back cannot disagree with them.
+    let plans: Vec<Vec<Pending>> = documents
+        .iter()
+        .map(|doc| boards_to_analyse(doc, args.recalculate, args.verbose))
+        .collect();
+    let pending: Vec<Hands> = plans.iter().flatten().map(|board| board.hands).collect();
 
     let items = pending.len() * DENOMINATIONS.len();
     let threads = threads.min(items.max(1));
@@ -179,35 +182,36 @@ fn main() {
             .collect()
     };
 
-    // Pass 2 rebuilds each file, taking each board's table from the batch.
+    // Each file is then annotated in place in its document, taking each board's
+    // table from the batch.
     let mut tables = solved.into_iter();
     let mut changed = 0usize;
-    for (path, content) in files.iter().zip(&contents) {
+    for ((path, doc), plan) in files.iter().zip(&mut documents).zip(&plans) {
         if args.verbose {
             eprintln!("Processing {}...", path.display());
         }
-        let mut replay = |_: &Hands| match tables.next() {
-            Some(table) => table,
-            // Both passes run the same code over the same bytes, so they cannot
+        for board in plan {
+            // The plan is what the batch was solved from, so the two cannot
             // disagree; if they ever did, stopping beats writing a table of
             // zeroes over someone's file.
-            None => {
+            let Some(table) = tables.next() else {
                 eprintln!("Error: internal mismatch between the analysis and writing passes");
                 std::process::exit(1);
+            };
+            if let Err(e) = annotate(doc, board, &table, args.mark_verified) {
+                eprintln!("Error annotating '{}': {}", path.display(), e);
+                std::process::exit(1);
             }
-        };
-        let result = process_pbn_with(
-            content,
-            args.verbose,
-            args.recalculate,
-            args.mark_verified,
-            &mut replay,
-        );
+        }
+        if args.verbose {
+            eprintln!("Processed {} deal(s)", plan.len());
+        }
+        let result = doc.to_pbn();
 
         if args.in_place {
             // Unchanged files are left untouched so a re-run is a true no-op
             // and does not churn mtimes in a build.
-            if &result == content {
+            if !doc.is_modified() {
                 continue;
             }
             if let Err(e) = write_atomically(path, &result) {
@@ -303,531 +307,206 @@ fn write_atomically(path: &Path, contents: &str) -> io::Result<()> {
 /// set this one itself when it computes a table.
 const BC_FLAG_DD_VERIFIED: u64 = 0x0008_0000;
 
-/// Return a `[BCFlags]` line with the verified bit set, preserving every other
-/// bit. An unparsable value is replaced rather than propagated, since the tag
-/// is meaningless if it is not hex.
-fn with_verified_bit(line: &str) -> String {
-    let current = line
-        .split('"')
-        .nth(1)
-        .and_then(|v| u64::from_str_radix(v.trim(), 16).ok())
-        .unwrap_or(0);
-    format!("[BCFlags \"{:x}\"]", current | BC_FLAG_DD_VERIFIED)
-}
-
-/// Process a PBN file: find deals, solve them, insert/replace DD tags.
+/// The tags this binary is responsible for, and the only ones it will move.
 ///
-/// Solves each deal inline, on the calling thread. `main` goes through
-/// [`process_pbn_with`] in every case, so this is the tests' way in.
-#[cfg(test)]
-fn process_pbn(content: &str, verbose: bool, recalculate: bool, mark_verified: bool) -> String {
-    process_pbn_with(
-        content,
-        verbose,
-        recalculate,
-        mark_verified,
-        &mut solve_deal,
-    )
-}
-
-/// [`process_pbn`], with each deal's table supplied by the caller.
-///
-/// `solve` is called once per board that needs analysis, in file order, and its
-/// return value becomes that board's table. Threading is built on this: a first
-/// pass records the hands it is asked about, and a second pass — running the
-/// same code, so it makes the same decisions about which boards to skip — hands
-/// back the tables solved in between.
-///
-/// # Why this is still hand-rolled
-///
-/// `bridge_encodings::pbn::PbnDocument` exists to retire exactly this, and it
-/// was measured against the file below rather than argued about. It keeps every
-/// guarantee this code was written for: an untouched document round-trips
-/// byte-for-byte, `%` directives and `;` comments and `{...}` commentary all
-/// survive, `is_modified()` is false after re-annotating an annotated file so a
-/// re-run churns no mtimes, a board whose `[Deal]` will not parse comes back as
-/// an ordinary board to be skipped rather than failing the file, and an
-/// existing `OptimumResultTable` is replaced header and rows together.
-///
-/// What it cannot do is rank a *section* as a section. `set_tag` and
-/// `set_section` share one order — mandatory tags in the standard's order,
-/// then everything else alphabetically, with only `Auction`, `Play` and `Note`
-/// held back — so `OptimumResultTable` lands among the one-line tags, above the
-/// auction, where Bridge Composer puts it below the play. The three one-liners
-/// it would place correctly; the twenty-row table it would not, and that is the
-/// tag whose placement `fixtures/bridge-composer` is about. Tracked as
-/// bridge-craftwork/bridge-encodings#13; when a `*Table` name sorts with the
-/// sections there, this goes.
-///
-/// # Line endings
-///
-/// Lines are split by [`split_lines`], which keeps each terminator, rather than
-/// by `str::lines`, which discards it. Bridge Composer writes CRLF throughout,
-/// so rejoining with `\n` rewrote every line of every real-world file — which
-/// made "annotating only ever adds lines" and "a re-run touches nothing" false
-/// for exactly the files this tool exists to annotate.
-fn process_pbn_with(
-    content: &str,
-    verbose: bool,
-    recalculate: bool,
-    mark_verified: bool,
-    solve: &mut dyn FnMut(&Hands) -> DdTable,
-) -> String {
-    // Split into deal blocks (separated by blank lines outside of brace comments)
-    let mut result = String::new();
-    let mut deal_count = 0;
-
-    // Process the file block by block
-    // A block is a sequence of lines until a blank line outside of {} comments
-    // Each line keeps the ending it was written with; lines this pass inserts
-    // have no neighbour to copy from, so they take the file's prevailing one.
-    let lines = split_lines(content);
-    let newline = prevailing_newline(content);
-    let mut i = 0;
-
-    while i < lines.len() {
-        // Skip leading blank lines, but preserve them
-        while i < lines.len() && lines[i].0.trim().is_empty() {
-            result.push_str(lines[i].0);
-            result.push_str(terminator(lines[i].1, newline));
-            i += 1;
-        }
-
-        if i >= lines.len() {
-            break;
-        }
-
-        // Collect a deal block (all lines until next blank line outside of {} comments)
-        let block_start = i;
-        let mut in_brace_comment = false;
-
-        while i < lines.len() {
-            let line = lines[i].0;
-
-            // Track brace comment state
-            // Note: braces don't nest per PBN spec
-            for ch in line.chars() {
-                if ch == '{' {
-                    in_brace_comment = true;
-                } else if ch == '}' {
-                    in_brace_comment = false;
-                }
-            }
-
-            i += 1;
-
-            // Check if next line would be a blank line outside of comment
-            if i < lines.len() && lines[i].0.trim().is_empty() && !in_brace_comment {
-                break;
-            }
-        }
-        let block_end = i;
-
-        // Process this block
-        let block_lines = &lines[block_start..block_end];
-        let processed = process_deal_block(
-            block_lines,
-            newline,
-            &mut deal_count,
-            verbose,
-            recalculate,
-            mark_verified,
-            solve,
-        );
-        result.push_str(&processed);
-    }
-
-    // Every line above was written with a real terminator, the file's last one
-    // included, so that a tag appended after it starts on its own line. Take the
-    // one that was supplied back off: a file that ended without a newline still
-    // ends without one.
-    if !content.ends_with('\n') {
-        let trimmed = result
-            .strip_suffix(newline)
-            .or_else(|| result.strip_suffix('\n'))
-            .map(str::len);
-        if let Some(len) = trimmed {
-            result.truncate(len);
-        }
-    }
-
-    if verbose {
-        eprintln!("Processed {} deal(s)", deal_count);
-    }
-
-    result
-}
-
-/// A line's ending, with `newline` standing in for the empty one the final line
-/// carries when the file ends without a newline.
-///
-/// Writing that line with no ending at all would run the next line — a tag this
-/// pass appends — straight into it. [`process_pbn_with`] takes the final newline
-/// back off the finished output instead, once, so the "no trailing newline"
-/// property belongs to the file rather than to whichever line happens to be
-/// last after the edit.
-fn terminator<'a>(term: &'a str, newline: &'a str) -> &'a str {
-    if term.is_empty() {
-        newline
-    } else {
-        term
-    }
-}
-
-/// Process a single deal block
-///
-/// `lines` are `(content, terminator)` pairs from [`split_lines`], so every line
-/// this block passes through keeps the ending it was written with. `newline` is
-/// the ending given to lines that are inserted.
-fn process_deal_block(
-    lines: &[(&str, &str)],
-    newline: &str,
-    deal_count: &mut usize,
-    verbose: bool,
-    recalculate: bool,
-    mark_verified: bool,
-    solve: &mut dyn FnMut(&Hands) -> DdTable,
-) -> String {
-    // Find the Deal tag to extract hands
-    let mut deal_str: Option<&str> = None;
-    let mut vulnerability: Option<Vulnerability> = None;
-
-    for (line, _) in lines {
-        if deal_str.is_none() {
-            if let Some(d) = extract_deal_tag(line) {
-                deal_str = Some(d);
-            }
-        }
-        if vulnerability.is_none() {
-            if let Some(v) = extract_vulnerability_tag(line) {
-                vulnerability = Some(v);
-            }
-        }
-    }
-
-    // A block reproduced exactly as it was read, terminators included.
-    let unchanged = || {
-        let mut out = String::new();
-        for (line, term) in lines {
-            out.push_str(line);
-            out.push_str(terminator(term, newline));
-        }
-        out
-    };
-
-    // If no Deal tag, just pass through unchanged
-    let Some(deal_str) = deal_str else {
-        return unchanged();
-    };
-
-    // Already analyzed? Leave it alone unless asked to redo the work. The
-    // [DoubleDummyTricks] tag is the marker: a board carrying a stray par tag
-    // but no DD table has not been analyzed, and still gets filled in.
-    if !recalculate
-        && lines
-            .iter()
-            .any(|(l, _)| extract_tag_name(l) == Some("DoubleDummyTricks"))
-    {
-        if verbose {
-            eprintln!("Skipping board that already has analysis");
-        }
-        return unchanged();
-    }
-
-    // Parse the deal. A board with no cards — BridgeComposer writes
-    // [Deal "N:... ... ... ..."] for auction-only teaching boards — parses fine
-    // into empty hands, so completeness is checked too. Annotating one of those
-    // would stamp a fabricated all-zero table and a "Pass" par onto a board that
-    // has no deal to analyze.
-    let Some(hands) = Hands::from_pbn(deal_str) else {
-        return unchanged();
-    };
-    if !hands.is_complete() {
-        if verbose {
-            eprintln!("Skipping board with an incomplete deal");
-        }
-        return unchanged();
-    }
-
-    *deal_count += 1;
-    if verbose {
-        eprintln!("Processing deal {}...", deal_count);
-    }
-
-    // Solve the deal
-    let dd_results = solve(&hands);
-
-    // Rebuild the block: strip whatever analysis it carried, then place ours.
-    let mut output_lines: Vec<(String, &str)> = Vec::new();
-    let mut saw_bcflags = false;
-    let mut skipping_optimum_data = false;
-
-    // Tags we generate: strip whatever the board carried, so that ours are
-    // placed rather than replaced in situ. A board annotated by an older build
-    // has them all above the auction; leaving them there would keep them there.
-    let dd_tag_names = [
-        "DoubleDummyTricks",
-        "OptimumScore",
-        "ParContract",
-        "OptimumResultTable",
-    ];
-
-    for (line, term) in lines {
-        let trimmed = line.trim();
-        let term = terminator(term, newline);
-
-        // Fold the verified bit into an existing [BCFlags], keeping every other
-        // bit the board already carried.
-        if mark_verified && extract_tag_name(trimmed) == Some("BCFlags") {
-            saw_bcflags = true;
-            output_lines.push((with_verified_bit(trimmed), term));
-            continue;
-        }
-
-        if let Some(tag_name) = extract_tag_name(trimmed) {
-            if dd_tag_names.contains(&tag_name) {
-                // The twenty rows below an [OptimumResultTable] header belong to
-                // it and go with it.
-                skipping_optimum_data = tag_name == "OptimumResultTable";
-                continue;
-            }
-        }
-
-        if skipping_optimum_data {
-            if is_optimum_result_row(line) {
-                continue;
-            }
-            skipping_optimum_data = false;
-        }
-
-        output_lines.push((line.to_string(), term));
-    }
-
-    // Place what we write the way Bridge Composer does: the one-line tags among
-    // the identification tags, sorted alphabetically with whatever supplemental
-    // tags the board already has; the table below [Auction] and [Play], sorted
-    // alphabetically among any other sections. See `fixtures/bridge-composer`.
-    let mut one_liners: Vec<(&str, String)> = Vec::new();
-    // A board with no [BCFlags] of its own still needs one to carry the bit, and
-    // it sorts with the rest: `BCFlags` < `DoubleDummyTricks`.
-    if mark_verified && !saw_bcflags {
-        one_liners.push((
-            "BCFlags",
-            format!("[BCFlags \"{:x}\"]{newline}", BC_FLAG_DD_VERIFIED),
-        ));
-    }
-    one_liners.extend(dd_tag_pairs(&dd_results, vulnerability, newline));
-
-    let identification_end = first_section(&output_lines);
-    let mut insertions: Vec<(usize, String)> = one_liners
-        .into_iter()
-        .map(|(name, text)| {
-            (
-                tag_pair_position(&output_lines, identification_end, name),
-                text,
-            )
-        })
-        .collect();
-    insertions.push((
-        optimum_result_table_position(&output_lines, identification_end),
-        optimum_result_section(&dd_results, newline),
-    ));
-    // Stable, so tags landing at the same line keep the alphabetical order they
-    // were built in, and the table stays last of them.
-    insertions.sort_by_key(|(at, _)| *at);
-
-    let mut result = String::new();
-    let mut next = 0;
-    for (idx, (line, term)) in output_lines.iter().enumerate() {
-        while insertions.get(next).is_some_and(|(at, _)| *at == idx) {
-            result.push_str(&insertions[next].1);
-            next += 1;
-        }
-        result.push_str(line);
-        result.push_str(term);
-    }
-    // Anything ranked past the last line goes on the end.
-    for (_, text) in &insertions[next..] {
-        result.push_str(text);
-    }
-
-    result
-}
-
-/// The 15 tag pairs PBN 2.1 §3.4 requires of every game.
-///
-/// A copy of the list `bridge_encodings::pbn` keeps privately, needed here for
-/// the same reason it needs it: a supplemental tag is ranked alphabetically
-/// among the *supplemental* tags, and `Result` — mandatory, and the last of
-/// them — would otherwise sort above `OptimumScore` and take the analysis with
-/// it. Order within the list does not matter here, only membership: this
-/// binary places tags relative to the mandatory block without reordering it.
-const MANDATORY_TAGS: [&str; 15] = [
-    "Event",
-    "Site",
-    "Date",
-    "Board",
-    "West",
-    "North",
-    "East",
-    "South",
-    "Dealer",
-    "Vulnerable",
-    "Deal",
-    "Scoring",
-    "Declarer",
-    "Contract",
-    "Result",
+/// A board is stripped of all four before ours are written, so a board an older
+/// build annotated with all four above the auction is re-laid out rather than
+/// having its tags replaced where they lie. Anything else the board carries
+/// stays exactly where its author put it. A board where removing one of these
+/// would take a line we did not write is refused instead; see
+/// [`stray_line_under_analysis`].
+const ANALYSIS_TAGS: [&str; 4] = [
+    "DoubleDummyTricks",
+    "OptimumScore",
+    "ParContract",
+    "OptimumResultTable",
 ];
 
-/// The end of the board's identification section: the first line that opens a
-/// section, or the end of the block if it has none.
-///
-/// Everything above this is tag pairs (with any commentary between them);
-/// everything below belongs to a section. A supplemental tag pair goes above
-/// it, since a section owns every line beneath its header.
-fn first_section(lines: &[(String, &str)]) -> usize {
-    lines
-        .iter()
-        .position(|(line, _)| extract_tag_name(line.trim()).is_some_and(starts_a_section))
-        .unwrap_or(lines.len())
+/// A board waiting on analysis: which board of its document, the hands to
+/// solve, and the vulnerability par will need once the table comes back.
+struct Pending {
+    /// Index into the document's [`PbnDocument::boards`].
+    board: usize,
+    hands: Hands,
+    vulnerability: Option<Vulnerability>,
 }
 
-/// Where a supplemental tag pair named `name` goes: after every mandatory tag
-/// and every supplemental tag sorting above it, and above the rest.
+/// The boards of `doc` that need analysing, in file order.
 ///
-/// Mandatory tags always rank first, wherever the file happens to put them, so
-/// a board whose mandatory block is out of order still gets the analysis below
-/// it rather than wedged into the middle. Nothing already in the block is
-/// moved: we insert into the order the board has, we do not impose one.
-fn tag_pair_position(lines: &[(String, &str)], identification_end: usize, name: &str) -> usize {
-    let mut at = 0;
-    for (idx, (line, _)) in lines[..identification_end].iter().enumerate() {
-        if let Some(tag) = extract_tag_name(line.trim()) {
-            if MANDATORY_TAGS.contains(&tag) || tag < name {
-                at = idx + 1;
-            }
-        }
-    }
-    at
-}
-
-/// The sections of a block, as `(name, header index, end index)`.
+/// This is the whole of the "only what is missing" policy: a board with no
+/// `[Deal]`, one whose deal will not parse, one dealt no cards, and — unless
+/// `recalculate` — one already carrying a `[DoubleDummyTricks]` tag are all
+/// left for [`PbnDocument`] to emit from the original bytes.
 ///
-/// A section runs from its header to the next tag pair of any kind — that is
-/// what ends one, per PBN 2.1 §5.5 — so its data lines, and any commentary
-/// among them, travel with it.
-fn sections<'a>(lines: &'a [(String, &str)], from: usize) -> Vec<(&'a str, usize, usize)> {
-    let mut found = Vec::new();
-    let mut idx = from;
-    while idx < lines.len() {
-        let name = extract_tag_name(lines[idx].0.trim()).filter(|n| starts_a_section(n));
-        let Some(name) = name else {
-            idx += 1;
+/// The `[DoubleDummyTricks]` tag is the marker for "already analysed": a board
+/// carrying a stray par tag but no DD table has not been, and still gets filled
+/// in.
+fn boards_to_analyse(doc: &PbnDocument, recalculate: bool, verbose: bool) -> Vec<Pending> {
+    let mut pending = Vec::new();
+    for board in 0..doc.boards().len() {
+        // A block with no [Deal] — a preamble, a Bridge Composer template
+        // record — is not something to analyse.
+        let Some(deal) = doc.tag(board, "Deal") else {
             continue;
         };
-        let mut end = idx + 1;
-        while end < lines.len() && extract_tag_name(lines[end].0.trim()).is_none() {
-            end += 1;
+
+        if !recalculate && doc.tag(board, "DoubleDummyTricks").is_some() {
+            if verbose {
+                eprintln!("Skipping board that already has analysis");
+            }
+            continue;
         }
-        found.push((name, idx, end));
-        idx = end;
+
+        // A board with no cards — Bridge Composer writes
+        // [Deal "N:... ... ... ..."] for auction-only teaching boards — parses
+        // fine into empty hands, so completeness is checked too. Annotating one
+        // of those would stamp a fabricated all-zero table and a "Pass" par
+        // onto a board that has no deal to analyse.
+        let Some(hands) = Hands::from_pbn(deal) else {
+            continue;
+        };
+        if !hands.is_complete() {
+            if verbose {
+                eprintln!("Skipping board with an incomplete deal");
+            }
+            continue;
+        }
+
+        // Replacing a tag takes the lines the document says belong to it. On a
+        // board where those are not the lines we wrote, that would delete
+        // someone else's, so such a board is left exactly as found.
+        if let Some(stray) = stray_line_under_analysis(doc, board) {
+            eprintln!(
+                "Skipping board {}: {stray}, so replacing the analysis would take that line \
+                 with it. Move the tag out of the section by hand and run again.",
+                doc.tag(board, "Board").unwrap_or("(unnumbered)")
+            );
+            continue;
+        }
+
+        if verbose {
+            eprintln!("Processing deal {}...", pending.len() + 1);
+        }
+        pending.push(Pending {
+            board,
+            hands,
+            // `bridge_types` owns the spelling table, and is what
+            // `bridge-encodings` and `pbn-to-pdf` already parse this tag with.
+            // Keeping a private copy here is how this binary came to accept
+            // `"N"` and `"E"` — which PBN 2.1 §3.4.10 does not define — while
+            // rejecting the `"N-S"` and `"E-W"` that everything else in the
+            // family accepts.
+            vulnerability: doc
+                .tag(board, "Vulnerable")
+                .and_then(Vulnerability::from_pbn),
+        });
     }
-    found
+    pending
 }
 
-/// Where the `[OptimumResultTable]` section goes: below `[Auction]` and
-/// `[Play]`, and alphabetically among the board's other sections.
+/// A line the board's existing analysis tags own that this binary did not
+/// write, described for the message that reports it — or `None` when replacing
+/// them would take nothing but themselves.
 ///
-/// Bridge Composer writes the game record first and the supplemental sections
-/// after it, sorted among themselves — board 8 of `fixtures/bridge-composer`
-/// carries a custom `AAATable`, written *above* the auction, and comes back
-/// below the auction and above `OptimumResultTable`. Alphabetical order yields
-/// to that: a section sorting above ours but written below the auction keeps
-/// the table beneath it, because the game record wins.
-fn optimum_result_table_position(lines: &[(String, &str)], identification_end: usize) -> usize {
-    const NAME: &str = "OptimumResultTable";
-    let sections = sections(lines, identification_end);
+/// PBN 2.1 §5.5 gives a tag every line below it until the next tag pair, so a
+/// tag written *into* a section — which a build of this binary before #25 did,
+/// putting all four between `[Auction "N"]` and its calls — ends up owning the
+/// lines that section was holding. `PbnDocument` follows the standard and takes
+/// the whole span, so removing that stale `[OptimumResultTable]` would take the
+/// auction's calls with it.
+///
+/// Repairing such a board means moving lines the document did not offer to
+/// move, which is how a `%` directive or a commentary block gets stranded. So
+/// it is refused instead, and the board keeps whatever it had. Tracked as
+/// bridge-craftwork/bridge-encodings#19; a way to ask for a tag's own rows back
+/// while replacing it would let this be a repair again.
+///
+/// The three one-line tags own no rows at all, so any row under one is a stray.
+/// `OptimumResultTable`'s rows are its own only while they read as result rows,
+/// which is exactly the question [`is_optimum_result_row`] answers.
+fn stray_line_under_analysis(doc: &PbnDocument, board: usize) -> Option<String> {
+    for name in ANALYSIS_TAGS {
+        let rows = doc.tag_rows(board, name);
+        let stray = if name == "OptimumResultTable" {
+            rows.into_iter().find(|row| !is_optimum_result_row(row))
+        } else {
+            rows.into_iter().next()
+        };
+        if let Some(row) = stray {
+            return Some(format!("its [{name}] is followed by {row:?}"));
+        }
+    }
+    None
+}
 
-    // The earliest line the table may take.
-    let mut earliest = identification_end;
-    for (name, _, end) in &sections {
-        if matches!(*name, "Auction" | "Play") || *name < NAME {
-            earliest = earliest.max(*end);
+/// Write one board's analysis into `doc`, leaving every other byte alone.
+///
+/// The four tags are removed and then set rather than set in place, because
+/// where they go is part of the answer: [`PbnDocument`] ranks a new tag the way
+/// the standard's export order does, which `fixtures/bridge-composer` confirms
+/// is what Bridge Composer does — the one-line summaries alphabetically among
+/// the supplemental tag pairs above `[Auction]`, and the twenty-row table with
+/// the supplemental sections below `[Auction]` and `[Play]`. A board an older
+/// build left with all four above the auction is repaired by the round trip.
+///
+/// Nothing about how a PBN file is shaped is decided here: line endings, where
+/// a record ends, which lines belong to a section header, and the round trip of
+/// `%` directives, `;` comments and `{...}` commentary are all
+/// [`PbnDocument`]'s, and re-setting a tag to the value it already holds leaves
+/// [`PbnDocument::is_modified`] false so a re-run writes nothing.
+fn annotate(
+    doc: &mut PbnDocument,
+    board: &Pending,
+    table: &DdTable,
+    mark_verified: bool,
+) -> bridge_encodings::Result<()> {
+    let at = board.board;
+
+    if mark_verified {
+        // Fold the verified bit into whatever the board already carried. An
+        // unparsable value is replaced rather than propagated, since the tag is
+        // meaningless if it is not hex.
+        let flags = doc
+            .tag(at, "BCFlags")
+            .and_then(|value| u64::from_str_radix(value.trim(), 16).ok())
+            .unwrap_or(0);
+        doc.set_tag(at, "BCFlags", &format!("{:x}", flags | BC_FLAG_DD_VERIFIED))?;
+    }
+
+    for name in ANALYSIS_TAGS {
+        doc.remove_tag(at, name)?;
+    }
+
+    doc.set_tag(at, "DoubleDummyTricks", &dd_table_to_pbn(table))?;
+
+    // Par needs vulnerability to score; without it the board gets a table and
+    // no par, which is also what a board with no [Vulnerable] tag gets — and
+    // the stale par tags the board arrived with have already been removed.
+    if let Some(vul) = board.vulnerability {
+        let scored = par(
+            table,
+            vul.is_vulnerable(Direction::North),
+            vul.is_vulnerable(Direction::East),
+        );
+        doc.set_tag(at, "OptimumScore", &scored.optimum_score())?;
+        if let Some(contracts) = scored.par_contract() {
+            doc.set_tag(at, "ParContract", &contracts)?;
         }
     }
 
-    // ...and then above the first section that sorts below it.
-    sections
-        .iter()
-        .find(|(name, start, _)| *start >= earliest && *name > NAME)
-        .map_or(lines.len(), |(_, start, _)| *start)
-}
-
-/// Whether `[TagName ...]` opens a section whose data lines follow it.
-///
-/// PBN 2.1 gives `[Auction]` (§5.5) and `[Play]` (§5.6) the lines beneath them
-/// until the next tag pair, and §7 does the same for every table tag — a name
-/// ending in `Table`. Nothing may be inserted between such a header and its
-/// rows: a reader following the standard would see an auction with no calls,
-/// and then a run of stray call tokens after whatever was wedged in.
-///
-/// This is the boundary the whole placement is built on: everything above the
-/// first section is the identification block, where the one-line tags are
-/// ranked alphabetically, and everything below is game record, where the table
-/// goes. Ranking the table alphabetically instead — `"Auction" <
-/// "DoubleDummyTricks"` — is how it once came to be written into the middle of
-/// the auction.
-fn starts_a_section(tag_name: &str) -> bool {
-    tag_name == "Auction" || tag_name == "Play" || tag_name.ends_with("Table")
-}
-
-/// Extract the deal string from a [Deal "..."] tag
-fn extract_deal_tag(line: &str) -> Option<&str> {
-    let trimmed = line.trim();
-    if !trimmed.starts_with("[Deal ") {
-        return None;
-    }
-
-    // Find the quoted content
-    let start = trimmed.find('"')? + 1;
-    let end = trimmed.rfind('"')?;
-    if end <= start {
-        return None;
-    }
-
-    Some(&trimmed[start..end])
-}
-
-/// Extract vulnerability from [Vulnerable "..."] tag
-fn extract_vulnerability_tag(line: &str) -> Option<Vulnerability> {
-    let trimmed = line.trim();
-    if !trimmed.starts_with("[Vulnerable ") {
-        return None;
-    }
-
-    let start = trimmed.find('"')? + 1;
-    let end = trimmed.rfind('"')?;
-    if end <= start {
-        return None;
-    }
-
-    // `bridge_types` owns the spelling table, and is what `bridge-encodings`
-    // and `pbn-to-pdf` already parse this tag with. Keeping a private copy here
-    // is how this binary came to accept `"N"` and `"E"` — which PBN 2.1 §3.4.10
-    // does not define — while rejecting the `"N-S"` and `"E-W"` that everything
-    // else in the family accepts.
-    Vulnerability::from_pbn(&trimmed[start..end])
-}
-
-/// Extract the tag name from a tag line like "[TagName ...]"
-fn extract_tag_name(line: &str) -> Option<&str> {
-    if !line.starts_with('[') {
-        return None;
-    }
-    let rest = &line[1..];
-    let end = rest.find([' ', ']'])?;
-    Some(&rest[..end])
+    // The `Result` column is one character wide when no declarer takes ten
+    // tricks and two when one does — header and rows together, both from
+    // `bridge_encodings::pbn`, which is what Bridge Composer writes. A fixed
+    // `\2R` had every single-digit board's table rewritten the moment someone
+    // opened and saved the file there.
+    let rows = optimum_result_table_rows(table);
+    let rows: Vec<&str> = rows.iter().map(String::as_str).collect();
+    doc.set_section(
+        at,
+        "OptimumResultTable",
+        &optimum_result_table_header(table),
+        &rows,
+    )
 }
 
 /// The five strains, in the order this binary hands them out as work.
@@ -949,86 +628,74 @@ fn solve_deals_parallel(deals: &[Hands], threads: usize, verbose: bool) -> Vec<D
     tables
 }
 
-/// The one-line supplemental tags this binary writes, in alphabetical order,
-/// each a whole line ending with `newline`.
-///
-/// Both encodings of the table come from `bridge_encodings::pbn`, which is the
-/// one place that says how a `DdTable` is written down. What stays here is the
-/// choice of which tags to write — the CLI's job. They come out in alphabetical
-/// order because that is the order they are placed in, which
-/// `dd_tag_pairs_are_alphabetical` holds us to.
-///
-/// Every line ends with `newline`, which is the ending the rest of the file
-/// uses, so an annotated CRLF file stays a CRLF file throughout.
-fn dd_tag_pairs(
-    table: &DdTable,
-    vulnerability: Option<Vulnerability>,
-    newline: &str,
-) -> Vec<(&'static str, String)> {
-    let mut tags = vec![(
-        "DoubleDummyTricks",
-        format!(
-            "[DoubleDummyTricks \"{}\"]{newline}",
-            dd_table_to_pbn(table)
-        ),
-    )];
-
-    // Par needs vulnerability to score; without it the board gets a table and
-    // no par, which is also what a board with no [Vulnerable] tag gets.
-    if let Some(vul) = vulnerability {
-        let p = par(
-            table,
-            vul.is_vulnerable(Direction::North),
-            vul.is_vulnerable(Direction::East),
-        );
-        tags.push((
-            "OptimumScore",
-            format!("[OptimumScore \"{}\"]{newline}", p.optimum_score()),
-        ));
-        if let Some(contracts) = p.par_contract() {
-            tags.push((
-                "ParContract",
-                format!("[ParContract \"{contracts}\"]{newline}"),
-            ));
-        }
-    }
-    tags
-}
-
-/// The `[OptimumResultTable]` section: its header and its twenty rows.
-///
-/// The `Result` column is one character wide when no declarer takes ten tricks
-/// and two when one does — header and rows together, both from
-/// `bridge_encodings::pbn`, which is what Bridge Composer writes. A fixed
-/// `\2R` had every single-digit board's table rewritten the moment someone
-/// opened and saved the file there.
-fn optimum_result_section(table: &DdTable, newline: &str) -> String {
-    let mut output = format!(
-        "[OptimumResultTable \"{}\"]{newline}",
-        optimum_result_table_header(table)
-    );
-    for row in optimum_result_table_rows(table) {
-        output.push_str(&row);
-        output.push_str(newline);
-    }
-    output
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn test_extract_deal_tag() {
-        let line = r#"[Deal "N:AK.QJ.T9.8765 432.A.K.QJT94 QJT.KT9.QJ.AK3 9876.8765.A8765.2"]"#;
-        let deal = extract_deal_tag(line).unwrap();
-        assert!(deal.starts_with("N:"));
+    /// Annotate a whole file, solving each deal inline on the calling thread.
+    ///
+    /// `main` does the same three steps — index, solve, annotate — with the
+    /// solve batched across every file and spread over the threads, so this is
+    /// that path with the batching taken out.
+    fn process_pbn(content: &str, verbose: bool, recalculate: bool, mark_verified: bool) -> String {
+        let mut doc = PbnDocument::parse(content).expect("the fixture parses");
+        for board in boards_to_analyse(&doc, recalculate, verbose) {
+            let table = solve_deal(&board.hands);
+            annotate(&mut doc, &board, &table, mark_verified).expect("the tags are writable");
+        }
+        doc.to_pbn()
     }
 
+    /// The tag name of a line, for reading an annotated file back. The binary
+    /// itself no longer needs this: `PbnDocument` indexes the tags.
+    fn extract_tag_name(line: &str) -> Option<&str> {
+        let rest = line.trim().strip_prefix('[')?;
+        let end = rest.find([' ', ']'])?;
+        Some(&rest[..end])
+    }
+
+    /// Whether `[TagName ...]` opens a section whose data lines follow it, per
+    /// PBN 2.1 §5.5, §5.6 and §7. Used only to read an annotated file back.
+    fn starts_a_section(tag_name: &str) -> bool {
+        tag_name == "Auction" || tag_name == "Play" || tag_name.ends_with("Table")
+    }
+
+    /// The 15 tag pairs PBN 2.1 §3.4 requires of every game, for telling a
+    /// mandatory tag from a supplemental one when reading a result back.
+    const MANDATORY_TAGS: [&str; 15] = [
+        "Event",
+        "Site",
+        "Date",
+        "Board",
+        "West",
+        "North",
+        "East",
+        "South",
+        "Dealer",
+        "Vulnerable",
+        "Deal",
+        "Scoring",
+        "Declarer",
+        "Contract",
+        "Result",
+    ];
+
+    /// The `[Vulnerable]` value a board carries, read the way the binary reads
+    /// it: `PbnDocument` finds the tag, `bridge_types` spells it.
+    fn vulnerability_of(value: &str) -> Option<Vulnerability> {
+        let pbn = format!("[Board \"1\"]\n[Vulnerable \"{value}\"]\n");
+        let doc = PbnDocument::parse(&pbn).expect("the board parses");
+        doc.tag(0, "Vulnerable").and_then(Vulnerability::from_pbn)
+    }
+
+    /// The deal string a board carries, as the binary reads it.
     #[test]
-    fn test_extract_deal_tag_no_match() {
-        assert!(extract_deal_tag("[Event \"Test\"]").is_none());
-        assert!(extract_deal_tag("N NT 3").is_none());
+    fn the_deal_tag_is_read_as_written() {
+        let deal = "N:AK.QJ.T9.8765 432.A.K.QJT94 QJT.KT9.QJ.AK3 9876.8765.A8765.2";
+        let pbn = format!("[Board \"1\"]\n[Deal \"{deal}\"]\n");
+        let doc = PbnDocument::parse(&pbn).expect("the board parses");
+        assert_eq!(doc.tag(0, "Deal"), Some(deal));
+        assert_eq!(doc.tag(0, "Event"), None);
     }
 
     /// Every spelling PBN 2.1 §3.4.10 defines, and nothing else.
@@ -1044,25 +711,15 @@ mod tests {
             ("All", Both),
             ("Both", Both),
         ] {
-            assert_eq!(
-                extract_vulnerability_tag(&format!("[Vulnerable \"{value}\"]")),
-                Some(expected),
-                "{value}"
-            );
+            assert_eq!(vulnerability_of(value), Some(expected), "{value}");
         }
     }
 
     /// Case is not significant, which the spec's own mixed-case examples imply.
     #[test]
     fn vulnerability_is_case_insensitive() {
-        assert_eq!(
-            extract_vulnerability_tag("[Vulnerable \"none\"]"),
-            Some(Vulnerability::None)
-        );
-        assert_eq!(
-            extract_vulnerability_tag("[Vulnerable \"bOtH\"]"),
-            Some(Vulnerability::Both)
-        );
+        assert_eq!(vulnerability_of("none"), Some(Vulnerability::None));
+        assert_eq!(vulnerability_of("bOtH"), Some(Vulnerability::Both));
     }
 
     /// Gained by moving to `bridge_types`. Not in the spec, but every other
@@ -1070,14 +727,8 @@ mod tests {
     /// that silently emitted no par contract for a board written this way.
     #[test]
     fn vulnerability_accepts_the_hyphenated_forms() {
-        assert_eq!(
-            extract_vulnerability_tag("[Vulnerable \"N-S\"]"),
-            Some(Vulnerability::NorthSouth)
-        );
-        assert_eq!(
-            extract_vulnerability_tag("[Vulnerable \"E-W\"]"),
-            Some(Vulnerability::EastWest)
-        );
+        assert_eq!(vulnerability_of("N-S"), Some(Vulnerability::NorthSouth));
+        assert_eq!(vulnerability_of("E-W"), Some(Vulnerability::EastWest));
     }
 
     /// Lost by moving to `bridge_types`, deliberately: PBN 2.1 §3.4.10 does not
@@ -1088,11 +739,7 @@ mod tests {
     #[test]
     fn vulnerability_rejects_undefined_spellings() {
         for value in ["N", "E", "S", "W", "NorthSouth", ""] {
-            assert_eq!(
-                extract_vulnerability_tag(&format!("[Vulnerable \"{value}\"]")),
-                Option::None,
-                "{value}"
-            );
+            assert_eq!(vulnerability_of(value), Option::None, "{value}");
         }
     }
 
@@ -1105,20 +752,6 @@ mod tests {
         );
         assert_eq!(extract_tag_name("[Deal \"N:...\"]"), Some("Deal"));
         assert_eq!(extract_tag_name("N NT 3"), None);
-    }
-
-    /// The rows this binary used to recognise, now recognised by the shared
-    /// predicate. Only the rows matter here: what follows an
-    /// `[OptimumResultTable]` header is skipped so the stale table can be
-    /// replaced, and a line wrongly kept would be duplicated into the output.
-    #[test]
-    fn test_is_optimum_result_row() {
-        assert!(is_optimum_result_row("N NT  3"));
-        assert!(is_optimum_result_row("S  S 10"));
-        assert!(is_optimum_result_row("E  H  7"));
-        assert!(!is_optimum_result_row("[Deal \"...\"]"));
-        assert!(!is_optimum_result_row(""));
-        assert!(!is_optimum_result_row("[OptimumResultTable \"...\"]"));
     }
 
     /// A table this binary would have written before the codec moved, checked
@@ -1569,7 +1202,13 @@ W  C  0
                             found.sections.push(name);
                         }
                     }
-                    None if in_table => found.rows.push(line),
+                    // A `;` comment is not a table row, wherever it sits. The
+                    // tags are inserted ahead of any trailing commentary, so a
+                    // board whose comment sat below its mandatory tags now has
+                    // it below the table rather than above the header.
+                    None if in_table && !line.trim_start().starts_with(';') => {
+                        found.rows.push(line)
+                    }
                     None => {}
                 }
             }
@@ -1578,22 +1217,32 @@ W  C  0
         boards
     }
 
-    /// The one-liners are emitted in the order they are placed in, so a board
-    /// with no supplemental tags of its own gets them in one alphabetical run.
+    /// A board with no supplemental tags of its own gets the one-liners in one
+    /// alphabetical run, directly below the mandatory tags.
     #[test]
-    fn dd_tag_pairs_are_alphabetical() {
-        let table = solve_deal(
-            &Hands::from_pbn(
-                "N:AKQT3.J6.KJ42.95 652.AK42.AQ87.T4 J74.QT95.T.AK863 98.873.9653.QJ72",
-            )
-            .expect("sample deal parses"),
+    fn the_one_liners_come_out_in_one_alphabetical_run() {
+        let pbn = concat!(
+            "[Board \"1\"]\n",
+            "[Vulnerable \"None\"]\n",
+            "[Deal \"N:AKQT3.J6.KJ42.95 652.AK42.AQ87.T4 J74.QT95.T.AK863 98.873.9653.QJ72\"]\n",
         );
-        let names: Vec<&str> = dd_tag_pairs(&table, Some(Vulnerability::None), "\n")
-            .into_iter()
-            .map(|(name, _)| name)
+        let result = process_pbn(pbn, false, false, false);
+        let names: Vec<&str> = result
+            .lines()
+            .filter_map(extract_tag_name)
+            .filter(|name| !MANDATORY_TAGS.contains(name))
             .collect();
-        assert_eq!(names, ["DoubleDummyTricks", "OptimumScore", "ParContract"]);
-        assert!(names.windows(2).all(|w| w[0] < w[1]));
+        assert_eq!(
+            names,
+            [
+                "DoubleDummyTricks",
+                "OptimumScore",
+                "ParContract",
+                "OptimumResultTable",
+            ],
+            "got:\n{result}"
+        );
+        assert!(names[..3].windows(2).all(|w| w[0] < w[1]));
     }
 
     /// Only the placement moved: the same tags with the same values are written.
@@ -1606,9 +1255,14 @@ W  C  0
     }
 
     /// A board an older build corrupted — the tags written inside the auction —
-    /// is repaired by `--recalculate` rather than having them replaced in place.
+    /// is left exactly as found rather than having its auction deleted.
+    ///
+    /// PBN 2.1 §5.5 gives the stale `[OptimumResultTable]` every line below it
+    /// until the next tag pair, and on such a board that is its twenty rows
+    /// *and* the auction's calls. Replacing it would take them, so the board is
+    /// refused with a message instead. See [`stray_line_under_analysis`].
     #[test]
-    fn recalculating_lifts_tags_out_of_the_auction() {
+    fn a_board_whose_tags_are_inside_the_auction_is_left_alone() {
         let mut corrupted = String::new();
         for line in AUCTION_BOARD.lines() {
             corrupted.push_str(line);
@@ -1628,11 +1282,23 @@ W  C  0
         }
 
         let result = process_pbn(&corrupted, false, true, false);
+        assert_eq!(result, corrupted, "the board must come back byte-for-byte");
+        // In particular the calls are still there, twenty rows below the stale
+        // table's header, where the older build stranded them.
         let lines: Vec<&str> = result.lines().collect();
-        let auction = line_of(&result, "[Auction \"N\"]");
-        assert_eq!(lines[auction + 1], "1S Pass 2S AP");
-        assert_eq!(result.matches("[DoubleDummyTricks").count(), 1);
-        assert!(!result.contains("\"00000000000000000000\""));
+        let table = line_of(
+            &result,
+            "[OptimumResultTable \"Declarer;Denomination\\2R;Result\\2R\"]",
+        );
+        assert_eq!(lines[table + 21], "1S Pass 2S AP");
+
+        // A board whose analysis owns only its own lines is still re-laid out.
+        let clean = process_pbn(AUCTION_BOARD, false, false, false);
+        let redone = process_pbn(&clean, false, true, false);
+        assert_eq!(
+            redone, clean,
+            "re-annotating a well-formed board is a no-op"
+        );
     }
 
     /// Any `*Table` tag is a section header too, per PBN 2.1 §7, and

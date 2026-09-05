@@ -115,10 +115,15 @@ The pass is designed to be safe to run over source material you care about.
 
 - **Only what is missing.** A board that already has a `DoubleDummyTricks` tag
   is passed through byte-for-byte. `--recalculate` redoes those too.
-- **Nothing else is disturbed.** Files are edited line by line rather than
-  reparsed and rewritten, so `%` directives (Bridge Composer's fonts, page setup
-  and colours), `;` comments and hand-authored `{...}` commentary all survive
-  exactly as written. Annotating a collection only ever adds lines.
+- **Nothing else is disturbed.** The file is held as written and the tags are
+  spliced into it, rather than the file being reparsed and re-emitted, so `%`
+  directives (Bridge Composer's fonts, page setup and colours), `;` comments and
+  hand-authored `{...}` commentary all survive exactly as written. Annotating a
+  collection only ever adds lines. This is
+  `bridge_encodings::pbn::PbnDocument`'s doing, not this tool's: an unedited
+  record is emitted from the original bytes, so it round-trips by construction.
+  The one thing a comment can see change is which side of it a *new* tag lands
+  on, since a tag is ranked against the tags around it and a comment has no rank.
 - **Line endings survive.** Each line keeps the ending it was written with, so a
   CRLF file — which is every file Bridge Composer writes — stays CRLF, an LF file
   stays LF, and a file mixing the two keeps each line as it was. The lines the
@@ -158,15 +163,19 @@ Tags already on the board are placed around, never moved: a board whose
 mandatory tags are out of order, or which carries a `*Table` section above its
 auction, keeps them exactly where they were. Bridge Composer would reorder both.
 
-Two earlier builds put these tags elsewhere, and `--recalculate` moves them to
-where they belong now:
+Two earlier builds put these tags elsewhere. `--recalculate` moves one of them
+to where they belong now, and refuses the other:
 
+- Builds that wrote all four tags as one group above the auction are re-laid
+  out: the table belongs below the play, so a board with an auction annotates
+  differently again.
 - Builds before the `[Auction]` fix ranked `Auction` alphabetically like any
   other tag, and so wrote the whole twenty-row table between `[Auction "N"]` and
-  its calls — which a conforming reader sees as an auction with no calls followed
-  by a run of stray call tokens.
-- Builds after it wrote all four tags as one group above the auction. The table
-  belongs below the play, so a board with an auction annotates differently again.
+  its calls. **Such a board is skipped, with a message naming it.** PBN 2.1 §5.5
+  gives a tag every line below it until the next tag pair, so on that board the
+  stale `[OptimumResultTable]` owns the auction's calls as well as its own twenty
+  rows — replacing it would delete them. Lift the tags out of the auction by hand
+  and run again; the board is left byte-for-byte untouched until you do.
 
 ## Threading
 
