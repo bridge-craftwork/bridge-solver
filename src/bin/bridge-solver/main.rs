@@ -227,7 +227,19 @@ fn main() {
                     }
                 }
                 None => {
-                    io::stdout().write_all(result.as_bytes()).unwrap();
+                    // A reader that closed early is not a failure. `bridge-solver
+                    // -i deals.pbn | head` ends the pipe as soon as head has what
+                    // it wants, and a tool in a pipeline exits quietly there —
+                    // panicking prints a backtrace over the user's terminal for
+                    // something they did on purpose.
+                    let mut out = io::stdout().lock();
+                    if let Err(e) = out.write_all(result.as_bytes()).and_then(|()| out.flush()) {
+                        if e.kind() == io::ErrorKind::BrokenPipe {
+                            std::process::exit(0);
+                        }
+                        eprintln!("Error writing to stdout: {e}");
+                        std::process::exit(1);
+                    }
                 }
             }
         }
