@@ -14,6 +14,7 @@ dependencies = [
 [[package]]
 name = "bridge-encodings"
 version = "0.1.0"
+source = "git+https://github.com/bridge-craftwork/bridge-encodings#446bff59650f1bbd64f413b8618e99c751367cc9"
 dependencies = [
  "bridge-types",
  "thiserror",
@@ -45,6 +46,7 @@ dependencies = [
 [[package]]
 name = "bridge-types"
 version = "0.1.0"
+source = "git+https://github.com/bridge-craftwork/bridge-types#57f32241d49114c723bdf6428477ba65ab9ed1d8"
 
 [[package]]
 name = "bumpalo"
