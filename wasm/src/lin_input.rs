@@ -642,7 +642,7 @@ mod tests {
     fn matches_bsol_on_a_real_board() {
         use bridge_solver::analyse_play::{self, PlayInput};
         use bridge_solver::Hands;
-        use bridge_types::{Deal, Direction, Strain};
+        use bridge_types::Deal;
         use std::collections::{BTreeMap, HashMap};
 
         // BSOL's `Deal`, which is in N,E,S,W order — West holds 16 HCP and
@@ -659,31 +659,14 @@ mod tests {
 
         // 1. The table, encoded the way BSOL sends it: seat-major over N,S,E,W
         //    with strains NT,S,H,D,C. Both orders differ from this engine's, so
-        //    getting the string out is itself part of the check.
+        //    getting the string out is itself part of the check -- which is why
+        //    this goes through the shared codec rather than a local loop: the
+        //    assertion is then against the encoder production actually uses.
         let table = bridge_solver::par::solve_dd_table(&deal);
-        let mut ddtricks = String::new();
-        for seat in [
-            Direction::North,
-            Direction::South,
-            Direction::East,
-            Direction::West,
-        ] {
-            for strain in [
-                Strain::NoTrump,
-                Strain::Spades,
-                Strain::Hearts,
-                Strain::Diamonds,
-                Strain::Clubs,
-            ] {
-                let n = table.get(seat, strain);
-                ddtricks.push(if n < 10 {
-                    (b'0' + n) as char
-                } else {
-                    (b'a' + n - 10) as char
-                });
-            }
-        }
-        assert_eq!(ddtricks, "45544465449789987899");
+        assert_eq!(
+            bridge_encodings::pbn::dd_table_to_pbn(&table),
+            "45544465449789987899"
+        );
 
         // 2. The trace.
         let input = PlayInput {

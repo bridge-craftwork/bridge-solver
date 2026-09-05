@@ -169,7 +169,7 @@ impl Analyzer {
         ];
         let tricks = seats
             .iter()
-            .map(|&seat| strains.iter().map(|&st| table.get(seat, st)).collect())
+            .map(|&seat| strains.iter().map(|&st| table.tricks(seat, st)).collect())
             .collect();
 
         serde_json::to_string(&DdTableResponse { tricks, total })
