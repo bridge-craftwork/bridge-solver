@@ -48,8 +48,11 @@ pub use convert::{direction_to_seat, seat_to_direction};
 pub use hands::Hands;
 pub use par::{
     par, solve_dd_strain, solve_dd_table, solve_dd_table_cells, solve_dd_table_with_nodes,
-    DdTricks, ParContract, ParDeclarer, ParResult, Side, TableSolver, STRAINS,
+    ParContract, ParDeclarer, ParResult, Side, TableSolver,
 };
+// The table type and its axis orders belong to `bridge-types`; re-exported so a
+// caller of `solve_dd_table` needs one dependency, not two.
+pub use bridge_types::{DdTable, DECLARERS, STRAINS};
 pub use pattern::{type_sizes, PatternCache};
 pub use pattern_vec::drain_pool;
 pub use search::{slow_trump_tricks_opponent, CutoffCache};

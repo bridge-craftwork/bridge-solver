@@ -23,6 +23,7 @@
 use std::collections::HashMap;
 use std::time::Instant;
 
+use bridge_encodings::pbn::dd_table_to_pbn;
 use bridge_solver::analyse_play::{
     node_alternatives, parse_card, parse_seat, parse_trump, prefix_keys, running_trace, PlayInput,
 };
@@ -45,24 +46,6 @@ struct Measured {
     by_seat: HashMap<String, u32>,
     /// The same, with dummy's errors credited to the declarer who chose them.
     by_player: HashMap<String, u32>,
-}
-
-/// The 20-cell table as BSOL's `ddtricks`: seat-major N,S,E,W over NT,S,H,D,C.
-fn dd_tricks_string(tricks: &[[u8; 5]; 4]) -> String {
-    let seat_row = [0usize, 2, 1, 3];
-    let strain_col = [4usize, 3, 2, 1, 0];
-    let mut out = String::new();
-    for &row in &seat_row {
-        for &col in &strain_col {
-            let n = tricks[row][col];
-            out.push(if n < 10 {
-                (b'0' + n) as char
-            } else {
-                (b'a' + n - 10) as char
-            });
-        }
-    }
-    out
 }
 
 fn main() {
@@ -163,7 +146,7 @@ fn main() {
             table_ms,
             trace_ms,
             verdict_ms,
-            ddtricks: dd_tricks_string(&table.tricks),
+            ddtricks: dd_table_to_pbn(&table),
             by_seat,
             by_player,
         });

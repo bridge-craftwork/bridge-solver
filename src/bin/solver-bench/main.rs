@@ -33,6 +33,7 @@ use std::time::{Duration, Instant};
 #[cfg(feature = "dds-reference")]
 mod dds;
 
+use bridge_encodings::pbn::dd_table_to_pbn;
 #[cfg(feature = "dds-reference")]
 use bridge_solver::{solve_dd_strain, STRAINS};
 use bridge_solver::{solve_dd_table, solve_dd_table_cells, solve_dd_table_with_nodes};
@@ -93,9 +94,17 @@ impl Corpus {
 }
 
 /// Encode a solved table the way the corpus pins it.
+#[cfg(feature = "dds-reference")]
+/// Encode a raw `[direction][strain]` array as the corpus's `ddtricks` string.
+///
+/// Only for tables this crate did not produce: DDS's own output, and the
+/// atomics the parallel assembly check writes. Our own tables are
+/// `bridge_types::DdTable` and go through `dd_table_to_pbn`, which owns the
+/// orderings — this exists because those two arrive as bare arrays in a layout
+/// we do not control.
 fn encode_ddtricks(tricks: &[[u8; 5]; 4]) -> String {
     let mut out = String::with_capacity(20);
-    // par.rs indexes [direction][strain] as N,E,S,W over C,D,H,S,NT; the
+    // par.rs indexed [direction][strain] as N,E,S,W over C,D,H,S,NT; the
     // corpus is seat-major N,S,E,W over NT,S,H,D,C.
     for dir in [0usize, 2, 1, 3] {
         for strain in [4usize, 3, 2, 1, 0] {
@@ -690,7 +699,7 @@ fn verify(corpus: &Corpus, deals: &[Deal]) -> bool {
     println!("board  expected              computed              result");
     println!("{}", "-".repeat(62));
     for (board, deal) in corpus.boards.iter().zip(deals) {
-        let got = encode_ddtricks(&solve_dd_table(deal).tricks);
+        let got = dd_table_to_pbn(&solve_dd_table(deal));
         let good = got == board.ddtricks;
         ok &= good;
         println!(
@@ -707,7 +716,7 @@ fn verify(corpus: &Corpus, deals: &[Deal]) -> bool {
             .boards
             .iter()
             .zip(deals)
-            .filter(|(b, d)| { encode_ddtricks(&solve_dd_table(d).tricks) == b.ddtricks })
+            .filter(|(b, d)| { dd_table_to_pbn(&solve_dd_table(d)) == b.ddtricks })
             .count(),
         corpus.boards.len()
     );
@@ -917,7 +926,7 @@ fn reference(args: &ReferenceArgs) -> Result<(), String> {
 
     let mut disagreements = 0;
     for ((board, deal), dds_table) in corpus.boards.iter().zip(&deals).zip(&dds_tables) {
-        let ours = encode_ddtricks(&solve_dd_table(deal).tricks);
+        let ours = dd_table_to_pbn(&solve_dd_table(deal));
         let theirs = encode_ddtricks(dds_table);
         if ours != theirs {
             println!(
@@ -1033,7 +1042,7 @@ fn throughput(args: &ReferenceArgs, threads: usize) -> Result<(), String> {
     let sample = work.len().min(5);
     let mut agreed = Vec::with_capacity(sample);
     for (i, (pbn, deal)) in generated.iter().take(sample).enumerate() {
-        let ours = encode_ddtricks(&solve_dd_table(deal).tricks);
+        let ours = dd_table_to_pbn(&solve_dd_table(deal));
         let theirs = encode_ddtricks(&dds::solve_table(pbn)?);
         if ours != theirs {
             return Err(format!(
@@ -1412,6 +1421,9 @@ fn latency_report(args: &LatencyArgs) -> Result<(), String> {
     }
 
     let mut ours = Vec::with_capacity(deals.len());
+    // Only ever pushed to under `dds-reference`; without that feature it stays
+    // empty and every reader below already handles an empty column.
+    #[cfg_attr(not(feature = "dds-reference"), allow(unused_mut))]
     let mut dds_ms: Vec<f64> = Vec::new();
 
     // Interleaved by deal rather than by solver: a deal's two figures are then

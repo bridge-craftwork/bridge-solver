@@ -20,25 +20,9 @@
 
 use crate::{direction_to_seat, get_node_count, CutoffCache, Hands, PatternCache, Solver};
 use crate::{CLUB, DIAMOND, HEART, NOTRUMP, SPADE};
-use bridge_types::{Contract, Deal, Direction, Doubled, Strain};
+use bridge_types::{Contract, DdTable, Deal, Direction, Doubled, Strain, STRAINS};
 use std::cell::Cell;
 
-/// Max DD tricks per seat × strain. Seat order N,E,S,W and strain order
-/// C,D,H,S,NT (bridge-types enum order).
-#[derive(Debug, Clone, Copy)]
-pub struct DdTricks {
-    pub tricks: [[u8; 5]; 4],
-}
-
-/// The five strains, in the column order of [`DdTricks::tricks`]'s second
-/// axis. A caller splitting a table into per-strain work items indexes this.
-pub const STRAINS: [Strain; 5] = [
-    Strain::Clubs,
-    Strain::Diamonds,
-    Strain::Hearts,
-    Strain::Spades,
-    Strain::NoTrump,
-];
 const DIRECTIONS: [Direction; 4] = [
     Direction::South,
     Direction::North,
@@ -65,20 +49,16 @@ fn strain_index(s: Strain) -> usize {
     }
 }
 
-impl DdTricks {
-    pub fn get(&self, declarer: Direction, strain: Strain) -> u8 {
-        self.tricks[dir_index(declarer)][strain_index(strain)]
-    }
-
-    /// Best DD tricks a side can take in a strain (over its two seats).
-    pub fn side_max(&self, side: Side, strain: Strain) -> u8 {
-        let (a, b) = side.seats();
-        self.get(a, strain).max(self.get(b, strain))
-    }
+/// Best DD tricks a side can take in a strain, over its two seats.
+///
+/// [`DdTable::best_for_side`] takes one seat and consults its partner, which is
+/// the same thing said from the other end.
+fn side_max(dd: &DdTable, side: Side, strain: Strain) -> u8 {
+    dd.best_for_side(side.seats().0, strain)
 }
 
 /// Solve the full 20-entry DD table for a complete deal.
-pub fn solve_dd_table(deal: &Deal) -> DdTricks {
+pub fn solve_dd_table(deal: &Deal) -> DdTable {
     with_shared(|s| s.solve(deal))
 }
 
@@ -89,7 +69,7 @@ pub fn solve_dd_table(deal: &Deal) -> DdTricks {
 /// drift from the search it describes: comparing node counts against the C++
 /// reference is only meaningful if the count covers exactly the work the
 /// timing covers, cache reuse and MTD(f) seeding included.
-pub fn solve_dd_table_with_nodes(deal: &Deal) -> (DdTricks, u64) {
+pub fn solve_dd_table_with_nodes(deal: &Deal) -> (DdTable, u64) {
     with_shared(|s| s.solve_with_nodes(deal))
 }
 
@@ -97,7 +77,7 @@ pub fn solve_dd_table_with_nodes(deal: &Deal) -> (DdTricks, u64) {
 ///
 /// For localising a divergence against the C++ reference: a whole-table count
 /// says the trees differ, a per-cell one says *which* search to trace.
-pub fn solve_dd_table_cells(deal: &Deal) -> (DdTricks, Vec<(Strain, Direction, u64)>) {
+pub fn solve_dd_table_cells(deal: &Deal) -> (DdTable, Vec<(Strain, Direction, u64)>) {
     with_shared(|s| s.solve_cells(deal))
 }
 
@@ -162,19 +142,19 @@ impl TableSolver {
     }
 
     /// Solve the full 20-entry DD table for a complete deal.
-    pub fn solve(&mut self, deal: &Deal) -> DdTricks {
+    pub fn solve(&mut self, deal: &Deal) -> DdTable {
         self.solve_inner(deal, |_, _, _| {})
     }
 
     /// Solve the full table, and report how many nodes it took.
-    pub fn solve_with_nodes(&mut self, deal: &Deal) -> (DdTricks, u64) {
+    pub fn solve_with_nodes(&mut self, deal: &Deal) -> (DdTable, u64) {
         let mut nodes = 0;
         let tricks = self.solve_inner(deal, |_, _, n| nodes += n);
         (tricks, nodes)
     }
 
     /// Solve the full table, reporting each cell's nodes as it is finished.
-    pub fn solve_cells(&mut self, deal: &Deal) -> (DdTricks, Vec<(Strain, Direction, u64)>) {
+    pub fn solve_cells(&mut self, deal: &Deal) -> (DdTable, Vec<(Strain, Direction, u64)>) {
         let mut cells = Vec::with_capacity(20);
         let tricks = self.solve_inner(deal, |s, d, n| cells.push((s, d, n)));
         (tricks, cells)
@@ -224,18 +204,25 @@ impl TableSolver {
         &mut self,
         deal: &Deal,
         mut on_cell: impl FnMut(Strain, Direction, u64),
-    ) -> DdTricks {
+    ) -> DdTable {
         let hands = Hands::from_deal(deal);
         let total = hands.num_tricks() as u8;
-        let mut tricks = [[0u8; 5]; 4];
+        let mut table = DdTable::new();
         for strain in STRAINS {
             let column = self.solve_strain_inner(hands, total, strain, &mut on_cell);
-            // Both are indexed by `dir_index`, so the column drops straight in.
-            for (row, cell) in tricks.iter_mut().zip(column) {
-                row[strain_index(strain)] = cell;
+            // The column is in `dir_index` order; name each seat rather than
+            // relying on the two layouts happening to agree.
+            for (row, cell) in column.iter().enumerate() {
+                let declarer = match row {
+                    0 => Direction::North,
+                    1 => Direction::East,
+                    2 => Direction::South,
+                    _ => Direction::West,
+                };
+                table.set(declarer, strain, *cell);
             }
         }
-        DdTricks { tricks }
+        table
     }
 
     /// One strain's four cells, solved in `DIRECTIONS` order into a column
@@ -501,9 +488,9 @@ fn score_to_side(level: u8, strain: Strain, tricks: u8, vul: bool) -> i32 {
 /// The trick count is the side's best, so when the partners differ only one of
 /// them can declare it: Bridge Composer writes `N 3N=` rather than `NS 3N=`
 /// where North makes nine at notrump and South eight.
-fn contract_at(dd: &DdTricks, side: Side, level: u8, strain: Strain) -> ParContract {
+fn contract_at(dd: &DdTable, side: Side, level: u8, strain: Strain) -> ParContract {
     let (first, second) = side.seats();
-    let (a, b) = (dd.get(first, strain), dd.get(second, strain));
+    let (a, b) = (dd.tricks(first, strain), dd.tricks(second, strain));
     let declarer = match a.cmp(&b) {
         std::cmp::Ordering::Equal => ParDeclarer::Both(side),
         std::cmp::Ordering::Greater => ParDeclarer::Seat(first),
@@ -527,7 +514,7 @@ fn contract_at(dd: &DdTricks, side: Side, level: u8, strain: Strain) -> ParContr
 /// of `fixtures/bridge-composer` is `EW 1D+3`, and `1C+3` scores the same 130
 /// but is never reached, which is what Bridge Composer writes too.
 fn tied_contracts(
-    dd: &DdTricks,
+    dd: &DdTable,
     side: Side,
     min_rank: i32,
     score_ns: i32,
@@ -535,7 +522,7 @@ fn tied_contracts(
 ) -> Vec<ParContract> {
     let mut tied: Vec<ParContract> = Vec::new();
     for strain in STRAINS {
-        let tricks = dd.side_max(side, strain);
+        let tricks = side_max(dd, side, strain);
         for level in 1..=7u8 {
             if rank(level, strain) < min_rank {
                 continue;
@@ -553,7 +540,7 @@ fn tied_contracts(
 }
 
 /// Compute par from a DD table and each side's vulnerability.
-pub fn par(dd: &DdTricks, vul_ns: bool, vul_ew: bool) -> ParResult {
+pub fn par(dd: &DdTable, vul_ns: bool, vul_ew: bool) -> ParResult {
     let vul_of = |side: Side| match side {
         Side::NS => vul_ns,
         Side::EW => vul_ew,
@@ -576,7 +563,7 @@ pub fn par(dd: &DdTricks, vul_ns: bool, vul_ew: bool) -> ParResult {
                     if r <= cur_rank {
                         continue;
                     }
-                    let tricks = dd.side_max(side, strain);
+                    let tricks = side_max(dd, side, strain);
                     let s = score_to_side(level, strain, tricks, vul_of(side));
                     let s_ns = if side == Side::NS { s } else { -s };
                     let improves = if side == Side::NS {
@@ -759,9 +746,8 @@ mod tests {
 
     #[test]
     fn passed_out_is_par_zero() {
-        let dd = DdTricks {
-            tricks: [[6; 5]; 4],
-        }; // nobody can take 7 tricks anywhere
+        // Nobody can take 7 tricks anywhere.
+        let dd = DdTable::from_fn(|_, _| 6);
         let r = par(&dd, false, false);
         assert_eq!(r.optimum_score(), "0");
         assert!(r.contracts.is_empty());

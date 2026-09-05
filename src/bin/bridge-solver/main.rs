@@ -25,7 +25,7 @@ use bridge_encodings::pbn::{
     dd_table_to_pbn, is_optimum_result_row, optimum_result_table_header, optimum_result_table_rows,
     prevailing_newline, split_lines,
 };
-use bridge_solver::{par, DdTricks, Hands, TableSolver};
+use bridge_solver::{par, Hands, TableSolver};
 use bridge_types::{DdTable, Direction, Strain, Vulnerability, DECLARERS};
 use clap::Parser;
 use std::fs;
@@ -977,7 +977,7 @@ fn dd_tag_pairs(
     // no par, which is also what a board with no [Vulnerable] tag gets.
     if let Some(vul) = vulnerability {
         let p = par(
-            &to_par_table(table),
+            table,
             vul.is_vulnerable(Direction::North),
             vul.is_vulnerable(Direction::East),
         );
@@ -1012,28 +1012,6 @@ fn optimum_result_section(table: &DdTable, newline: &str) -> String {
         output.push_str(newline);
     }
     output
-}
-
-/// Copy a [`DdTable`] into the library's `DdTricks`, which [`par`] takes.
-///
-/// `DdTricks` is indexed positionally — seats N,E,S,W down the rows, strains
-/// C,D,H,S,NT across the columns — so the two orders have to meet somewhere,
-/// and this is the only place they do. `DdTable` cannot be indexed positionally
-/// at all, which is what keeps the transcription honest.
-fn to_par_table(table: &DdTable) -> DdTricks {
-    const SEATS: [Direction; 4] = [
-        Direction::North,
-        Direction::East,
-        Direction::South,
-        Direction::West,
-    ];
-    let mut tricks = [[0u8; 5]; 4];
-    for (row, declarer) in SEATS.iter().enumerate() {
-        for (column, strain) in bridge_solver::STRAINS.iter().enumerate() {
-            tricks[row][column] = table.tricks(*declarer, *strain);
-        }
-    }
-    DdTricks { tricks }
 }
 
 #[cfg(test)]
@@ -1836,7 +1814,7 @@ W  C  0
             for (declarer, strain, tricks) in ours.cells() {
                 assert_eq!(
                     tricks,
-                    reference.get(declarer, strain),
+                    reference.tricks(declarer, strain),
                     "{declarer:?} in {strain:?} of {pbn}"
                 );
             }
