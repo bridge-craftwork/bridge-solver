@@ -21,8 +21,9 @@ WebAssembly build for the browser, and a Rust crate to build against.
 - **Card by card** — not just how many tricks the deal is worth, but what each
   card played costs against best defence, and what the alternatives were. In the
   crate and in the browser build.
-- **Par scoring** — the optimum score and the contract that achieves it, given
-  vulnerability.
+- **Par scoring** — the optimum score and the contracts that achieve it, given
+  vulnerability: every contract tied at par, and named for a single seat when
+  only one partner can take the tricks, the way Bridge Composer writes them.
 
 Files and collections are **multithreaded**, and there is nothing to switch on:
 work is spread over every core by default, and `--threads` is there to turn it
