@@ -15,7 +15,8 @@
 //!   bridge-solver -w -i <file.pbn> <dir> ...    # annotate in place, recursively
 
 use bridge_encodings::pbn::{
-    dd_table_to_pbn, is_optimum_result_row, optimum_result_table_rows, OPTIMUM_RESULT_TABLE_HEADER,
+    dd_table_to_pbn, is_optimum_result_row, optimum_result_table_rows, prevailing_newline,
+    split_lines, OPTIMUM_RESULT_TABLE_HEADER,
 };
 use bridge_solver::{par, DdTricks, Hands, TableSolver};
 use bridge_types::{DdTable, Direction, Strain, Vulnerability, DECLARERS};
@@ -338,6 +339,14 @@ fn process_pbn(content: &str, verbose: bool, recalculate: bool, mark_verified: b
 /// written them that way into every file it has ever annotated, so adopting
 /// `PbnDocument` today would rewrite every board it touches. Tracked as
 /// bridge-craftwork/bridge-encodings#13; when that lands, this goes.
+///
+/// # Line endings
+///
+/// Lines are split by [`split_lines`], which keeps each terminator, rather than
+/// by `str::lines`, which discards it. Bridge Composer writes CRLF throughout,
+/// so rejoining with `\n` rewrote every line of every real-world file — which
+/// made "annotating only ever adds lines" and "a re-run touches nothing" false
+/// for exactly the files this tool exists to annotate.
 fn process_pbn_with(
     content: &str,
     verbose: bool,
@@ -351,14 +360,17 @@ fn process_pbn_with(
 
     // Process the file block by block
     // A block is a sequence of lines until a blank line outside of {} comments
-    let lines: Vec<&str> = content.lines().collect();
+    // Each line keeps the ending it was written with; lines this pass inserts
+    // have no neighbour to copy from, so they take the file's prevailing one.
+    let lines = split_lines(content);
+    let newline = prevailing_newline(content);
     let mut i = 0;
 
     while i < lines.len() {
         // Skip leading blank lines, but preserve them
-        while i < lines.len() && lines[i].trim().is_empty() {
-            result.push_str(lines[i]);
-            result.push('\n');
+        while i < lines.len() && lines[i].0.trim().is_empty() {
+            result.push_str(lines[i].0);
+            result.push_str(terminator(lines[i].1, newline));
             i += 1;
         }
 
@@ -371,7 +383,7 @@ fn process_pbn_with(
         let mut in_brace_comment = false;
 
         while i < lines.len() {
-            let line = lines[i];
+            let line = lines[i].0;
 
             // Track brace comment state
             // Note: braces don't nest per PBN spec
@@ -386,7 +398,7 @@ fn process_pbn_with(
             i += 1;
 
             // Check if next line would be a blank line outside of comment
-            if i < lines.len() && lines[i].trim().is_empty() && !in_brace_comment {
+            if i < lines.len() && lines[i].0.trim().is_empty() && !in_brace_comment {
                 break;
             }
         }
@@ -396,6 +408,7 @@ fn process_pbn_with(
         let block_lines = &lines[block_start..block_end];
         let processed = process_deal_block(
             block_lines,
+            newline,
             &mut deal_count,
             verbose,
             recalculate,
@@ -405,6 +418,20 @@ fn process_pbn_with(
         result.push_str(&processed);
     }
 
+    // Every line above was written with a real terminator, the file's last one
+    // included, so that a tag appended after it starts on its own line. Take the
+    // one that was supplied back off: a file that ended without a newline still
+    // ends without one.
+    if !content.ends_with('\n') {
+        let trimmed = result
+            .strip_suffix(newline)
+            .or_else(|| result.strip_suffix('\n'))
+            .map(str::len);
+        if let Some(len) = trimmed {
+            result.truncate(len);
+        }
+    }
+
     if verbose {
         eprintln!("Processed {} deal(s)", deal_count);
     }
@@ -412,9 +439,30 @@ fn process_pbn_with(
     result
 }
 
+/// A line's ending, with `newline` standing in for the empty one the final line
+/// carries when the file ends without a newline.
+///
+/// Writing that line with no ending at all would run the next line — a tag this
+/// pass appends — straight into it. [`process_pbn_with`] takes the final newline
+/// back off the finished output instead, once, so the "no trailing newline"
+/// property belongs to the file rather than to whichever line happens to be
+/// last after the edit.
+fn terminator<'a>(term: &'a str, newline: &'a str) -> &'a str {
+    if term.is_empty() {
+        newline
+    } else {
+        term
+    }
+}
+
 /// Process a single deal block
+///
+/// `lines` are `(content, terminator)` pairs from [`split_lines`], so every line
+/// this block passes through keeps the ending it was written with. `newline` is
+/// the ending given to lines that are inserted.
 fn process_deal_block(
-    lines: &[&str],
+    lines: &[(&str, &str)],
+    newline: &str,
     deal_count: &mut usize,
     verbose: bool,
     recalculate: bool,
@@ -425,7 +473,7 @@ fn process_deal_block(
     let mut deal_str: Option<&str> = None;
     let mut vulnerability: Option<Vulnerability> = None;
 
-    for line in lines {
+    for (line, _) in lines {
         if deal_str.is_none() {
             if let Some(d) = extract_deal_tag(line) {
                 deal_str = Some(d);
@@ -438,36 +486,28 @@ fn process_deal_block(
         }
     }
 
-    // If no Deal tag, just pass through unchanged
-    let Some(deal_str) = deal_str else {
-        let mut out = String::new();
-        for line in lines {
-            out.push_str(line);
-            out.push('\n');
-        }
-        return out;
-    };
-
-    // Parse the deal. A board with no cards — BridgeComposer writes
-    // [Deal "N:... ... ... ..."] for auction-only teaching boards — parses fine
-    // into empty hands, so completeness is checked too. Annotating one of those
-    // would stamp a fabricated all-zero table and a "Pass" par onto a board that
-    // has no deal to analyze.
+    // A block reproduced exactly as it was read, terminators included.
     let unchanged = || {
         let mut out = String::new();
-        for line in lines {
+        for (line, term) in lines {
             out.push_str(line);
-            out.push('\n');
+            out.push_str(terminator(term, newline));
         }
         out
     };
+
+    // If no Deal tag, just pass through unchanged
+    let Some(deal_str) = deal_str else {
+        return unchanged();
+    };
+
     // Already analyzed? Leave it alone unless asked to redo the work. The
     // [DoubleDummyTricks] tag is the marker: a board carrying a stray par tag
     // but no DD table has not been analyzed, and still gets filled in.
     if !recalculate
         && lines
             .iter()
-            .any(|l| extract_tag_name(l) == Some("DoubleDummyTricks"))
+            .any(|(l, _)| extract_tag_name(l) == Some("DoubleDummyTricks"))
     {
         if verbose {
             eprintln!("Skipping board that already has analysis");
@@ -475,6 +515,11 @@ fn process_deal_block(
         return unchanged();
     }
 
+    // Parse the deal. A board with no cards — BridgeComposer writes
+    // [Deal "N:... ... ... ..."] for auction-only teaching boards — parses fine
+    // into empty hands, so completeness is checked too. Annotating one of those
+    // would stamp a fabricated all-zero table and a "Pass" par onto a board that
+    // has no deal to analyze.
     let Some(hands) = Hands::from_pbn(deal_str) else {
         return unchanged();
     };
@@ -494,17 +539,18 @@ fn process_deal_block(
     let dd_results = solve(&hands);
 
     // Generate the DD tags
-    let dd_tags = generate_dd_tags(&dd_results, vulnerability);
+    let dd_tags = generate_dd_tags(&dd_results, vulnerability, newline);
 
     // Now reconstruct the block:
     // 1. Remove any existing DD tags
     // 2. Insert our new DD tags in the right place
 
-    let mut output_lines: Vec<String> = Vec::new();
+    let mut output_lines: Vec<(String, &str)> = Vec::new();
     let mut saw_bcflags = false;
     let mut found_dd_tag = false;
     let mut skipping_optimum_data = false;
     let mut insertion_point: Option<usize> = None;
+    let mut insertion_locked = false;
 
     // Tags we generate (need to remove existing ones)
     let dd_tag_names = [
@@ -514,14 +560,15 @@ fn process_deal_block(
         "OptimumResultTable",
     ];
 
-    for line in lines {
+    for (line, term) in lines {
         let trimmed = line.trim();
+        let term = terminator(term, newline);
 
         // Fold the verified bit into an existing [BCFlags], keeping every other
         // bit the board already carried.
         if mark_verified && extract_tag_name(trimmed) == Some("BCFlags") {
             saw_bcflags = true;
-            output_lines.push(with_verified_bit(trimmed));
+            output_lines.push((with_verified_bit(trimmed), term));
             continue;
         }
 
@@ -529,9 +576,14 @@ fn process_deal_block(
         if let Some(tag_name) = extract_tag_name(trimmed) {
             if dd_tag_names.contains(&tag_name) {
                 if !found_dd_tag {
-                    // Remember where to insert (we'll insert our new tags here)
-                    insertion_point = Some(output_lines.len());
                     found_dd_tag = true;
+                    // Remember where to insert (we'll insert our new tags here),
+                    // unless a section header above has already fixed the spot:
+                    // a file annotated by an older build has its DD tags *inside*
+                    // the auction, and replacing them there would keep them there.
+                    if !insertion_locked {
+                        insertion_point = Some(output_lines.len());
+                    }
                 }
                 if tag_name == "OptimumResultTable" {
                     skipping_optimum_data = true;
@@ -550,23 +602,30 @@ fn process_deal_block(
             }
         }
 
-        output_lines.push(line.to_string());
+        output_lines.push((line.to_string(), term));
 
         // Track potential insertion points (after Result tag, or alphabetically among supplemental tags)
-        if !found_dd_tag {
-            if trimmed.starts_with("[Result ") {
-                // Insert after Result tag (last mandatory tag)
-                insertion_point = Some(output_lines.len());
-            } else if trimmed.starts_with('[') {
-                if let Some(tag_name) = extract_tag_name(trimmed) {
-                    // DoubleDummyTricks comes first alphabetically among our tags
-                    if tag_name > "DoubleDummyTricks" && insertion_point.is_none() {
-                        // Insert before this tag
+        if !found_dd_tag && !insertion_locked {
+            if let Some(tag_name) = extract_tag_name(trimmed) {
+                if starts_a_section(tag_name) {
+                    // A section header owns every line below it until the next
+                    // tag, so there is no "after this tag" here: the alphabetical
+                    // rank of `Auction` used to put the whole table between the
+                    // header and its calls. Everything supplemental goes above.
+                    if insertion_point.is_none() {
                         insertion_point = Some(output_lines.len() - 1);
-                    } else if tag_name < "DoubleDummyTricks" {
-                        // Insert after this tag
-                        insertion_point = Some(output_lines.len());
                     }
+                    insertion_locked = true;
+                } else if trimmed.starts_with("[Result ") {
+                    // Insert after Result tag (last mandatory tag)
+                    insertion_point = Some(output_lines.len());
+                } else if tag_name > "DoubleDummyTricks" && insertion_point.is_none() {
+                    // DoubleDummyTricks comes first alphabetically among our
+                    // tags, so insert before this one.
+                    insertion_point = Some(output_lines.len() - 1);
+                } else if tag_name < "DoubleDummyTricks" {
+                    // Insert after this tag
+                    insertion_point = Some(output_lines.len());
                 }
             }
         }
@@ -576,19 +635,19 @@ fn process_deal_block(
     let mut result = String::new();
     // A board with no [BCFlags] of its own still needs one to carry the bit.
     let dd_tags = if mark_verified && !saw_bcflags {
-        format!("[BCFlags \"{:x}\"]\n{dd_tags}", BC_FLAG_DD_VERIFIED)
+        format!("[BCFlags \"{:x}\"]{newline}{dd_tags}", BC_FLAG_DD_VERIFIED)
     } else {
         dd_tags
     };
 
     let insert_at = insertion_point.unwrap_or(output_lines.len());
 
-    for (idx, line) in output_lines.iter().enumerate() {
+    for (idx, (line, term)) in output_lines.iter().enumerate() {
         if idx == insert_at {
             result.push_str(&dd_tags);
         }
         result.push_str(line);
-        result.push('\n');
+        result.push_str(term);
     }
 
     // If insertion point was at the end
@@ -597,6 +656,21 @@ fn process_deal_block(
     }
 
     result
+}
+
+/// Whether `[TagName ...]` opens a section whose data lines follow it.
+///
+/// PBN 2.1 gives `[Auction]` (§5.5) and `[Play]` (§5.6) the lines beneath them
+/// until the next tag pair, and §7 does the same for every table tag — a name
+/// ending in `Table`. Nothing may be inserted between such a header and its
+/// rows: a reader following the standard would see an auction with no calls,
+/// and then a run of stray call tokens after whatever was wedged in.
+///
+/// The insertion point is ranked alphabetically among supplemental tags, and
+/// `"Auction" < "DoubleDummyTricks"`, so without this every board carrying an
+/// auction had its double-dummy table written into the middle of it.
+fn starts_a_section(tag_name: &str) -> bool {
+    tag_name == "Auction" || tag_name == "Play" || tag_name.ends_with("Table")
 }
 
 /// Extract the deal string from a [Deal "..."] tag
@@ -771,12 +845,19 @@ fn solve_deals_parallel(deals: &[Hands], threads: usize, verbose: bool) -> Vec<D
 /// Both encodings of the table come from `bridge_encodings::pbn`, which is the
 /// one place that says how a `DdTable` is written down. What stays here is the
 /// choice of which tags to write and in what order — the CLI's job.
-fn generate_dd_tags(table: &DdTable, vulnerability: Option<Vulnerability>) -> String {
+///
+/// Every line ends with `newline`, which is the ending the rest of the file
+/// uses, so an annotated CRLF file stays a CRLF file throughout.
+fn generate_dd_tags(
+    table: &DdTable,
+    vulnerability: Option<Vulnerability>,
+    newline: &str,
+) -> String {
     let mut output = String::new();
 
     // 1. DoubleDummyTricks
     output.push_str(&format!(
-        "[DoubleDummyTricks \"{}\"]\n",
+        "[DoubleDummyTricks \"{}\"]{newline}",
         dd_table_to_pbn(table)
     ));
 
@@ -787,19 +868,22 @@ fn generate_dd_tags(table: &DdTable, vulnerability: Option<Vulnerability>) -> St
             vul.is_vulnerable(Direction::North),
             vul.is_vulnerable(Direction::East),
         );
-        output.push_str(&format!("[OptimumScore \"{}\"]\n", p.optimum_score()));
+        output.push_str(&format!(
+            "[OptimumScore \"{}\"]{newline}",
+            p.optimum_score()
+        ));
         if let Some(c) = p.contract {
-            output.push_str(&format!("[ParContract \"{}\"]\n", c.describe()));
+            output.push_str(&format!("[ParContract \"{}\"]{newline}", c.describe()));
         }
     }
 
     // 3. OptimumResultTable
     output.push_str(&format!(
-        "[OptimumResultTable \"{OPTIMUM_RESULT_TABLE_HEADER}\"]\n"
+        "[OptimumResultTable \"{OPTIMUM_RESULT_TABLE_HEADER}\"]{newline}"
     ));
     for row in optimum_result_table_rows(table) {
         output.push_str(&row);
-        output.push('\n');
+        output.push_str(newline);
     }
 
     output
@@ -1124,6 +1208,212 @@ W  C  0
         let result = process_pbn(pbn, false, false, false);
         assert_eq!(result.matches("[DoubleDummyTricks").count(), 1);
         assert!(!result.contains("\"00000000000000000000\""));
+    }
+
+    /// A complete board with an auction, for the placement tests. `AP` ends the
+    /// auction, so the calls are the whole of the `[Auction]` section.
+    const AUCTION_BOARD: &str = concat!(
+        "[Event \"Rich\"]\n",
+        "[Board \"4\"]\n",
+        "[Vulnerable \"EW\"]\n",
+        "[Deal \"N:Q7432.85.J983.63 J65.64.AKT5.AK98 AK98.AKQJ7.6.QJ7 T.T932.Q742.T542\"]\n",
+        "[Auction \"N\"]\n",
+        "1S Pass 2S AP\n",
+        "[Play \"E\"]\n",
+        "HA H2 H3 H4\n",
+    );
+
+    /// The index of the first line equal to `wanted`.
+    fn line_of(text: &str, wanted: &str) -> usize {
+        text.lines()
+            .position(|l| l == wanted)
+            .unwrap_or_else(|| panic!("no {wanted:?} line in:\n{text}"))
+    }
+
+    /// Issue #22. `[Auction]` and `[Play]` own every line below them until the
+    /// next tag pair, so nothing may be inserted between a header and its data.
+    /// Ranking the insertion point alphabetically put the whole twenty-row table
+    /// between `[Auction "N"]` and its calls, which reads as an auction with no
+    /// calls followed by four stray call tokens.
+    #[test]
+    fn dd_tags_go_above_the_auction_not_inside_it() {
+        let result = process_pbn(AUCTION_BOARD, false, false, false);
+        let lines: Vec<&str> = result.lines().collect();
+
+        // Each section header is still followed immediately by its own data.
+        let auction = line_of(&result, "[Auction \"N\"]");
+        assert_eq!(lines[auction + 1], "1S Pass 2S AP");
+        let play = line_of(&result, "[Play \"E\"]");
+        assert_eq!(lines[play + 1], "HA H2 H3 H4");
+
+        // ...and the whole analysis sits above the auction, below the deal.
+        let deal = lines
+            .iter()
+            .position(|l| l.starts_with("[Deal "))
+            .unwrap_or_else(|| panic!("no deal in:\n{result}"));
+        for tag in [
+            "[DoubleDummyTricks",
+            "[OptimumScore",
+            "[ParContract",
+            "[OptimumResultTable",
+        ] {
+            let at = lines
+                .iter()
+                .position(|l| l.starts_with(tag))
+                .unwrap_or_else(|| panic!("no {tag} in:\n{result}"));
+            assert!(
+                at > deal && at < auction,
+                "{tag} at {at}, deal at {deal}, auction at {auction}"
+            );
+        }
+        // The table's twenty rows are above the auction as well.
+        let table = lines
+            .iter()
+            .position(|l| l.starts_with("[OptimumResultTable"))
+            .unwrap_or_default();
+        assert_eq!(auction - table - 1, 20);
+    }
+
+    /// Only the placement moved: the same tags with the same values are written.
+    #[test]
+    fn moving_the_tags_did_not_change_them() {
+        let result = process_pbn(AUCTION_BOARD, false, false, false);
+        assert!(result.contains(r#"[DoubleDummyTricks "7a9547a9544248942489"]"#));
+        assert!(result.contains(r#"[OptimumScore "NS 420"]"#));
+        assert!(result.contains(r#"[ParContract "NS 4S="]"#));
+    }
+
+    /// A board an older build corrupted — the tags written inside the auction —
+    /// is repaired by `--recalculate` rather than having them replaced in place.
+    #[test]
+    fn recalculating_lifts_tags_out_of_the_auction() {
+        let mut corrupted = String::new();
+        for line in AUCTION_BOARD.lines() {
+            corrupted.push_str(line);
+            corrupted.push('\n');
+            if line == "[Auction \"N\"]" {
+                corrupted.push_str("[DoubleDummyTricks \"00000000000000000000\"]\n");
+                corrupted.push_str("[OptimumScore \"NS 0\"]\n");
+                corrupted.push_str("[ParContract \"NS Pass\"]\n");
+                corrupted
+                    .push_str("[OptimumResultTable \"Declarer;Denomination\\2R;Result\\2R\"]\n");
+                for declarer in ["N", "S", "E", "W"] {
+                    for strain in ["NT", " S", " H", " D", " C"] {
+                        corrupted.push_str(&format!("{declarer} {strain}  0\n"));
+                    }
+                }
+            }
+        }
+
+        let result = process_pbn(&corrupted, false, true, false);
+        let lines: Vec<&str> = result.lines().collect();
+        let auction = line_of(&result, "[Auction \"N\"]");
+        assert_eq!(lines[auction + 1], "1S Pass 2S AP");
+        assert_eq!(result.matches("[DoubleDummyTricks").count(), 1);
+        assert!(!result.contains("\"00000000000000000000\""));
+    }
+
+    /// Any `*Table` tag is a section header too, per PBN 2.1 §7, and
+    /// `"ActionTable" < "DoubleDummyTricks"` — so without the rule its rows
+    /// would have been split from their header the same way the auction was.
+    #[test]
+    fn table_tags_are_section_headers_too() {
+        let pbn = concat!(
+            "[Board \"1\"]\n",
+            "[Vulnerable \"None\"]\n",
+            "[Deal \"N:AKQT3.J6.KJ42.95 652.AK42.AQ87.T4 J74.QT95.T.AK863 98.873.9653.QJ72\"]\n",
+            "[ActionTable \"Player;Action\"]\n",
+            "N 1S\n",
+        );
+        let result = process_pbn(pbn, false, false, false);
+        let lines: Vec<&str> = result.lines().collect();
+        let header = line_of(&result, "[ActionTable \"Player;Action\"]");
+        assert_eq!(lines[header + 1], "N 1S");
+        assert!(
+            lines[..header]
+                .iter()
+                .any(|l| l.starts_with("[DoubleDummyTricks")),
+            "analysis must sit above the table header:\n{result}"
+        );
+    }
+
+    /// Issue #24. `str::lines` discards the terminator, so rejoining with `\n`
+    /// rewrote every line of every CRLF file. Bridge Composer writes CRLF, so
+    /// that was every real-world file.
+    #[test]
+    fn crlf_files_stay_crlf() {
+        let pbn = AUCTION_BOARD.replace('\n', "\r\n");
+        let result = process_pbn(&pbn, false, false, false);
+        assert!(result.contains("[DoubleDummyTricks"));
+        assert_eq!(
+            result.matches('\n').count(),
+            result.matches("\r\n").count(),
+            "a bare LF survived:\n{result:?}"
+        );
+        // The inserted lines took the file's ending, not the compiled-in one.
+        assert!(result.contains("[OptimumScore \"NS 420\"]\r\n"));
+        assert!(result.contains("N NT  7\r\n"));
+    }
+
+    /// An LF file is not "corrected" to CRLF either: each line keeps what it had.
+    #[test]
+    fn lf_files_stay_lf() {
+        let result = process_pbn(AUCTION_BOARD, false, false, false);
+        assert!(result.contains("[DoubleDummyTricks"));
+        assert_eq!(
+            result.matches('\r').count(),
+            0,
+            "a CR appeared:\n{result:?}"
+        );
+    }
+
+    /// The reported symptom: a CRLF file that already carries a complete
+    /// analysis has nothing to add, so it must come back byte-for-byte — which
+    /// is what `main` compares to decide whether to write the file at all.
+    /// Before the fix it reported "1 of 1 file(s) updated" and came back LF.
+    #[test]
+    fn an_already_annotated_crlf_file_is_not_rewritten() {
+        let annotated = process_pbn(&AUCTION_BOARD.replace('\n', "\r\n"), false, false, false);
+        let again = process_pbn(&annotated, false, false, false);
+        assert_eq!(again, annotated, "re-annotating must be a byte-level no-op");
+    }
+
+    /// A file whose lines disagree keeps each one as it was written; only the
+    /// inserted lines need a choice made for them, and they take the majority.
+    #[test]
+    fn mixed_endings_are_kept_line_by_line() {
+        let pbn = concat!(
+            "[Board \"1\"]\r\n",
+            "[Vulnerable \"None\"]\n",
+            "[Deal \"N:AKQT3.J6.KJ42.95 652.AK42.AQ87.T4 J74.QT95.T.AK863 98.873.9653.QJ72\"]\r\n",
+        );
+        let result = process_pbn(pbn, false, false, false);
+        assert!(result.starts_with(pbn), "input lines changed:\n{result:?}");
+        // Two CRLF against one LF, so insertions are CRLF.
+        assert!(result.contains("[DoubleDummyTricks \"9a8789a8784346543465\"]\r\n"));
+    }
+
+    /// A file that ended without a newline still ends without one, whether or
+    /// not anything was appended to it.
+    #[test]
+    fn a_missing_final_newline_is_not_added() {
+        let deal =
+            "[Deal \"N:AKQT3.J6.KJ42.95 652.AK42.AQ87.T4 J74.QT95.T.AK863 98.873.9653.QJ72\"]";
+        let pbn = format!("[Board \"1\"]\n[Vulnerable \"None\"]\n{deal}");
+
+        // Nothing to add: byte-for-byte, no newline grown.
+        let annotated = process_pbn(&pbn, false, false, false);
+        assert!(
+            !annotated.ends_with('\n'),
+            "gained a newline:\n{annotated:?}"
+        );
+        // The deal line kept a real terminator, so the appended tag is its own
+        // line rather than being run onto the end of it.
+        assert!(annotated.contains(&format!("{deal}\n[DoubleDummyTricks")));
+        assert!(annotated.ends_with("W  C  5"));
+
+        let again = process_pbn(&annotated, false, false, false);
+        assert_eq!(again, annotated);
     }
 
     /// Without a `Vulnerable` tag par cannot be scored, so the par tags are

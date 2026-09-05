@@ -93,6 +93,11 @@ The pass is designed to be safe to run over source material you care about.
   reparsed and rewritten, so `%` directives (Bridge Composer's fonts, page setup
   and colours), `;` comments and hand-authored `{...}` commentary all survive
   exactly as written. Annotating a collection only ever adds lines.
+- **Line endings survive.** Each line keeps the ending it was written with, so a
+  CRLF file — which is every file Bridge Composer writes — stays CRLF, an LF file
+  stays LF, and a file mixing the two keeps each line as it was. The lines the
+  tool inserts have no neighbour to copy from, so they take whichever ending the
+  file mostly uses. A file that ended without a final newline still does.
 - **Incomplete deals are skipped.** Auction-only teaching boards, written as
   `[Deal "N:... ... ... ..."]`, parse into empty hands; they are left alone
   rather than stamped with a fabricated all-zero table and a "Pass" par.
@@ -100,6 +105,23 @@ The pass is designed to be safe to run over source material you care about.
   so mtimes do not churn and a build sees nothing to redo. In-place writes go
   through a temporary file and a rename, so an interrupted run cannot leave a
   half-written file.
+
+## Where the tags go
+
+The four tags are written as a group, in the order Bridge Composer writes them:
+`DoubleDummyTricks`, `OptimumScore`, `ParContract`, then `OptimumResultTable`
+with its twenty rows. The group goes after the last mandatory tag the board
+carries — `[Result]` if there is one — and is otherwise ranked alphabetically
+among the supplemental tags already there.
+
+It never goes inside a section. `[Auction]` and `[Play]` (PBN 2.1 §5.5 and §5.6)
+and every `*Table` tag (§7) own the lines beneath them until the next tag pair,
+so the group is placed *above* such a header rather than between it and its data.
+Earlier builds ranked `Auction` alphabetically like any other tag and so put the
+whole twenty-row table between `[Auction "N"]` and its calls, which a conforming
+reader sees as an auction with no calls followed by a run of stray call tokens.
+A board with an auction therefore annotates differently now, and `--recalculate`
+lifts the tags out of the auction on a board an older build wrote.
 
 ## Threading
 
