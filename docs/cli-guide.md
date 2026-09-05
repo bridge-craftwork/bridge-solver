@@ -83,6 +83,32 @@ a common informal spelling. Anything else — including bare `N` or `E`, which t
 spec does not define — is treated as "no vulnerability stated": the board keeps
 its double-dummy table and simply gets no par.
 
+## What `ParContract` says
+
+`OptimumScore` is one number; `ParContract` is not simply that number with a
+contract attached, and the two Bridge Composer conventions it follows both cost
+us a wrong answer before `fixtures/bridge-composer` settled them.
+
+**Every contract tied at par is listed**, cheapest first, separated by `"; "`:
+
+```
+[ParContract "EW 2SX-1; EW 3CX-1"]
+[ParContract "NS 4H=; NS 4S="]
+```
+
+One contract per strain — the cheapest level in that strain that reaches par,
+since bidding the same strain higher is the same contract dearer.
+
+**A single seat is named when only one partner can take the tricks.** Where
+North makes nine at notrump and South only eight, the par contract is `N 3N=`
+rather than `NS 3N=`: South cannot declare it. When both partners take the same
+number of tricks the side is named, which is the common case.
+
+```
+[ParContract "N 3N="]      only North makes it
+[ParContract "NS 4H="]     either of them does
+```
+
 ## What it will not touch
 
 The pass is designed to be safe to run over source material you care about.
@@ -108,20 +134,39 @@ The pass is designed to be safe to run over source material you care about.
 
 ## Where the tags go
 
-The four tags are written as a group, in the order Bridge Composer writes them:
-`DoubleDummyTricks`, `OptimumScore`, `ParContract`, then `OptimumResultTable`
-with its twenty rows. The group goes after the last mandatory tag the board
-carries — `[Result]` if there is one — and is otherwise ranked alphabetically
-among the supplemental tags already there.
+Bridge Composer's own layout, read off a round trip through it
+(`fixtures/bridge-composer`, which is where all of this is evidenced). A board
+comes out of Bridge Composer in five groups:
 
-It never goes inside a section. `[Auction]` and `[Play]` (PBN 2.1 §5.5 and §5.6)
-and every `*Table` tag (§7) own the lines beneath them until the next tag pair,
-so the group is placed *above* such a header rather than between it and its data.
-Earlier builds ranked `Auction` alphabetically like any other tag and so put the
-whole twenty-row table between `[Auction "N"]` and its calls, which a conforming
-reader sees as an auction with no calls followed by a run of stray call tokens.
-A board with an auction therefore annotates differently now, and `--recalculate`
-lifts the tags out of the auction on a board an older build wrote.
+1. the 15 mandatory tags, in the standard's order;
+2. supplemental **tag pairs**, sorted alphabetically — custom tags included;
+3. `[Auction]` and its calls;
+4. `[Play]` and its cards;
+5. supplemental **sections**, sorted alphabetically among themselves.
+
+So the three one-line tags — `DoubleDummyTricks`, `OptimumScore`, `ParContract`,
+which happen to be alphabetical in that order — go in group 2, sorted among
+whatever supplemental tags the board already carries (`BCFlags`, `Generator`, a
+custom tag of your own), and `OptimumResultTable` with its twenty rows goes in
+group 5, below both `[Auction]` and `[Play]`.
+
+Nothing is inserted inside a section. `[Auction]` and `[Play]` (PBN 2.1 §5.5 and
+§5.6) and every `*Table` tag (§7) own the lines beneath them until the next tag
+pair, so a header and its data are never separated.
+
+Tags already on the board are placed around, never moved: a board whose
+mandatory tags are out of order, or which carries a `*Table` section above its
+auction, keeps them exactly where they were. Bridge Composer would reorder both.
+
+Two earlier builds put these tags elsewhere, and `--recalculate` moves them to
+where they belong now:
+
+- Builds before the `[Auction]` fix ranked `Auction` alphabetically like any
+  other tag, and so wrote the whole twenty-row table between `[Auction "N"]` and
+  its calls — which a conforming reader sees as an auction with no calls followed
+  by a run of stray call tokens.
+- Builds after it wrote all four tags as one group above the auction. The table
+  belongs below the play, so a board with an auction annotates differently again.
 
 ## Threading
 

@@ -1,11 +1,18 @@
 //! bridge-solver - Double-dummy solver for PBN files
 //!
 //! Reads a PBN file containing bridge deals, performs double-dummy analysis,
-//! and writes the results as Bridge Composer compatible tags:
+//! and writes the results as Bridge Composer compatible tags, where Bridge
+//! Composer itself puts them (see `fixtures/bridge-composer`):
 //! - DoubleDummyTricks (compact encoding)
 //! - OptimumScore (if vulnerability is known)
 //! - ParContract (if vulnerability is known)
+//!
+//! all three one-line supplemental tag pairs, sorted alphabetically among the
+//! board's other supplemental tags; and
 //! - OptimumResultTable (full table)
+//!
+//! a supplemental *section*, below `[Auction]` and `[Play]` and sorted
+//! alphabetically among any other sections.
 //!
 //! Boards whose deal is incomplete are passed through untouched.
 //!
@@ -15,8 +22,8 @@
 //!   bridge-solver -w -i <file.pbn> <dir> ...    # annotate in place, recursively
 
 use bridge_encodings::pbn::{
-    dd_table_to_pbn, is_optimum_result_row, optimum_result_table_rows, prevailing_newline,
-    split_lines, OPTIMUM_RESULT_TABLE_HEADER,
+    dd_table_to_pbn, is_optimum_result_row, optimum_result_table_header, optimum_result_table_rows,
+    prevailing_newline, split_lines,
 };
 use bridge_solver::{par, DdTricks, Hands, TableSolver};
 use bridge_types::{DdTable, Direction, Strain, Vulnerability, DECLARERS};
@@ -330,15 +337,15 @@ fn process_pbn(content: &str, verbose: bool, recalculate: bool, mark_verified: b
 /// an ordinary board to be skipped rather than failing the file, and an
 /// existing `OptimumResultTable` is replaced header and rows together.
 ///
-/// What it cannot do is place a *group* of tags. `set_tag` ranks each tag on
-/// its own — mandatory tags in the standard's order, then supplemental tags
-/// alphabetically — so the four tags this binary writes come out as
-/// `DoubleDummyTricks, OptimumResultTable, OptimumScore, ParContract`, the
-/// twenty-row table wedged between the one-line summaries, whatever order the
-/// calls are made in. This binary writes them the other way round and has
-/// written them that way into every file it has ever annotated, so adopting
-/// `PbnDocument` today would rewrite every board it touches. Tracked as
-/// bridge-craftwork/bridge-encodings#13; when that lands, this goes.
+/// What it cannot do is rank a *section* as a section. `set_tag` and
+/// `set_section` share one order — mandatory tags in the standard's order,
+/// then everything else alphabetically, with only `Auction`, `Play` and `Note`
+/// held back — so `OptimumResultTable` lands among the one-line tags, above the
+/// auction, where Bridge Composer puts it below the play. The three one-liners
+/// it would place correctly; the twenty-row table it would not, and that is the
+/// tag whose placement `fixtures/bridge-composer` is about. Tracked as
+/// bridge-craftwork/bridge-encodings#13; when a `*Table` name sorts with the
+/// sections there, this goes.
 ///
 /// # Line endings
 ///
@@ -538,21 +545,14 @@ fn process_deal_block(
     // Solve the deal
     let dd_results = solve(&hands);
 
-    // Generate the DD tags
-    let dd_tags = generate_dd_tags(&dd_results, vulnerability, newline);
-
-    // Now reconstruct the block:
-    // 1. Remove any existing DD tags
-    // 2. Insert our new DD tags in the right place
-
+    // Rebuild the block: strip whatever analysis it carried, then place ours.
     let mut output_lines: Vec<(String, &str)> = Vec::new();
     let mut saw_bcflags = false;
-    let mut found_dd_tag = false;
     let mut skipping_optimum_data = false;
-    let mut insertion_point: Option<usize> = None;
-    let mut insertion_locked = false;
 
-    // Tags we generate (need to remove existing ones)
+    // Tags we generate: strip whatever the board carried, so that ours are
+    // placed rather than replaced in situ. A board annotated by an older build
+    // has them all above the auction; leaving them there would keep them there.
     let dd_tag_names = [
         "DoubleDummyTricks",
         "OptimumScore",
@@ -572,90 +572,184 @@ fn process_deal_block(
             continue;
         }
 
-        // Check if this is one of our DD tags
         if let Some(tag_name) = extract_tag_name(trimmed) {
             if dd_tag_names.contains(&tag_name) {
-                if !found_dd_tag {
-                    found_dd_tag = true;
-                    // Remember where to insert (we'll insert our new tags here),
-                    // unless a section header above has already fixed the spot:
-                    // a file annotated by an older build has its DD tags *inside*
-                    // the auction, and replacing them there would keep them there.
-                    if !insertion_locked {
-                        insertion_point = Some(output_lines.len());
-                    }
-                }
-                if tag_name == "OptimumResultTable" {
-                    skipping_optimum_data = true;
-                }
+                // The twenty rows below an [OptimumResultTable] header belong to
+                // it and go with it.
+                skipping_optimum_data = tag_name == "OptimumResultTable";
                 continue;
             }
         }
 
-        // Skip data lines that follow OptimumResultTable
         if skipping_optimum_data {
             if is_optimum_result_row(line) {
                 continue;
-            } else {
-                // Stop skipping when we hit a non-data line
-                skipping_optimum_data = false;
             }
+            skipping_optimum_data = false;
         }
 
         output_lines.push((line.to_string(), term));
-
-        // Track potential insertion points (after Result tag, or alphabetically among supplemental tags)
-        if !found_dd_tag && !insertion_locked {
-            if let Some(tag_name) = extract_tag_name(trimmed) {
-                if starts_a_section(tag_name) {
-                    // A section header owns every line below it until the next
-                    // tag, so there is no "after this tag" here: the alphabetical
-                    // rank of `Auction` used to put the whole table between the
-                    // header and its calls. Everything supplemental goes above.
-                    if insertion_point.is_none() {
-                        insertion_point = Some(output_lines.len() - 1);
-                    }
-                    insertion_locked = true;
-                } else if trimmed.starts_with("[Result ") {
-                    // Insert after Result tag (last mandatory tag)
-                    insertion_point = Some(output_lines.len());
-                } else if tag_name > "DoubleDummyTricks" && insertion_point.is_none() {
-                    // DoubleDummyTricks comes first alphabetically among our
-                    // tags, so insert before this one.
-                    insertion_point = Some(output_lines.len() - 1);
-                } else if tag_name < "DoubleDummyTricks" {
-                    // Insert after this tag
-                    insertion_point = Some(output_lines.len());
-                }
-            }
-        }
     }
 
-    // Build the output
+    // Place what we write the way Bridge Composer does: the one-line tags among
+    // the identification tags, sorted alphabetically with whatever supplemental
+    // tags the board already has; the table below [Auction] and [Play], sorted
+    // alphabetically among any other sections. See `fixtures/bridge-composer`.
+    let mut one_liners: Vec<(&str, String)> = Vec::new();
+    // A board with no [BCFlags] of its own still needs one to carry the bit, and
+    // it sorts with the rest: `BCFlags` < `DoubleDummyTricks`.
+    if mark_verified && !saw_bcflags {
+        one_liners.push((
+            "BCFlags",
+            format!("[BCFlags \"{:x}\"]{newline}", BC_FLAG_DD_VERIFIED),
+        ));
+    }
+    one_liners.extend(dd_tag_pairs(&dd_results, vulnerability, newline));
+
+    let identification_end = first_section(&output_lines);
+    let mut insertions: Vec<(usize, String)> = one_liners
+        .into_iter()
+        .map(|(name, text)| {
+            (
+                tag_pair_position(&output_lines, identification_end, name),
+                text,
+            )
+        })
+        .collect();
+    insertions.push((
+        optimum_result_table_position(&output_lines, identification_end),
+        optimum_result_section(&dd_results, newline),
+    ));
+    // Stable, so tags landing at the same line keep the alphabetical order they
+    // were built in, and the table stays last of them.
+    insertions.sort_by_key(|(at, _)| *at);
+
     let mut result = String::new();
-    // A board with no [BCFlags] of its own still needs one to carry the bit.
-    let dd_tags = if mark_verified && !saw_bcflags {
-        format!("[BCFlags \"{:x}\"]{newline}{dd_tags}", BC_FLAG_DD_VERIFIED)
-    } else {
-        dd_tags
-    };
-
-    let insert_at = insertion_point.unwrap_or(output_lines.len());
-
+    let mut next = 0;
     for (idx, (line, term)) in output_lines.iter().enumerate() {
-        if idx == insert_at {
-            result.push_str(&dd_tags);
+        while insertions.get(next).is_some_and(|(at, _)| *at == idx) {
+            result.push_str(&insertions[next].1);
+            next += 1;
         }
         result.push_str(line);
         result.push_str(term);
     }
-
-    // If insertion point was at the end
-    if insert_at >= output_lines.len() {
-        result.push_str(&dd_tags);
+    // Anything ranked past the last line goes on the end.
+    for (_, text) in &insertions[next..] {
+        result.push_str(text);
     }
 
     result
+}
+
+/// The 15 tag pairs PBN 2.1 §3.4 requires of every game.
+///
+/// A copy of the list `bridge_encodings::pbn` keeps privately, needed here for
+/// the same reason it needs it: a supplemental tag is ranked alphabetically
+/// among the *supplemental* tags, and `Result` — mandatory, and the last of
+/// them — would otherwise sort above `OptimumScore` and take the analysis with
+/// it. Order within the list does not matter here, only membership: this
+/// binary places tags relative to the mandatory block without reordering it.
+const MANDATORY_TAGS: [&str; 15] = [
+    "Event",
+    "Site",
+    "Date",
+    "Board",
+    "West",
+    "North",
+    "East",
+    "South",
+    "Dealer",
+    "Vulnerable",
+    "Deal",
+    "Scoring",
+    "Declarer",
+    "Contract",
+    "Result",
+];
+
+/// The end of the board's identification section: the first line that opens a
+/// section, or the end of the block if it has none.
+///
+/// Everything above this is tag pairs (with any commentary between them);
+/// everything below belongs to a section. A supplemental tag pair goes above
+/// it, since a section owns every line beneath its header.
+fn first_section(lines: &[(String, &str)]) -> usize {
+    lines
+        .iter()
+        .position(|(line, _)| extract_tag_name(line.trim()).is_some_and(starts_a_section))
+        .unwrap_or(lines.len())
+}
+
+/// Where a supplemental tag pair named `name` goes: after every mandatory tag
+/// and every supplemental tag sorting above it, and above the rest.
+///
+/// Mandatory tags always rank first, wherever the file happens to put them, so
+/// a board whose mandatory block is out of order still gets the analysis below
+/// it rather than wedged into the middle. Nothing already in the block is
+/// moved: we insert into the order the board has, we do not impose one.
+fn tag_pair_position(lines: &[(String, &str)], identification_end: usize, name: &str) -> usize {
+    let mut at = 0;
+    for (idx, (line, _)) in lines[..identification_end].iter().enumerate() {
+        if let Some(tag) = extract_tag_name(line.trim()) {
+            if MANDATORY_TAGS.contains(&tag) || tag < name {
+                at = idx + 1;
+            }
+        }
+    }
+    at
+}
+
+/// The sections of a block, as `(name, header index, end index)`.
+///
+/// A section runs from its header to the next tag pair of any kind — that is
+/// what ends one, per PBN 2.1 §5.5 — so its data lines, and any commentary
+/// among them, travel with it.
+fn sections<'a>(lines: &'a [(String, &str)], from: usize) -> Vec<(&'a str, usize, usize)> {
+    let mut found = Vec::new();
+    let mut idx = from;
+    while idx < lines.len() {
+        let name = extract_tag_name(lines[idx].0.trim()).filter(|n| starts_a_section(n));
+        let Some(name) = name else {
+            idx += 1;
+            continue;
+        };
+        let mut end = idx + 1;
+        while end < lines.len() && extract_tag_name(lines[end].0.trim()).is_none() {
+            end += 1;
+        }
+        found.push((name, idx, end));
+        idx = end;
+    }
+    found
+}
+
+/// Where the `[OptimumResultTable]` section goes: below `[Auction]` and
+/// `[Play]`, and alphabetically among the board's other sections.
+///
+/// Bridge Composer writes the game record first and the supplemental sections
+/// after it, sorted among themselves — board 8 of `fixtures/bridge-composer`
+/// carries a custom `AAATable`, written *above* the auction, and comes back
+/// below the auction and above `OptimumResultTable`. Alphabetical order yields
+/// to that: a section sorting above ours but written below the auction keeps
+/// the table beneath it, because the game record wins.
+fn optimum_result_table_position(lines: &[(String, &str)], identification_end: usize) -> usize {
+    const NAME: &str = "OptimumResultTable";
+    let sections = sections(lines, identification_end);
+
+    // The earliest line the table may take.
+    let mut earliest = identification_end;
+    for (name, _, end) in &sections {
+        if matches!(*name, "Auction" | "Play") || *name < NAME {
+            earliest = earliest.max(*end);
+        }
+    }
+
+    // ...and then above the first section that sorts below it.
+    sections
+        .iter()
+        .find(|(name, start, _)| *start >= earliest && *name > NAME)
+        .map_or(lines.len(), |(_, start, _)| *start)
 }
 
 /// Whether `[TagName ...]` opens a section whose data lines follow it.
@@ -666,9 +760,12 @@ fn process_deal_block(
 /// rows: a reader following the standard would see an auction with no calls,
 /// and then a run of stray call tokens after whatever was wedged in.
 ///
-/// The insertion point is ranked alphabetically among supplemental tags, and
-/// `"Auction" < "DoubleDummyTricks"`, so without this every board carrying an
-/// auction had its double-dummy table written into the middle of it.
+/// This is the boundary the whole placement is built on: everything above the
+/// first section is the identification block, where the one-line tags are
+/// ranked alphabetically, and everything below is game record, where the table
+/// goes. Ranking the table alphabetically instead — `"Auction" <
+/// "DoubleDummyTricks"` — is how it once came to be written into the middle of
+/// the auction.
 fn starts_a_section(tag_name: &str) -> bool {
     tag_name == "Auction" || tag_name == "Play" || tag_name.ends_with("Table")
 }
@@ -840,52 +937,68 @@ fn solve_deals_parallel(deals: &[Hands], threads: usize, verbose: bool) -> Vec<D
     tables
 }
 
-/// Generate all DD tags as a string.
+/// The one-line supplemental tags this binary writes, in alphabetical order,
+/// each a whole line ending with `newline`.
 ///
 /// Both encodings of the table come from `bridge_encodings::pbn`, which is the
 /// one place that says how a `DdTable` is written down. What stays here is the
-/// choice of which tags to write and in what order — the CLI's job.
+/// choice of which tags to write — the CLI's job. They come out in alphabetical
+/// order because that is the order they are placed in, which
+/// `dd_tag_pairs_are_alphabetical` holds us to.
 ///
 /// Every line ends with `newline`, which is the ending the rest of the file
 /// uses, so an annotated CRLF file stays a CRLF file throughout.
-fn generate_dd_tags(
+fn dd_tag_pairs(
     table: &DdTable,
     vulnerability: Option<Vulnerability>,
     newline: &str,
-) -> String {
-    let mut output = String::new();
+) -> Vec<(&'static str, String)> {
+    let mut tags = vec![(
+        "DoubleDummyTricks",
+        format!(
+            "[DoubleDummyTricks \"{}\"]{newline}",
+            dd_table_to_pbn(table)
+        ),
+    )];
 
-    // 1. DoubleDummyTricks
-    output.push_str(&format!(
-        "[DoubleDummyTricks \"{}\"]{newline}",
-        dd_table_to_pbn(table)
-    ));
-
-    // 2. Par: OptimumScore + ParContract (needs vulnerability to score).
+    // Par needs vulnerability to score; without it the board gets a table and
+    // no par, which is also what a board with no [Vulnerable] tag gets.
     if let Some(vul) = vulnerability {
         let p = par(
             &to_par_table(table),
             vul.is_vulnerable(Direction::North),
             vul.is_vulnerable(Direction::East),
         );
-        output.push_str(&format!(
-            "[OptimumScore \"{}\"]{newline}",
-            p.optimum_score()
+        tags.push((
+            "OptimumScore",
+            format!("[OptimumScore \"{}\"]{newline}", p.optimum_score()),
         ));
-        if let Some(c) = p.contract {
-            output.push_str(&format!("[ParContract \"{}\"]{newline}", c.describe()));
+        if let Some(contracts) = p.par_contract() {
+            tags.push((
+                "ParContract",
+                format!("[ParContract \"{contracts}\"]{newline}"),
+            ));
         }
     }
+    tags
+}
 
-    // 3. OptimumResultTable
-    output.push_str(&format!(
-        "[OptimumResultTable \"{OPTIMUM_RESULT_TABLE_HEADER}\"]{newline}"
-    ));
+/// The `[OptimumResultTable]` section: its header and its twenty rows.
+///
+/// The `Result` column is one character wide when no declarer takes ten tricks
+/// and two when one does — header and rows together, both from
+/// `bridge_encodings::pbn`, which is what Bridge Composer writes. A fixed
+/// `\2R` had every single-digit board's table rewritten the moment someone
+/// opened and saved the file there.
+fn optimum_result_section(table: &DdTable, newline: &str) -> String {
+    let mut output = format!(
+        "[OptimumResultTable \"{}\"]{newline}",
+        optimum_result_table_header(table)
+    );
     for row in optimum_result_table_rows(table) {
         output.push_str(&row);
         output.push_str(newline);
     }
-
     output
 }
 
@@ -1230,13 +1343,15 @@ W  C  0
             .unwrap_or_else(|| panic!("no {wanted:?} line in:\n{text}"))
     }
 
-    /// Issue #22. `[Auction]` and `[Play]` own every line below them until the
-    /// next tag pair, so nothing may be inserted between a header and its data.
-    /// Ranking the insertion point alphabetically put the whole twenty-row table
-    /// between `[Auction "N"]` and its calls, which reads as an auction with no
-    /// calls followed by four stray call tokens.
+    /// Issue #22, and then the Bridge Composer fixture. `[Auction]` and
+    /// `[Play]` own every line below them until the next tag pair, so nothing
+    /// may be inserted between a header and its data — ranking the insertion
+    /// point alphabetically once put the whole twenty-row table between
+    /// `[Auction "N"]` and its calls. The tags then went *above* the auction,
+    /// all four of them, until `fixtures/bridge-composer` showed that Bridge
+    /// Composer splits them: one-liners above, the table below the game record.
     #[test]
-    fn dd_tags_go_above_the_auction_not_inside_it() {
+    fn one_liners_go_above_the_auction_and_the_table_below_the_play() {
         let result = process_pbn(AUCTION_BOARD, false, false, false);
         let lines: Vec<&str> = result.lines().collect();
 
@@ -1246,17 +1361,12 @@ W  C  0
         let play = line_of(&result, "[Play \"E\"]");
         assert_eq!(lines[play + 1], "HA H2 H3 H4");
 
-        // ...and the whole analysis sits above the auction, below the deal.
+        // The one-line tags sit between the deal and the auction...
         let deal = lines
             .iter()
             .position(|l| l.starts_with("[Deal "))
             .unwrap_or_else(|| panic!("no deal in:\n{result}"));
-        for tag in [
-            "[DoubleDummyTricks",
-            "[OptimumScore",
-            "[ParContract",
-            "[OptimumResultTable",
-        ] {
+        for tag in ["[DoubleDummyTricks", "[OptimumScore", "[ParContract"] {
             let at = lines
                 .iter()
                 .position(|l| l.starts_with(tag))
@@ -1266,12 +1376,234 @@ W  C  0
                 "{tag} at {at}, deal at {deal}, auction at {auction}"
             );
         }
-        // The table's twenty rows are above the auction as well.
-        let table = lines
-            .iter()
-            .position(|l| l.starts_with("[OptimumResultTable"))
-            .unwrap_or_default();
-        assert_eq!(auction - table - 1, 20);
+
+        // ...and the table, with its twenty rows, below the play.
+        let table = line_of(
+            &result,
+            "[OptimumResultTable \"Declarer;Denomination\\2R;Result\\2R\"]",
+        );
+        assert!(table > play, "table at {table}, play at {play}");
+        assert_eq!(lines.len() - table - 1, 20, "got:\n{result}");
+    }
+
+    /// Group 2 of Bridge Composer's layout: supplemental tag *pairs*, sorted
+    /// alphabetically among themselves, custom tags included. Board 7 of
+    /// `fixtures/bridge-composer` proves it with `AAACustom` and `ZZZCustom`
+    /// bracketing the analysis, so ours has to sort into the same place.
+    #[test]
+    fn the_one_liners_sort_among_the_boards_own_supplemental_tags() {
+        let pbn = concat!(
+            "[Board \"1\"]\n",
+            "[Vulnerable \"None\"]\n",
+            "[Deal \"N:AKQT3.J6.KJ42.95 652.AK42.AQ87.T4 J74.QT95.T.AK863 98.873.9653.QJ72\"]\n",
+            "[Result \"\"]\n",
+            "[AAACustom \"first\"]\n",
+            "[Generator \"between the analysis tags\"]\n",
+            "[ZZZCustom \"last\"]\n",
+        );
+        let result = process_pbn(pbn, false, false, false);
+        let names: Vec<&str> = result
+            .lines()
+            .filter_map(|l| extract_tag_name(l.trim()))
+            .filter(|n| !MANDATORY_TAGS.contains(n))
+            .collect();
+        assert_eq!(
+            names,
+            [
+                "AAACustom",
+                "DoubleDummyTricks",
+                "Generator",
+                "OptimumScore",
+                "ParContract",
+                "ZZZCustom",
+                "OptimumResultTable",
+            ],
+            "got:\n{result}"
+        );
+    }
+
+    /// Group 5: supplemental *sections*, below the game record and sorted
+    /// alphabetically among themselves. `AAATable` was written above the
+    /// auction on board 8 of the fixture and came back below it, so the game
+    /// record outranks the sort — and `ZZZTable` keeps ours above it.
+    #[test]
+    fn the_table_sorts_among_the_boards_own_sections() {
+        let pbn = concat!(
+            "[Board \"1\"]\n",
+            "[Vulnerable \"None\"]\n",
+            "[Deal \"N:AKQT3.J6.KJ42.95 652.AK42.AQ87.T4 J74.QT95.T.AK863 98.873.9653.QJ72\"]\n",
+            "[AAATable \"Declarer;Result\\2R\"]\n",
+            "N  1\n",
+            "[Auction \"N\"]\n",
+            "1S Pass 2S AP\n",
+            "[ZZZTable \"Declarer;Result\\2R\"]\n",
+            "S  2\n",
+        );
+        let result = process_pbn(pbn, false, false, false);
+        let sections: Vec<&str> = result
+            .lines()
+            .filter_map(|l| extract_tag_name(l.trim()))
+            .filter(|n| starts_a_section(n))
+            .collect();
+        assert_eq!(
+            sections,
+            ["AAATable", "Auction", "OptimumResultTable", "ZZZTable"],
+            "got:\n{result}"
+        );
+        // Each header still owns its own rows.
+        let lines: Vec<&str> = result.lines().collect();
+        assert_eq!(
+            lines[line_of(&result, "N  1") - 1],
+            "[AAATable \"Declarer;Result\\2R\"]"
+        );
+        assert_eq!(
+            lines[line_of(&result, "S  2") - 1],
+            "[ZZZTable \"Declarer;Result\\2R\"]"
+        );
+    }
+
+    /// The Bridge Composer oracle, end to end: annotate the fixture ourselves
+    /// and compare against the file Bridge Composer 5.118.2 produced from the
+    /// same input, board by board.
+    ///
+    /// Equality of the whole file is not the goal and never will be — Bridge
+    /// Composer reorders the mandatory tags, adds `[BCFlags]` and a preamble of
+    /// its own settings, and rewrites `;` comments as `{...}` commentary, none
+    /// of which we do. What must agree is everything we write: all four tag
+    /// values, the header's `Result` width, the twenty cells, and where the
+    /// tags sit relative to `[Auction]` and `[Play]`.
+    ///
+    /// The table is compared byte for byte, header and rows: Bridge Composer
+    /// narrows the data rows along with the header, so a `Result\1R` board
+    /// reads `N NT 5` and a `\2R` board `N NT  9`, and
+    /// `bridge_encodings::pbn` derives both widths from the same table. Four
+    /// boards here are narrow and four are wide.
+    #[test]
+    fn the_bridge_composer_fixture_round_trips() {
+        const OURS: &str = include_str!("../../../fixtures/bridge-composer/pbn-order-test.pbn");
+        const THEIRS: &str =
+            include_str!("../../../fixtures/bridge-composer/pbn-order-test-bc-dd.pbn");
+
+        let annotated = process_pbn(OURS, false, true, false);
+        let ours = analysis_of(&annotated);
+        let theirs = analysis_of(THEIRS);
+        assert_eq!(ours.len(), 8, "expected eight boards, got {}", ours.len());
+        assert_eq!(theirs.len(), ours.len());
+
+        for (board, (ours, theirs)) in ours.iter().zip(&theirs).enumerate() {
+            let board = board + 1;
+            assert_eq!(ours.tags, theirs.tags, "board {board}");
+            assert_eq!(ours.rows, theirs.rows, "board {board}");
+            // The table is the last section on the board, so it is below both
+            // [Auction] and [Play] and below any section sorting above it.
+            assert_eq!(
+                ours.sections.last(),
+                Some(&"OptimumResultTable"),
+                "board {board}"
+            );
+        }
+
+        // Board 8 is the one place the section order differs, and it is not
+        // ours: Bridge Composer moved the board's own `AAATable` from above the
+        // auction to below it. We do not move tags we did not write, so ours
+        // reads `AAATable, Auction, OptimumResultTable` where theirs reads
+        // `Auction, AAATable, OptimumResultTable`. The table is last either way.
+        assert_eq!(
+            ours[7].sections,
+            ["AAATable", "Auction", "OptimumResultTable"]
+        );
+        assert_eq!(
+            theirs[7].sections,
+            ["Auction", "AAATable", "OptimumResultTable"]
+        );
+        for (ours, theirs) in ours.iter().zip(&theirs).take(7) {
+            assert_eq!(ours.sections, theirs.sections);
+        }
+    }
+
+    /// One board's analysis: the part of a PBN record this binary is
+    /// responsible for.
+    #[derive(Debug, PartialEq, Eq)]
+    struct Analysis<'a> {
+        /// The analysis tag lines, exactly as written.
+        tags: Vec<&'a str>,
+        /// The table's rows, as written — column widths included, since those
+        /// are Bridge Composer's too.
+        rows: Vec<&'a str>,
+        /// The board's section headers, in file order.
+        sections: Vec<&'a str>,
+    }
+
+    /// Every board's [`Analysis`], in file order.
+    ///
+    /// Boards without a dealt hand (Bridge Composer's template record) are
+    /// skipped, so the two files line up board for board.
+    fn analysis_of(pbn: &str) -> Vec<Analysis<'_>> {
+        let mut boards = Vec::new();
+        // Blank lines separate records; `str::lines` drops the file's CRLF for
+        // us, which is all this needs to read either file.
+        let mut blocks: Vec<Vec<&str>> = vec![Vec::new()];
+        for line in pbn.lines() {
+            if line.trim().is_empty() {
+                blocks.push(Vec::new());
+            } else if let Some(block) = blocks.last_mut() {
+                block.push(line);
+            }
+        }
+
+        for block in blocks {
+            // Bridge Composer writes a template record with an empty [Deal];
+            // skipping it lines the two files up board for board.
+            if !block
+                .iter()
+                .any(|l| l.starts_with("[Deal \"") && l.len() > 10)
+            {
+                continue;
+            }
+            let mut found = Analysis {
+                tags: Vec::new(),
+                rows: Vec::new(),
+                sections: Vec::new(),
+            };
+            let mut in_table = false;
+            for line in block {
+                match extract_tag_name(line.trim()) {
+                    Some(name) => {
+                        in_table = name == "OptimumResultTable";
+                        if ["DoubleDummyTricks", "OptimumScore", "ParContract"].contains(&name)
+                            || in_table
+                        {
+                            found.tags.push(line);
+                        }
+                        if starts_a_section(name) {
+                            found.sections.push(name);
+                        }
+                    }
+                    None if in_table => found.rows.push(line),
+                    None => {}
+                }
+            }
+            boards.push(found);
+        }
+        boards
+    }
+
+    /// The one-liners are emitted in the order they are placed in, so a board
+    /// with no supplemental tags of its own gets them in one alphabetical run.
+    #[test]
+    fn dd_tag_pairs_are_alphabetical() {
+        let table = solve_deal(
+            &Hands::from_pbn(
+                "N:AKQT3.J6.KJ42.95 652.AK42.AQ87.T4 J74.QT95.T.AK863 98.873.9653.QJ72",
+            )
+            .expect("sample deal parses"),
+        );
+        let names: Vec<&str> = dd_tag_pairs(&table, Some(Vulnerability::None), "\n")
+            .into_iter()
+            .map(|(name, _)| name)
+            .collect();
+        assert_eq!(names, ["DoubleDummyTricks", "OptimumScore", "ParContract"]);
+        assert!(names.windows(2).all(|w| w[0] < w[1]));
     }
 
     /// Only the placement moved: the same tags with the same values are written.

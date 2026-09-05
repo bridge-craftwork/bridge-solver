@@ -9,6 +9,14 @@
 //! tournament boards (see `tests`). The `OptimumScore` convention is matched:
 //! the score is labeled by the par contract's declaring side and signed to that
 //! side (a sacrifice reads negative, e.g. "NS -100").
+//!
+//! `ParContract` is not the same tag written differently, and agreeing on the
+//! score does not imply agreeing on the contract. Bridge Composer lists *every*
+//! contract tied at par, separated by `"; "`, and names a single **seat** when
+//! only one partner can take the tricks double-dummy — `N 3N=` where North
+//! makes nine at notrump and South only eight. Both rules were read off
+//! `fixtures/bridge-composer`, where our scores matched on all eight boards and
+//! four of the contracts did not.
 
 use crate::{direction_to_seat, get_node_count, CutoffCache, Hands, PatternCache, Solver};
 use crate::{CLUB, DIAMOND, HEART, NOTRUMP, SPADE};
@@ -339,6 +347,40 @@ impl Side {
     }
 }
 
+/// Who a par contract names: one seat, or a whole side.
+///
+/// Bridge Composer names a single seat when only one partner can take the
+/// tricks the par score is computed from, and the side when either can — board
+/// 5 of `fixtures/bridge-composer` is `N 3N=` because North makes nine at
+/// notrump and South only eight. We wrote the side unconditionally until that
+/// fixture said otherwise.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ParDeclarer {
+    /// Only this seat takes the tricks; its partner takes fewer.
+    Seat(Direction),
+    /// Both partners take them, so either may declare.
+    Both(Side),
+}
+
+impl ParDeclarer {
+    /// The seat or side as `ParContract` writes it: `"N"` or `"NS"`.
+    pub fn label(self) -> String {
+        match self {
+            ParDeclarer::Seat(seat) => seat.to_char().to_string(),
+            ParDeclarer::Both(side) => side.label().to_string(),
+        }
+    }
+
+    /// The declaring side, whichever form this takes.
+    pub fn side(self) -> Side {
+        match self {
+            ParDeclarer::Seat(Direction::North | Direction::South) => Side::NS,
+            ParDeclarer::Seat(_) => Side::EW,
+            ParDeclarer::Both(side) => side,
+        }
+    }
+}
+
 /// The par contract.
 #[derive(Debug, Clone, Copy)]
 pub struct ParContract {
@@ -348,6 +390,8 @@ pub struct ParContract {
     /// DD tricks the side takes (result relative to the contract may be negative
     /// for a sacrifice).
     pub tricks: u8,
+    /// The seat or side the contract is named for; see [`ParDeclarer`].
+    pub declarer: ParDeclarer,
 }
 
 impl ParContract {
@@ -359,7 +403,7 @@ impl ParContract {
     pub fn is_sacrifice(&self) -> bool {
         self.relative() < 0
     }
-    /// e.g. "NS 6S=", "EW 4SX-1".
+    /// e.g. "NS 6S=", "EW 4SX-1", "N 3N=".
     pub fn describe(&self) -> String {
         let rel = self.relative();
         let x = if self.is_sacrifice() { "X" } else { "" };
@@ -370,7 +414,7 @@ impl ParContract {
         };
         format!(
             "{} {}{}{}{}",
-            self.side.label(),
+            self.declarer.label(),
             self.level,
             self.strain.to_char(),
             x,
@@ -380,19 +424,30 @@ impl ParContract {
 }
 
 /// Result of a par calculation.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct ParResult {
     /// Par score from North-South's perspective (positive = NS benefits).
     pub score_ns: i32,
-    /// The par contract, or `None` for a passed-out deal (par zero).
-    pub contract: Option<ParContract>,
+    /// Every contract tied at the par score, cheapest first — one per strain,
+    /// at the lowest level in that strain that reaches par. Empty for a
+    /// passed-out deal (par zero).
+    ///
+    /// A single contract is the common case; two are not rare, and Bridge
+    /// Composer writes all of them. This was an `Option<ParContract>`, which
+    /// could not represent a tie at all: board 1 of `fixtures/bridge-composer`
+    /// is `EW 2SX-1; EW 3CX-1`, two sacrifices that cost the same 100.
+    pub contracts: Vec<ParContract>,
 }
 
 impl ParResult {
     /// Bridge-Composer-style `OptimumScore`: labeled by the par contract's
     /// declaring side, signed to that side (e.g. "NS 980", "EW -500", "0").
+    ///
+    /// Every tied contract belongs to the same side — they all score the same
+    /// number, and it is signed to whoever declares — so the first one names
+    /// the side for all of them.
     pub fn optimum_score(&self) -> String {
-        match self.contract {
+        match self.contracts.first() {
             None => "0".to_string(),
             Some(c) => {
                 let to_side = if c.side == Side::NS {
@@ -403,6 +458,22 @@ impl ParResult {
                 format!("{} {}", c.side.label(), to_side)
             }
         }
+    }
+
+    /// Bridge-Composer-style `ParContract`: every tied contract, cheapest
+    /// first, separated by `"; "` (e.g. `"NS 4H=; NS 4S="`). `None` for a
+    /// passed-out deal, which carries no contract to name.
+    pub fn par_contract(&self) -> Option<String> {
+        if self.contracts.is_empty() {
+            return None;
+        }
+        Some(
+            self.contracts
+                .iter()
+                .map(ParContract::describe)
+                .collect::<Vec<_>>()
+                .join("; "),
+        )
     }
 }
 
@@ -422,6 +493,63 @@ fn score_to_side(level: u8, strain: Strain, tricks: u8, vul: bool) -> i32 {
         Doubled::Doubled
     };
     Contract::new(level, strain, doubled, 'N').score(rel, vul)
+}
+
+/// The contract `side` reaches by bidding `level`-`strain`, named for the seat
+/// or seats that can actually take the tricks.
+///
+/// The trick count is the side's best, so when the partners differ only one of
+/// them can declare it: Bridge Composer writes `N 3N=` rather than `NS 3N=`
+/// where North makes nine at notrump and South eight.
+fn contract_at(dd: &DdTricks, side: Side, level: u8, strain: Strain) -> ParContract {
+    let (first, second) = side.seats();
+    let (a, b) = (dd.get(first, strain), dd.get(second, strain));
+    let declarer = match a.cmp(&b) {
+        std::cmp::Ordering::Equal => ParDeclarer::Both(side),
+        std::cmp::Ordering::Greater => ParDeclarer::Seat(first),
+        std::cmp::Ordering::Less => ParDeclarer::Seat(second),
+    };
+    ParContract {
+        side,
+        level,
+        strain,
+        tricks: a.max(b),
+        declarer,
+    }
+}
+
+/// Every contract tied at the par score, cheapest first.
+///
+/// One per strain — the lowest level in that strain reaching par, since a
+/// higher one in the same strain is the same contract bid dearer — from
+/// `min_rank`, the rank the outbidding in [`par`] came to rest at. Contracts
+/// below that rank are not par contracts even when they score the same: board 4
+/// of `fixtures/bridge-composer` is `EW 1D+3`, and `1C+3` scores the same 130
+/// but is never reached, which is what Bridge Composer writes too.
+fn tied_contracts(
+    dd: &DdTricks,
+    side: Side,
+    min_rank: i32,
+    score_ns: i32,
+    vul: bool,
+) -> Vec<ParContract> {
+    let mut tied: Vec<ParContract> = Vec::new();
+    for strain in STRAINS {
+        let tricks = dd.side_max(side, strain);
+        for level in 1..=7u8 {
+            if rank(level, strain) < min_rank {
+                continue;
+            }
+            let s = score_to_side(level, strain, tricks, vul);
+            let s_ns = if side == Side::NS { s } else { -s };
+            if s_ns == score_ns {
+                tied.push(contract_at(dd, side, level, strain));
+                break;
+            }
+        }
+    }
+    tied.sort_by_key(|c| rank(c.level, c.strain));
+    tied
 }
 
 /// Compute par from a DD table and each side's vulnerability.
@@ -457,16 +585,7 @@ pub fn par(dd: &DdTricks, vul_ns: bool, vul_ew: bool) -> ParResult {
                         s_ns < cur_ns
                     };
                     if improves && best.is_none_or(|(br, _, _)| r < br) {
-                        best = Some((
-                            r,
-                            s_ns,
-                            ParContract {
-                                side,
-                                level,
-                                strain,
-                                tricks,
-                            },
-                        ));
+                        best = Some((r, s_ns, contract_at(dd, side, level, strain)));
                     }
                 }
             }
@@ -481,9 +600,17 @@ pub fn par(dd: &DdTricks, vul_ns: bool, vul_ew: bool) -> ParResult {
         }
     }
 
+    // The auction has come to rest. Par is `cur_ns` at `cur_rank`, and the
+    // contract found is the cheapest that reaches it — but not necessarily the
+    // only one, so collect the rest of the tie.
+    let contracts = match contract {
+        None => Vec::new(),
+        Some(c) => tied_contracts(dd, c.side, cur_rank, cur_ns, vul_of(c.side)),
+    };
+
     ParResult {
         score_ns: cur_ns,
-        contract,
+        contracts,
     }
 }
 
@@ -502,12 +629,11 @@ mod tests {
         }
     }
 
-    /// Par computed from our own DD solve must reproduce Bridge Composer's
-    /// `OptimumScore` on real tournament boards (oracle: LBC-2026, hand records).
-    #[test]
-    fn par_matches_bridge_composer_optimum_score() {
-        // (deal, vulnerable, expected OptimumScore, their ParContract)
-        let cases = [
+    /// Boards Bridge Composer has scored, with what it wrote:
+    /// `(deal, vulnerable, its OptimumScore, its ParContract)`. Oracle:
+    /// LBC-2026 hand records.
+    fn oracle() -> [(&'static str, &'static str, &'static str, &'static str); 14] {
+        [
             (
                 "N:AQT94.T53.KQ8.T9 63.J98.J53.K8654 K72.6.AT9762.AJ7 J85.AKQ742.4.Q32",
                 "None",
@@ -592,9 +718,14 @@ mod tests {
                 "EW -300",
                 "EW 4CX-2; EW 4HX-2",
             ),
-        ];
+        ]
+    }
 
-        for (deal_str, v, expected, their_contract) in cases {
+    /// Par computed from our own DD solve must reproduce Bridge Composer's
+    /// `OptimumScore` on real tournament boards.
+    #[test]
+    fn par_matches_bridge_composer_optimum_score() {
+        for (deal_str, v, expected, their_contract) in oracle() {
             let deal = Deal::from_pbn(deal_str).expect("deal parses");
             let (vn, ve) = vul(v);
             let result = par(&solve_dd_table(&deal), vn, ve);
@@ -602,7 +733,26 @@ mod tests {
                 result.optimum_score(),
                 expected,
                 "deal {deal_str} (their par {their_contract}); computed contract {:?}",
-                result.contract.map(|c| c.describe()),
+                result.par_contract(),
+            );
+        }
+    }
+
+    /// The contracts themselves, against the same oracle. Every one of these
+    /// strings was read off a Bridge Composer file; three of them are ties it
+    /// lists in full, and one names a single seat because only that partner can
+    /// take the tricks. We wrote one contract, always labelled by side, until
+    /// `fixtures/bridge-composer` showed both to be wrong.
+    #[test]
+    fn par_contract_matches_bridge_composer() {
+        for (deal_str, v, _expected, their_contract) in oracle() {
+            let deal = Deal::from_pbn(deal_str).expect("deal parses");
+            let (vn, ve) = vul(v);
+            let result = par(&solve_dd_table(&deal), vn, ve);
+            assert_eq!(
+                result.par_contract().as_deref(),
+                Some(their_contract),
+                "deal {deal_str}"
             );
         }
     }
@@ -614,6 +764,7 @@ mod tests {
         }; // nobody can take 7 tricks anywhere
         let r = par(&dd, false, false);
         assert_eq!(r.optimum_score(), "0");
-        assert!(r.contract.is_none());
+        assert!(r.contracts.is_empty());
+        assert_eq!(r.par_contract(), None);
     }
 }

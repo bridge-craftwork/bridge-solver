@@ -64,7 +64,7 @@ dependencies = [
 [[package]]
 name = "bridge-encodings"
 version = "0.1.0"
-source = "git+https://github.com/bridge-craftwork/bridge-encodings#e3826fa47f3db95c7268737da49ed50719398ee8"
+source = "git+https://github.com/bridge-craftwork/bridge-encodings#e8801d71b9ef6340adfccd9c945f7acafcd73b71"
 dependencies = [
  "bridge-types",
  "thiserror",

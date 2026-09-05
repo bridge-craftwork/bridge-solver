@@ -65,8 +65,10 @@ above `[Auction]` until the change that added these fixtures.
 
 **The `Result` column width.** Bridge Composer writes
 `Result\1R` on a board where no declarer takes ten tricks and `Result\2R` where
-one does — four boards of each here, no exceptions. `bridge-encodings`'
-`optimum_result_table_header(&DdTable)` is that rule.
+one does — four boards of each here, no exceptions — and pads the twenty data
+rows to the width it declared (`N NT 5` against `N NT  9`).
+`bridge-encodings`' `optimum_result_table_header(&DdTable)` and
+`optimum_result_table_rows(&DdTable)` are that rule, from one shared width.
 
 **Two independent solvers agree.** `pbn-order-test.pbn`'s double-dummy values
 were produced by this solver. Bridge Composer *recomputed* them rather than
@@ -103,10 +105,12 @@ best end-to-end check available, but perfect equality is not the goal:
 - It adds a `%`-directive preamble of its own settings, a leading template
   board, and a `[BCFlags]` tag to every board.
 - It rewrites `; comment` lines as `{ ... }` commentary, and moves them.
-- It narrows the table's **data rows** along with the header (`N NT 5` rather
-  than `N NT  5`). `bridge_encodings::optimum_result_table_rows` still writes
-  the rows two-wide; tracked upstream.
+- It moves a *section* the board already carried: board 8's `AAATable`, written
+  above the auction, comes back below it. We place what we write and leave the
+  rest where it was.
 
-What must match, and does: the `DoubleDummyTricks`, `OptimumScore` and
-`ParContract` values; their placement relative to `[Auction]` and `[Play]`;
-the `OptimumResultTable` header width; and the twenty cells.
+What must match, and does — byte for byte, on all eight boards, checked by
+`the_bridge_composer_fixture_round_trips`: the `DoubleDummyTricks`,
+`OptimumScore` and `ParContract` values; their placement relative to
+`[Auction]` and `[Play]`; and the whole `OptimumResultTable`, header width and
+all twenty rows.
