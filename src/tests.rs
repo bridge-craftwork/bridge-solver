@@ -1039,7 +1039,7 @@ fn test_hands_parsing() {
 /// what else the machine is doing, and a speedup threshold would be flaky.
 #[cfg(test)]
 mod concurrency {
-    use crate::{get_node_count, solve_dd_strain, solve_dd_table, STRAINS};
+    use crate::{get_node_count, solve_dd_strain, solve_dd_table, DdTable, DECLARERS, STRAINS};
     use bridge_types::Deal;
 
     const DEALS: &[&str] = &[
@@ -1056,11 +1056,11 @@ mod concurrency {
             .collect()
     }
 
-    fn solve_all_concurrently(deals: &[Deal]) -> Vec<[[u8; 5]; 4]> {
+    fn solve_all_concurrently(deals: &[Deal]) -> Vec<DdTable> {
         std::thread::scope(|scope| {
             let handles: Vec<_> = deals
                 .iter()
-                .map(|deal| scope.spawn(move || solve_dd_table(deal).tricks))
+                .map(|deal| scope.spawn(move || solve_dd_table(deal)))
                 .collect();
             handles
                 .into_iter()
@@ -1072,7 +1072,7 @@ mod concurrency {
     #[test]
     fn concurrent_solves_agree_with_serial() {
         let deals = deals();
-        let serial: Vec<_> = deals.iter().map(|d| solve_dd_table(d).tricks).collect();
+        let serial: Vec<_> = deals.iter().map(solve_dd_table).collect();
         assert_eq!(serial, solve_all_concurrently(&deals));
     }
 
@@ -1096,9 +1096,9 @@ mod concurrency {
     #[test]
     fn per_strain_solves_rebuild_the_serial_table() {
         let deals = deals();
-        let serial: Vec<_> = deals.iter().map(|d| solve_dd_table(d).tricks).collect();
+        let serial: Vec<_> = deals.iter().map(solve_dd_table).collect();
 
-        let split: Vec<[[u8; 5]; 4]> = std::thread::scope(|scope| {
+        let split: Vec<DdTable> = std::thread::scope(|scope| {
             // Every handle is spawned before any is joined, so the strains of
             // one deal really do overlap -- the case solving a deal per thread
             // could never produce.
@@ -1114,14 +1114,17 @@ mod concurrency {
             spawned
                 .into_iter()
                 .map(|columns| {
-                    let mut tricks = [[0u8; 5]; 4];
-                    for (strain, handle) in columns.into_iter().enumerate() {
+                    let mut table = DdTable::new();
+                    for (i, handle) in columns.into_iter().enumerate() {
                         let column = handle.join().expect("solver thread panicked");
-                        for (dir, row) in tricks.iter_mut().enumerate() {
-                            row[strain] = column[dir];
+                        // `solve_dd_strain` returns its four cells in
+                        // `DECLARERS` order; name the seat rather than trusting
+                        // two layouts to line up.
+                        for (declarer, cell) in DECLARERS.iter().zip(column) {
+                            table.set(*declarer, STRAINS[i], cell);
                         }
                     }
-                    tricks
+                    table
                 })
                 .collect()
         });

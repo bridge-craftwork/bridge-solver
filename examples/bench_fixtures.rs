@@ -26,6 +26,7 @@
 use std::collections::HashMap;
 use std::time::Instant;
 
+use bridge_encodings::pbn::dd_table_to_pbn;
 use bridge_solver::analyse_play::{node_alternatives, prefix_keys, running_trace, PlayInput};
 use bridge_solver::{solve_dd_table, Hands};
 use bridge_types::Deal;
@@ -103,26 +104,6 @@ fn random_deal(rng: &mut Rng) -> String {
     out
 }
 
-/// The 20-cell table as BSOL's `ddtricks` string: seat-major over N,S,E,W and
-/// strain over NT,S,H,D,C, with 10..13 written as `a`..`d`.
-fn dd_tricks_string(tricks: &[[u8; 5]; 4]) -> String {
-    // Rows come back in N,E,S,W order and columns in C,D,H,S,NT order.
-    let seat_row = [0usize, 2, 1, 3];
-    let strain_col = [4usize, 3, 2, 1, 0];
-    let mut out = String::new();
-    for &row in &seat_row {
-        for &col in &strain_col {
-            let n = tricks[row][col];
-            out.push(if n < 10 {
-                (b'0' + n) as char
-            } else {
-                (b'a' + n - 10) as char
-            });
-        }
-    }
-    out
-}
-
 fn percentile(sorted: &[f64], p: f64) -> f64 {
     if sorted.is_empty() {
         return 0.0;
@@ -147,7 +128,7 @@ fn survey(count: usize) {
         let started = Instant::now();
         let table = solve_dd_table(&deal);
         let ms = started.elapsed().as_secs_f64() * 1000.0;
-        rows.push((ms, dealstr, dd_tricks_string(&table.tricks)));
+        rows.push((ms, dealstr, dd_table_to_pbn(&table)));
         if (i + 1) % 25 == 0 {
             eprintln!("  {}/{count}", i + 1);
         }
@@ -199,7 +180,7 @@ fn units() {
     let started = Instant::now();
     let table = solve_dd_table(&deal);
     let table_ms = started.elapsed().as_secs_f64() * 1000.0;
-    let ddtricks = dd_tricks_string(&table.tricks);
+    let ddtricks = dd_table_to_pbn(&table);
     println!("dd_table              {table_ms:>8.1} ms   ddtricks {ddtricks}");
     assert_eq!(
         ddtricks, "45544465449789987899",
