@@ -68,5 +68,38 @@ pub use types::{Seat, Suit, NOTRUMP, NUM_RANKS, NUM_SEATS, NUM_SUITS, TOTAL_CARD
 pub use types::{CLUB, DIAMOND, HEART, SPADE};
 pub use types::{EAST, NORTH, SOUTH, WEST};
 
+/// Number of threads the command-line tools use when not told otherwise: every
+/// logical processor on the machine, or 1 where that cannot be determined.
+///
+/// On Windows this counts all processor groups, which
+/// `std::thread::available_parallelism` does not: it reports one group, so at
+/// most 64 threads.
+#[cfg(feature = "cli")]
+pub fn default_threads() -> usize {
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::System::Threading::{
+            GetActiveProcessorCount, ALL_PROCESSOR_GROUPS,
+        };
+        // SAFETY: takes a plain integer and touches no caller memory. It reports
+        // failure by returning 0, which falls through to the std answer.
+        let all_groups = unsafe { GetActiveProcessorCount(ALL_PROCESSOR_GROUPS) };
+        if all_groups > 0 {
+            return all_groups as usize;
+        }
+    }
+    std::thread::available_parallelism().map_or(1, |n| n.get())
+}
+
 #[cfg(test)]
 mod tests;
+
+#[cfg(all(test, feature = "cli"))]
+mod default_threads_tests {
+    #[test]
+    fn default_threads_is_at_least_the_std_answer() {
+        // Windows may report more than std (other processor groups), never fewer.
+        let std_answer = std::thread::available_parallelism().map_or(1, |n| n.get());
+        assert!(super::default_threads() >= std_answer);
+    }
+}
