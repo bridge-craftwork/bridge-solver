@@ -10,7 +10,7 @@ categories = ["games", "algorithms"]
 
 [features]
 default = []
-cli = ["clap"]
+cli = ["clap", "dep:windows-sys"]
 
 # Double-dummy cardplay analysis (src/analyse_play.rs): per-card costs and
 # alternatives. Optional so callers wanting only a DD result do not pull serde
@@ -85,6 +85,11 @@ serde_json = { version = "1", optional = true }
 # Bench-only, for getrusage: CPU time is what separates "we used more cores"
 # from "we got faster per core", and std has no API for it.
 libc = { version = "0.2", optional = true }
+
+[target.'cfg(windows)'.dependencies]
+# CLI-only, for default_threads: std reports one processor group of at most 64
+# threads, and has no API for the whole machine.
+windows-sys = { version = "0.61", features = ["Win32_System_Threading"], optional = true }
 
 [profile.release]
 lto = "fat"

@@ -369,9 +369,7 @@ fn machine() -> String {
 
 /// Logical CPU count, defaulting to 1 where it cannot be determined.
 fn logical_cpus() -> usize {
-    std::thread::available_parallelism()
-        .map(|n| n.get())
-        .unwrap_or(1)
+    bridge_solver::default_threads()
 }
 
 // ---------------------------------------------------------------------------
