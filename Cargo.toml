@@ -13,7 +13,8 @@ default = []
 cli = ["clap", "play-analysis"]
 
 # Double-dummy cardplay analysis (src/analyse_play.rs): per-card costs and
-# alternatives. Optional so callers wanting only a DD result do not pull serde
+# alternatives, and annotating PBN files (src/annotate.rs), which the CLI is a
+# front end for. Optional so callers wanting only a DD result do not pull serde
 # and sha2. Enabled by the HTTP service and the WebAssembly build.
 play-analysis = ["serde", "sha2"]
 

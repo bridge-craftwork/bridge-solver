@@ -26,6 +26,8 @@
 
 #[cfg(feature = "play-analysis")]
 pub mod analyse_play;
+#[cfg(feature = "play-analysis")]
+pub mod annotate;
 mod bridge_solver;
 mod cache;
 pub mod cards;
